@@ -1,4 +1,6 @@
 import {
+  authenticatePortalToken,
+  authenticatePortalTokenForRevocation,
   authenticateUserTokenForRevocation,
   authenticateRequest,
   requestWithAdminGrantVersion,
@@ -11,6 +13,15 @@ import { codeProxyRequestBodyBytes, isIsolatedCodeRequest } from "./code-origin"
 import { cookieValue, portalSessionCookieName } from "./cookies";
 import { bearerToken, json, pathParts } from "./http";
 import { InvalidOrgLabelError, orgKeyForLabel } from "./org-identity";
+import {
+  coordinatorOriginStatus,
+  deviceTokenRouteAllowed,
+  isDeviceManagementRequest,
+  isDeviceTokenRequest,
+  isPairingExchangeRequest,
+  isPairingGrantRequest,
+  pairingRequestBodyBytes,
+} from "./pairing";
 import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";
@@ -73,6 +84,34 @@ export async function prepareCoordinatorRequest(
       authenticated: false,
     };
   }
+  const deviceTokenRequest =
+    isDeviceTokenRequest(request) && !configuredCoordinatorBearer(request, env);
+  if (isPairingExchangeRequest(request) || deviceTokenRequest) {
+    const origin = coordinatorOriginStatus(request, env, true);
+    if (origin === "unavailable") {
+      return {
+        response: json({ error: "pairing_unavailable" }, { status: 503 }),
+        authenticated: false,
+      };
+    }
+    if (origin === "forbidden") {
+      return {
+        response: json({ error: "coordinator_origin_forbidden" }, { status: 403 }),
+        authenticated: false,
+      };
+    }
+    if (deviceTokenRequest && !deviceTokenRouteAllowed(request)) {
+      return {
+        response: json({ error: "device_scope_forbidden" }, { status: 403 }),
+        authenticated: false,
+      };
+    }
+    return {
+      request: requestWithoutCoordinatorAuthContext(request),
+      authenticated: false,
+      ...(isPairingExchangeRequest(request) ? { bodyLimit: pairingRequestBodyBytes } : {}),
+    };
+  }
   if (isolatedCode) {
     return {
       request: requestWithoutTrustedHeaders(request),
@@ -108,7 +147,9 @@ export async function prepareCoordinatorRequest(
     };
   }
   const portal = url.pathname.startsWith("/portal");
-  if (portal && !portalCookieRequestIntentAllowed(request, env, url)) {
+  const browserSessionRequest =
+    isPairingGrantRequest(request) || isDeviceManagementRequest(request);
+  if ((portal || browserSessionRequest) && !portalCookieRequestIntentAllowed(request, env, url)) {
     return {
       response: json({ error: "portal_request_origin_forbidden" }, { status: 403 }),
       authenticated: false,
@@ -123,17 +164,30 @@ export async function prepareCoordinatorRequest(
       authenticated: false,
     };
   }
-  const authRequest = portal ? requestWithPortalCookie(request) : request;
+  const authRequest = portal || browserSessionRequest ? requestWithPortalCookie(request) : request;
+  const portalCookieToken =
+    (portal || browserSessionRequest) && !request.headers.has("authorization")
+      ? cookieValue(request.headers.get("cookie") ?? "", portalSessionCookieName)
+      : undefined;
   const portalLogoutToken =
     portal &&
     request.method === "POST" &&
     url.pathname === "/portal/logout" &&
     !request.headers.has("authorization")
-      ? cookieValue(request.headers.get("cookie") ?? "", portalSessionCookieName)
+      ? portalCookieToken
       : undefined;
-  const auth = portalLogoutToken
-    ? await authenticateUserTokenForRevocation(portalLogoutToken, env)
-    : await authenticateRequest(authRequest, env, authContext);
+  let auth: AuthContext | undefined;
+  if (portalLogoutToken) {
+    auth =
+      (await authenticatePortalTokenForRevocation(portalLogoutToken, env)) ??
+      (await authenticateUserTokenForRevocation(portalLogoutToken, env));
+  } else if (portalCookieToken) {
+    auth =
+      (await authenticatePortalToken(portalCookieToken, env, authContext)) ??
+      (await authenticateRequest(authRequest, env, authContext));
+  } else {
+    auth = await authenticateRequest(authRequest, env, authContext);
+  }
   if (!auth?.authorized) {
     if (portal && request.method === "GET" && request.headers.get("upgrade") !== "websocket") {
       const login = new URL("/portal/login", url.origin);
@@ -297,6 +351,19 @@ function runtimeAdapterServiceAuth(
     owner: env.CRABBOX_RUNTIME_ADAPTER_OWNER || "service@openclaw.org",
     org: env.CRABBOX_RUNTIME_ADAPTER_ORG || env.CRABBOX_DEFAULT_ORG || "openclaw",
   };
+}
+
+function configuredCoordinatorBearer(
+  request: Request,
+  env: Pick<Env, "CRABBOX_ADMIN_TOKEN" | "CRABBOX_SHARED_TOKEN" | "CRABBOX_RUNTIME_ADAPTER_TOKEN">,
+): boolean {
+  const token = bearerToken(request);
+  return Boolean(
+    token &&
+    [env.CRABBOX_ADMIN_TOKEN, env.CRABBOX_SHARED_TOKEN, env.CRABBOX_RUNTIME_ADAPTER_TOKEN].some(
+      (configured) => configured && timingSafeEqual(token, configured),
+    ),
+  );
 }
 
 async function canonicalPortalRedirect(
