@@ -153,6 +153,26 @@ func TestRunRecorderDefersCreateWhenCoordinatorRequiresLeaseID(t *testing.T) {
 	if text := stderr.String(); strings.Contains(text, "warning:") || !strings.Contains(text, "recording run run_123") {
 		t.Fatalf("stderr=%q", text)
 	}
+	selection := runEnvSelection{Inline: map[string]string{}, Effective: map[string]string{}}
+	applyRunExecutionMetadata(&selection, "cbx_abcdef123456", rec.runID, "blue-lobster")
+	if selection.Effective[runEnvRunID] != "run_123" {
+		t.Fatalf("execution metadata run ID=%q, want coordinator-issued run_123", selection.Effective[runEnvRunID])
+	}
+}
+
+func TestRunRecorderHistoryAvailabilityRequiresRecordedRunID(t *testing.T) {
+	if !((*runRecorder)(nil)).historyIsUnavailable() {
+		t.Fatal("nil recorder reported history available")
+	}
+	if !(&runRecorder{}).historyIsUnavailable() {
+		t.Fatal("local-only recorder reported history available")
+	}
+	if (&runRecorder{runID: "run_123"}).historyIsUnavailable() {
+		t.Fatal("recorded coordinator run reported history unavailable")
+	}
+	if !(&runRecorder{runID: "run_123", historyUnavailable: true}).historyIsUnavailable() {
+		t.Fatal("failed coordinator history reported available")
+	}
 }
 
 func TestRunRecorderDefersCreateForExplicitLeaseRuns(t *testing.T) {

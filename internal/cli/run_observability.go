@@ -71,20 +71,16 @@ func envNameLooksSecret(name string) bool {
 	return false
 }
 
-func printRunContextSummary(w io.Writer, coord *CoordinatorClient, cfg Config, server Server, target SSHTarget, leaseID, workdir string, hydrated bool, actionsURL string, recorder *runRecorder) {
+func printRunContextSummary(w io.Writer, coord *CoordinatorClient, cfg Config, server Server, target SSHTarget, leaseID, runID, historyRunID, workdir string, hydrated bool, actionsURL string) {
 	if w == nil {
 		return
-	}
-	runID := ""
-	if recorder != nil {
-		runID = recorder.runID
 	}
 	workspace := "raw"
 	if hydrated {
 		workspace = "actions-hydrated"
 	}
 	fmt.Fprintln(w, "run context:")
-	fmt.Fprintf(w, "  run=%s portal=%s logs=%s\n", blank(runID, "-"), runPortalURL(coord, runID), runLogsURL(coord, runID))
+	fmt.Fprintf(w, "  run=%s portal=%s logs=%s\n", blank(runID, "-"), runPortalURL(coord, historyRunID), runLogsURL(coord, historyRunID))
 	fmt.Fprintf(w, "  lease=%s slug=%s provider=%s target=%s type=%s\n", leaseID, blank(serverSlug(server), "-"), cfg.Provider, blank(target.TargetOS, cfg.TargetOS), server.ServerType.Name)
 	fmt.Fprintf(w, "  ssh=%s@%s:%s ip=%s\n", redactedSSHUser(cfg, server, target), target.Host, target.Port, blank(server.PublicNet.IPv4.IP, target.Host))
 	fmt.Fprintf(w, "  workdir=%s workspace=%s actions=%s\n", workdir, workspace, blank(actionsURL, "-"))
