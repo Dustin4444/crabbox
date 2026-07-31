@@ -14,7 +14,12 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(testutil.RunWithIsolatedUserDirs(m))
+}
 
 type recordingRunner struct {
 	calls     []core.LocalCommandRequest
@@ -531,6 +536,7 @@ func TestServerFromInstanceOverridesStaleReadyState(t *testing.T) {
 }
 
 func TestCreateVMUsesDifferencingDisk(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 		errors:    map[string]error{},
@@ -581,6 +587,7 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 // Leases must not copy or resize the template: the differencing disk avoids the
 // multi-GB per-lease copy and inherits the template's virtual size.
 func TestCreateVMDoesNotCopyOrResizeTemplate(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 		errors:    map[string]error{},
@@ -604,6 +611,7 @@ func TestCreateVMDoesNotCopyOrResizeTemplate(t *testing.T) {
 }
 
 func TestCreateVMPlacesVMFilesUnderHypervVMDir(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 		errors:    map[string]error{},
@@ -633,6 +641,7 @@ func TestCreateVMPlacesVMFilesUnderHypervVMDir(t *testing.T) {
 // BEFORE the VM is created/booted, keep the password out of host command lines,
 // and leave the template (ParentPath) untouched.
 func TestCreateVMInitPasswordInjectsRunOnceBeforeBoot(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)
 	b.cfg.HyperV.InitPassword = true
@@ -701,6 +710,7 @@ func TestHyperVInitHiveNameIsUniqueAndSafe(t *testing.T) {
 }
 
 func TestCreateVMNoInitPasswordByDefault(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)
 	cfg := b.configForRun()
@@ -760,6 +770,7 @@ func TestAcquireRejectsUnsafeSSHUser(t *testing.T) {
 }
 
 func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	oldOS := hypervHostOS
@@ -829,6 +840,7 @@ func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
 }
 
 func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
@@ -872,6 +884,7 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 }
 
 func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
@@ -1566,6 +1579,7 @@ func TestEnsureOpenSSHPasswordNotInArgs(t *testing.T) {
 }
 
 func TestResolveInstancePropagatesQueryError(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 		errors:    map[string]error{},
@@ -1618,6 +1632,7 @@ func TestRemoveVMQueriesActualVHDPaths(t *testing.T) {
 }
 
 func TestCreateVMDisablesAutomaticCheckpoints(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)
 	cfg := b.configForRun()
@@ -1998,6 +2013,7 @@ func TestInvokeInGuestAbortsOnContextCancel(t *testing.T) {
 
 // The readiness probe must precede the SSH lockdown.
 func TestAcquireWaitsForGuestReadyBeforeLockdown(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	oldOS := hypervHostOS

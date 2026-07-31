@@ -676,6 +676,7 @@ func TestCoordinatorResolveFallsBackToAdminToken(t *testing.T) {
 }
 
 func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
+	isolateTestUserDirs(t)
 	adminReleased := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/leases/cbx_admin/release" && r.URL.Path != "/v1/leases/cbx_admin/release" {

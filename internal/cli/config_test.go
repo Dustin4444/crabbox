@@ -11,11 +11,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/testutil"
 	"gopkg.in/yaml.v3"
 )
 
+func isolateTestUserDirs(t *testing.T) testutil.UserDirs {
+	t.Helper()
+	return testutil.IsolateUserDirs(t)
+}
+
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
+	isolateTestUserDirs(t)
 	for _, key := range []string{
 		"CRABBOX_COORDINATOR",
 		"CRABBOX_COORDINATOR_MODE",
