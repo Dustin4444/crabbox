@@ -19,6 +19,7 @@
 - Made AWS developer-image publication prove the exact promoted AMI was selected, and skip redundant base-package APT bootstrap on verified prebaked Linux images.
 - Bounded device membership revalidation to one GitHub revalidation per token per minute while preserving immediate token revocation, fail-closed errors, and a distinct re-pairing response for expired OAuth grants.
 - Kept ready-pool reconciliation rollout-compatible with older CLIs and coordinators, preserved unexpired in-flight claims across policy changes, and required actual ready capacity for `pool ensure` success.
+- Authorized RunPod SSH access with the configured public key while rejecting missing, empty, or invalid key files before creating a paid pod. Thanks @morluto.
 
 ## 0.40.1 - 2026-07-23
 

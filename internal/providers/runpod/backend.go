@@ -89,6 +89,10 @@ func (b *runpodLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s image=%s instance=%s disk=%dGB keep=%v\n",
 		providerName, leaseID, slug, name, cfg.Runpod.Image, cfg.Runpod.InstanceID, cfg.Runpod.DiskGB, req.Keep)
 
+	publicKey, err := publicKeyFor(cfg.SSHKey)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
 	pod, err := client.DeployPod(ctx, runpodDeployInput{
 		Name:              name,
 		ImageName:         cfg.Runpod.Image,
@@ -97,7 +101,7 @@ func (b *runpodLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 		TemplateID:        cfg.Runpod.TemplateID,
 		ContainerDiskInGb: cfg.Runpod.DiskGB,
 		Ports:             "22/tcp",
-		StartSSH:          true,
+		PublicKey:         publicKey,
 	})
 	if err != nil {
 		return LeaseTarget{}, exit(1, "runpod create pod failed: %v", err)
