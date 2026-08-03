@@ -1147,6 +1147,12 @@ export class FleetCoordinator {
       if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
         return await this.adminProviderIdentity(request);
       }
+      if (
+        method === "POST" &&
+        parts.join("/") === "v1/admin/providers/daytona/snapshot-bootstrap"
+      ) {
+        return await this.adminDaytonaSnapshotBootstrap(request);
+      }
       if (method === "POST" && parts.join("/") === "v1/admin/tailscale-preflight") {
         return await this.adminTailscalePreflight();
       }
@@ -11912,6 +11918,31 @@ export class FleetCoordinator {
     return await this.adminAWSIdentity(request);
   }
 
+  private async adminDaytonaSnapshotBootstrap(request: Request): Promise<Response> {
+    const input = await readJson<{ name?: unknown; diskGiB?: unknown }>(request);
+    const name = typeof input.name === "string" ? input.name.trim() : "";
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/.test(name)) {
+      return json(
+        {
+          error: "invalid_snapshot_name",
+          message: "name must be 1-63 letters, numbers, dots, underscores, or hyphens",
+        },
+        { status: 400 },
+      );
+    }
+    if (input.diskGiB !== 10) {
+      return json(
+        {
+          error: "invalid_snapshot_disk",
+          message: "temporary Daytona snapshot bootstrap requires diskGiB=10",
+        },
+        { status: 400 },
+      );
+    }
+    const result = await new DaytonaClient(this.env).bootstrapSnapshot(name, input.diskGiB);
+    return json({ snapshot: result });
+  }
+
   private async adminTailscalePreflight(): Promise<Response> {
     return json({ tailscale: await tailscalePreflight(this.env) });
   }
@@ -18293,6 +18324,9 @@ function isAdminRoute(method: string, parts: string[]): boolean {
     return true;
   }
   if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
+    return true;
+  }
+  if (method === "POST" && parts.join("/") === "v1/admin/providers/daytona/snapshot-bootstrap") {
     return true;
   }
   if (method === "POST" && parts.join("/") === "v1/admin/tailscale-preflight") {

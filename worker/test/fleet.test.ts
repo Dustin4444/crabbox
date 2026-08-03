@@ -14084,6 +14084,36 @@ describe("fleet lease identity and idle", () => {
     expect(text).not.toContain("tskey-preflight-secret");
   });
 
+  it("restricts Daytona snapshot bootstrap to admin requests and a 10 GiB target", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        DAYTONA_CRABBOX_KEY: "daytona-live-secret",
+        CRABBOX_DAYTONA_API_URL: "https://daytona.example/api",
+      },
+    );
+
+    const forbidden = await fleet.fetch(
+      request("POST", "/v1/admin/providers/daytona/snapshot-bootstrap", {
+        body: { name: "crabbox-ready-10g", diskGiB: 10 },
+      }),
+    );
+    expect(forbidden.status).toBe(403);
+
+    const invalid = await fleet.fetch(
+      request("POST", "/v1/admin/providers/daytona/snapshot-bootstrap", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { name: "crabbox-ready-10g", diskGiB: 8 },
+      }),
+    );
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toMatchObject({ error: "invalid_snapshot_disk" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("does not trust client-posted Tailscale device IDs for privileged cleanup", async () => {
     const storage = new MemoryStorage();
     const cleanupOrder: string[] = [];
