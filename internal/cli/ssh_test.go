@@ -864,6 +864,41 @@ func TestShouldRetrySSHPortOnlyForTransportExit(t *testing.T) {
 	}
 }
 
+func TestRunIdempotentSSHCombinedOutputDoesNotRetryRemoteFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	callsPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+printf 'call\n' >> "$CRABBOX_FAKE_SSH_CALLS"
+printf 'remote failed\n' >&2
+exit 7
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+
+	out, err := runIdempotentSSHCombinedOutput(context.Background(), SSHTarget{
+		User: "crabbox",
+		Host: "gateway.example",
+		Port: "22",
+	}, "true", 0)
+	if err == nil || !strings.Contains(out, "remote failed") {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	calls, readErr := os.ReadFile(callsPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := strings.Count(string(calls), "call\n"); got != 1 {
+		t.Fatalf("ssh calls=%d want 1", got)
+	}
+}
+
 func TestRunSSHStreamRetriesFallbackPorts(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")
@@ -1684,13 +1719,15 @@ func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+	remote := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
 		BaseRef:     "main",
 		BaseSHA:     "abc123",
 		Fingerprint: "fp123",
-	}))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("remote finalize failed: %v\n%s", err, out)
+	})
+	for attempt := 1; attempt <= 2; attempt++ {
+		if out, err := exec.Command("bash", "-lc", remote).CombinedOutput(); err != nil {
+			t.Fatalf("remote finalize attempt %d failed: %v\n%s", attempt, err, out)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(metaDir, "sync-deleted.new")); !os.IsNotExist(err) {
 		t.Fatalf("deleted manifest should be removed, stat err=%v", err)
@@ -1715,6 +1752,73 @@ func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 	}
 	if string(fingerprint) != "fp123" {
 		t.Fatalf("unexpected fingerprint: %q", fingerprint)
+	}
+}
+
+func TestRemoteFinalizeSyncRetriesAfterAmbiguousTransportFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	workdir := t.TempDir()
+	metaDir := filepath.Join(workdir, ".crabbox")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, "sync-manifest.new"), []byte("tracked.txt\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	callsPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+remote=""
+for arg do remote="$arg"; done
+sh -c "$remote"
+status=$?
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+printf 'call\n' >> "$CRABBOX_FAKE_SSH_CALLS"
+if [ "$(wc -l < "$CRABBOX_FAKE_SSH_CALLS")" -eq 1 ]; then exit 255; fi
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+
+	out, err := runIdempotentSSHCombinedOutput(context.Background(), SSHTarget{
+		User: "crabbox",
+		Host: "gateway.example",
+		Port: "22",
+	}, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Fingerprint: "fp123"}), 0)
+	if err != nil {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	calls, readErr := os.ReadFile(callsPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := strings.Count(string(calls), "call\n"); got != 2 {
+		t.Fatalf("ssh calls=%d want 2", got)
+	}
+	manifest, readErr := os.ReadFile(filepath.Join(metaDir, "sync-manifest"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(manifest) != "tracked.txt\x00" {
+		t.Fatalf("unexpected manifest: %q", manifest)
+	}
+}
+
+func TestRemoteFinalizeSyncRejectsMissingManifests(t *testing.T) {
+	workdir := t.TempDir()
+	cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{}))
+	out, err := cmd.CombinedOutput()
+	if err == nil || exitCode(err) != 67 {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	if !strings.Contains(string(out), "pending and committed manifests are missing") {
+		t.Fatalf("unexpected output: %q", out)
 	}
 }
 

@@ -551,6 +551,25 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 	return strings.TrimSpace(string(lastOut)), lastErr
 }
 
+var idempotentSSHRetryDelay = 2 * time.Second
+
+func runIdempotentSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration) (string, error) {
+	var lastOut string
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		lastOut, lastErr = runSSHCombinedOutput(ctx, target, remote)
+		if lastErr == nil || !shouldRetrySSHPort(lastErr) || attempt == 1 {
+			return lastOut, lastErr
+		}
+		// Only callers whose entire remote command is safe to repeat may use
+		// this helper. Transfer, hydration, and user commands stay outside it.
+		if err := sleepContext(ctx, retryDelay); err != nil {
+			return lastOut, err
+		}
+	}
+	return lastOut, lastErr
+}
+
 func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (string, error) {
 	command := wsl2StdinScriptCommandWithWaitTimeout(waitTimeout)
 	var lastOut []byte
@@ -1725,7 +1744,13 @@ mkdir -p "$meta_dir"
 new="$meta_dir/sync-manifest.new"
 deleted="$meta_dir/sync-deleted.new"
 rm -f "$deleted"
-mv "$new" "$meta_dir/sync-manifest"
+manifest="$meta_dir/sync-manifest"
+if [ -f "$new" ]; then
+  mv "$new" "$manifest"
+elif [ ! -f "$manifest" ]; then
+  echo "remote sync finalize failed: pending and committed manifests are missing" >&2
+  exit 67
+fi
 if test -d .git && git status --short >/tmp/crabbox-git-status 2>/dev/null; then
   deletions=$(awk '/^ D|^D / { n++ } END { print n+0 }' /tmp/crabbox-git-status)
   if [ ` + shellQuote(allowValue) + ` != '1' ] && [ "$deletions" -ge 200 ]; then
