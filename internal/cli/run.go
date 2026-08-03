@@ -1330,7 +1330,7 @@ retrySync:
 			timings.syncSteps.reset = time.Since(stepStart)
 		} else if isWindowsNativeTarget(target) {
 			stepStart = time.Now()
-			if err := runSSHQuiet(ctx, target, windowsRemoteMkdir(workdir)); err != nil {
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, windowsRemoteMkdir(workdir), idempotentSSHRetryDelay); err != nil {
 				return recordFailure(exit(7, "create remote workdir: %v", err))
 			}
 			timings.syncSteps.mkdir = time.Since(stepStart)
@@ -1498,7 +1498,7 @@ afterSync:
 		if isWindowsNativeTarget(target) {
 			mkdirCommand = windowsRemoteMkdir(workdir)
 		}
-		if err := runSSHQuiet(ctx, target, mkdirCommand); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, mkdirCommand, idempotentSSHRetryDelay); err != nil {
 			return recordFailure(exit(7, "create remote workdir: %v", err))
 		}
 	}

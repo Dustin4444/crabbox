@@ -538,7 +538,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	if err := checkSyncPreflight(manifest, cfg, false, a.Stderr); err != nil {
 		return err
 	}
-	if err := runSSHQuiet(ctx, target, remoteMkdir(workdir)); err != nil {
+	if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteMkdir(workdir), idempotentSSHRetryDelay); err != nil {
 		return exit(7, "create remote workdir: %v", err)
 	}
 	gitSeed, credentialBlocked := syncGitSeedDecision(cfg, repo)
