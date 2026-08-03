@@ -9,6 +9,7 @@ import type {
   CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import { AWSProvider, FleetCoordinator } from "../src/fleet";
+import { providerLabelValue } from "../src/provider-labels";
 import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 
 afterEach(() => {
@@ -539,7 +540,7 @@ describe("private AWS workspaces", () => {
   });
 });
 
-function privateMachine(id: string): ProviderMachine {
+function privateMachine(id: string, lease?: LeaseRecord): ProviderMachine {
   return {
     provider: "aws",
     id: 123,
@@ -549,7 +550,16 @@ function privateMachine(id: string): ProviderMachine {
     serverType: "t3a.small",
     host: "",
     region: "us-west-2",
-    labels: {},
+    labels: lease
+      ? {
+          crabbox: "true",
+          created_by: "crabbox",
+          lease: lease.id,
+          owner: providerLabelValue(lease.providerOwner ?? lease.owner),
+          provider: "aws",
+          slug: providerLabelValue(lease.slug ?? ""),
+        }
+      : {},
     awsSSMCommandID: "command-abc123",
     awsSSMCommandStatus: "Success",
   };
@@ -571,9 +581,9 @@ function privateRecoveryProvider(state: RecoveryProviderState): Record<string, u
     supportsSSHHostKeyInjection(): boolean {
       return false;
     },
-    async recoverServer(): Promise<ProviderMachine> {
+    async recoverServer(lease: LeaseRecord): Promise<ProviderMachine> {
       state.recovers += 1;
-      return { ...privateMachine("i-recovered123"), status: "running" };
+      return { ...privateMachine("i-recovered123", lease), status: "running" };
     },
     async getServer(id: string): Promise<ProviderMachine> {
       return privateMachine(id);

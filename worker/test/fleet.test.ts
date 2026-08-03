@@ -41,6 +41,7 @@ import {
   workspaceTerminalOriginAllowed,
   type WebVNCBuffer,
 } from "../src/fleet";
+import { gcpProviderLabelValue } from "../src/gcp";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
@@ -29947,6 +29948,13 @@ function fakeProvider(
     restrictedLeaseRequestFields(input: LeaseRequest) {
       return result.onRestrictedLeaseRequestFields?.(input) ?? [];
     },
+    ...(result.provider === "gcp"
+      ? {
+          ownershipLabelValue(value: string) {
+            return gcpProviderLabelValue(value);
+          },
+        }
+      : {}),
     ...(result.onRecoverServer
       ? {
           async recoverServer(lease: LeaseRecord) {
