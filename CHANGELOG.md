@@ -21,9 +21,10 @@
 
 ### Fixed
 
-- Retried idempotent remote workspace setup, sync finalization, and post-sync
-  Actions hydration marker cleanup once after a transient SSH transport
-  failure, while preserving redacted terminal diagnostics.
+- Retried idempotent remote workspace setup, Git and manifest sync preparation,
+  sync finalization, and post-sync Actions hydration marker cleanup once after
+  a transient SSH transport failure, while preserving redacted terminal
+  diagnostics.
 - Kept brokered Daytona on its operator-managed snapshot across coordinator
   deployments while preserving account-default mode and an explicit clear path.
 - Recovered exact-owned Azure public IPs, network interfaces, and tagged OS

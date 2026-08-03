@@ -1352,7 +1352,7 @@ retrySync:
 		}
 		if gitSeed {
 			stepStart = time.Now()
-			if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head), idempotentSSHRetryDelay); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 			}
 			timings.syncSteps.gitSeed = time.Since(stepStart)
@@ -1387,12 +1387,12 @@ retrySync:
 			// Full resync can git-seed files that are absent from the local manifest.
 			// Seed the old manifest from git so prune removes those resurrected paths.
 			if shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
-				if err := runSSHQuiet(ctx, target, remoteSeedSyncManifestFromGit(workdir)); err != nil {
+				if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
 					return recordFailure(exit(6, "remote sync seed manifest failed: %v", err))
 				}
 			}
 			stepStart = time.Now()
-			if err := runSSHQuiet(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken)); err != nil {
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken), idempotentSSHRetryDelay); err != nil {
 				return recordFailure(exit(6, "remote sync prune failed: %v", err))
 			}
 			timings.syncSteps.prune = time.Since(stepStart)

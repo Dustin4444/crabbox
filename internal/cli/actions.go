@@ -546,7 +546,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		warnCredentialBearingGitSeed(a.Stderr)
 	}
 	if gitSeed {
-		if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head), idempotentSSHRetryDelay); err != nil {
 			fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 		}
 	}
@@ -561,10 +561,10 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		return exit(7, "write sync manifests: %v", err)
 	}
 	if shouldPruneRemoteSync(cfg.Sync.Delete, false) {
-		if err := runSSHQuiet(ctx, target, remoteSeedSyncManifestFromGit(workdir)); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
 			return exit(6, "remote sync seed manifest failed: %v", err)
 		}
-		if err := runSSHQuiet(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken)); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken), idempotentSSHRetryDelay); err != nil {
 			return exit(6, "remote sync prune failed: %v", err)
 		}
 	}
