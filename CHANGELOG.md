@@ -17,9 +17,6 @@
 
 ### Fixed
 
-- Retried idempotent sync finalization and post-sync Actions hydration marker
-  cleanup once after a transient SSH transport failure, while preserving
-  redacted terminal diagnostics.
 - Made Blacksmith doctor report all-organization inventory scope and a
   nonterminal active Testbox count for capacity-aware callers.
 - Kept default-derived Azure images out of normal broker lease requests so
