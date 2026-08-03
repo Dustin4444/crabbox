@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1704,7 +1705,7 @@ func TestRemoteApplySyncManifestOnlyCommitsManifest(t *testing.T) {
 }
 
 func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
-	const finalizeToken = "sync-token-123"
+	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(workdir, ".git"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1765,13 +1766,20 @@ func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 	if string(token) != finalizeToken {
 		t.Fatalf("unexpected finalize token: %q", token)
 	}
+	completeToken, err := os.ReadFile(filepath.Join(metaDir, "sync-finalize-complete-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(completeToken) != finalizeToken {
+		t.Fatalf("unexpected complete token: %q", completeToken)
+	}
 }
 
 func TestRemoteFinalizeSyncRetriesAfterAmbiguousTransportFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell ssh fixture")
 	}
-	const finalizeToken = "sync-token-123"
+	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
 	metaDir := filepath.Join(workdir, ".crabbox")
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
@@ -1838,13 +1846,202 @@ func TestRemoteFinalizeSyncRejectsMissingManifests(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(metaDir, "sync-finalize-token"), []byte("previous-sync"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: "current-sync"}))
+	cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: "fedcba9876543210fedcba9876543210"}))
 	out, err := cmd.CombinedOutput()
 	if err == nil || exitCode(err) != 67 {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
 	if !strings.Contains(string(out), "no committed manifest for this sync") {
 		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+func TestRemoteFinalizeSyncWaitsForLiveOwner(t *testing.T) {
+	const finalizeToken = "0123456789abcdef0123456789abcdef"
+	workdir := t.TempDir()
+	metaDir := filepath.Join(workdir, ".crabbox")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(metaDir, "sync-finalize-lock")
+	if err := os.Symlink(strconv.Itoa(os.Getpid()), lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, "sync-manifest.new"), []byte("tracked.txt\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, "sync-finalize-token.new"), []byte(finalizeToken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: finalizeToken}))
+	done := make(chan error, 1)
+	go func() {
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			err = fmt.Errorf("%w: %s", err, out)
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("finalize did not wait for live owner: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("finalize did not continue after live owner released lock")
+	}
+}
+
+func TestRemoteFinalizeSyncRecoversDeadOwner(t *testing.T) {
+	const finalizeToken = "0123456789abcdef0123456789abcdef"
+	workdir := t.TempDir()
+	metaDir := filepath.Join(workdir, ".crabbox")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	crashScript := "set -e\nmeta_dir=" + shellQuote(metaDir) + "\n" + remoteSyncFinalizeLockScript() + "\nkill -9 $$"
+	crasher := exec.Command("bash", "-c", crashScript)
+	if err := crasher.Run(); err == nil {
+		t.Fatal("expected lock owner to terminate")
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, "sync-manifest.new"), []byte("tracked.txt\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, "sync-finalize-token.new"), []byte(finalizeToken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: finalizeToken})).CombinedOutput()
+	if err != nil {
+		t.Fatalf("recover dead owner: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(filepath.Join(metaDir, "sync-finalize-lock")); !os.IsNotExist(err) {
+		t.Fatalf("finalize lock should be removed, stat err=%v", err)
+	}
+}
+
+func TestRemoteFinalizeSyncWaitIsContextBounded(t *testing.T) {
+	const finalizeToken = "0123456789abcdef0123456789abcdef"
+	workdir := t.TempDir()
+	metaDir := filepath.Join(workdir, ".crabbox")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(strconv.Itoa(os.Getpid()), filepath.Join(metaDir, "sync-finalize-lock")); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err := exec.CommandContext(ctx, "bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: finalizeToken})).Run()
+	if err == nil || ctx.Err() != context.DeadlineExceeded {
+		t.Fatalf("err=%v context=%v", err, ctx.Err())
+	}
+}
+
+func TestRemoteSyncFinalizeLockSerializesLiveOwner(t *testing.T) {
+	metaDir := t.TempDir()
+	acquiredPath := filepath.Join(metaDir, "first-acquired")
+	releasePath := filepath.Join(metaDir, "release-first")
+	secondPath := filepath.Join(metaDir, "second-entered")
+	firstScript := "set -e\nmeta_dir=" + shellQuote(metaDir) + "\n" + remoteSyncFinalizeLockScript() +
+		"\nprintf first > " + shellQuote(acquiredPath) +
+		"\nwhile [ ! -f " + shellQuote(releasePath) + " ]; do sleep 1; done\n"
+	secondScript := "set -e\nmeta_dir=" + shellQuote(metaDir) + "\n" + remoteSyncFinalizeLockScript() +
+		"\nprintf second > " + shellQuote(secondPath) + "\n"
+
+	first := exec.Command("bash", "-c", firstScript)
+	if err := first.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if first.Process != nil {
+			_ = first.Process.Kill()
+		}
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(acquiredPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first finalize owner did not acquire lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	second := exec.Command("bash", "-c", secondScript)
+	secondDone := make(chan error, 1)
+	if err := second.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if second.Process != nil {
+			_ = second.Process.Kill()
+		}
+	})
+	go func() { secondDone <- second.Wait() }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second finalize entered while first was live: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if _, err := os.Stat(secondPath); !os.IsNotExist(err) {
+		t.Fatalf("second finalize entered critical section early, stat err=%v", err)
+	}
+	if err := os.WriteFile(releasePath, []byte("release"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("second finalize did not acquire released lock")
+	}
+}
+
+func TestRemoteFinalizeSyncRejectsMismatchedPendingToken(t *testing.T) {
+	const currentToken = "0123456789abcdef0123456789abcdef"
+	const newerToken = "fedcba9876543210fedcba9876543210"
+	workdir := t.TempDir()
+	metaDir := filepath.Join(workdir, ".crabbox")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, "sync-manifest.new"), []byte("newer.txt\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, "sync-finalize-token.new"), []byte(newerToken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: currentToken})).CombinedOutput()
+	if err == nil || exitCode(err) != 67 {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	if !strings.Contains(string(out), "pending token does not match this sync") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	token, readErr := os.ReadFile(filepath.Join(metaDir, "sync-finalize-token.new"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(token) != newerToken {
+		t.Fatalf("newer pending token changed: %q", token)
 	}
 }
 
@@ -1966,7 +2163,7 @@ func TestRemoteWriteSyncDeletedNew(t *testing.T) {
 }
 
 func TestRemoteWriteSyncManifestsNew(t *testing.T) {
-	const finalizeToken = "sync-token-123"
+	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
 	manifest := "keep.txt\x00"
 	deleted := "old.txt\x00"
@@ -2001,7 +2198,7 @@ func TestRemoteWriteSyncManifestsNew(t *testing.T) {
 }
 
 func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *testing.T) {
-	got := remoteWriteSyncManifestsNewForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "/work/repo", "sync-token-123")
+	got := remoteWriteSyncManifestsNewForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "/work/repo", "0123456789abcdef0123456789abcdef")
 	if !strings.Contains(got, "python3 -c") {
 		t.Fatalf("WSL2 manifest writer should use Python exact reads: %q", got)
 	}
@@ -2012,7 +2209,7 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 		t.Fatalf("WSL2 manifest writer should keep the command short and avoid fallback scripts: %q", got)
 	}
 
-	plain := remoteWriteSyncManifestsNewForTarget(SSHTarget{TargetOS: targetLinux}, "/work/repo", "sync-token-123")
+	plain := remoteWriteSyncManifestsNewForTarget(SSHTarget{TargetOS: targetLinux}, "/work/repo", "0123456789abcdef0123456789abcdef")
 	if !strings.Contains(plain, "dd bs=1") {
 		t.Fatalf("non-WSL2 manifest writer should keep portable dd fallback: %q", plain)
 	}
@@ -2040,7 +2237,7 @@ func TestSyncManifestInputForTargetFramesDeletedLengthForWSL2(t *testing.T) {
 }
 
 func TestRemoteWriteSyncManifestsNewPython(t *testing.T) {
-	const finalizeToken = "sync-token-123"
+	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
 	manifest := strings.Repeat("manifest-entry\x00", 4096)
 	deleted := "old.txt\x00"
@@ -2083,7 +2280,7 @@ func TestRemoteWriteSyncManifestsNewReadsChunkedInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(bashPath, "--noprofile", "--norc", "-c", remoteWriteSyncManifestsNew(workdir, "sync-token-123"))
+	cmd := exec.Command(bashPath, "--noprofile", "--norc", "-c", remoteWriteSyncManifestsNew(workdir, "0123456789abcdef0123456789abcdef"))
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output

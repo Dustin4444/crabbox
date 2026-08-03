@@ -1750,10 +1750,18 @@ rm -f "$deleted"
 manifest="$meta_dir/sync-manifest"
 pending_token="$meta_dir/sync-finalize-token.new"
 committed_token="$meta_dir/sync-finalize-token"
+complete_token="$meta_dir/sync-finalize-complete-token"
 expected_token=` + shellQuote(opts.Token) + `
-if [ -z "$expected_token" ]; then
-  echo "remote sync finalize failed: missing sync token" >&2
-  exit 67
+case "$expected_token" in
+  ''|*[!0-9a-f]*) echo "remote sync finalize failed: invalid sync token" >&2; exit 67 ;;
+esac
+` + remoteSyncFinalizeLockScript() + `
+if [ -f "$manifest" ] &&
+   [ -f "$committed_token" ] &&
+   [ "$(cat "$committed_token")" = "$expected_token" ] &&
+   [ -f "$complete_token" ] &&
+   [ "$(cat "$complete_token")" = "$expected_token" ]; then
+  exit 0
 fi
 if [ -f "$new" ]; then
   if [ -f "$pending_token" ]; then
@@ -1795,7 +1803,67 @@ fi
 		script += `printf %s ` + shellQuote(opts.Fingerprint) + ` > "$meta_dir/sync-fingerprint" || true
 `
 	}
+	script += `complete_tmp="$complete_token.tmp.$$"
+printf %s "$expected_token" > "$complete_tmp"
+mv "$complete_tmp" "$complete_token"
+`
 	return "bash -lc " + shellQuote(script)
+}
+
+func remoteSyncFinalizeLockScript() string {
+	return `lock_path="$meta_dir/sync-finalize-lock"
+lock_waits=0
+while ! ln -s "$$" "$lock_path" 2>/dev/null; do
+  lock_owner=$(readlink "$lock_path" 2>/dev/null || true)
+  lock_owner_live=
+  case "$lock_owner" in
+    ''|*[!0-9]*) ;;
+    *) if kill -0 "$lock_owner" 2>/dev/null; then lock_owner_live=1; fi ;;
+  esac
+  if [ -n "$lock_owner_live" ]; then
+    sleep 1
+  else
+    sleep 1
+    confirmed_owner=$(readlink "$lock_path" 2>/dev/null || true)
+    if [ "$confirmed_owner" = "$lock_owner" ]; then
+      owner_dead=
+      case "$confirmed_owner" in
+        ''|*[!0-9]*) owner_dead=1 ;;
+        *) if ! kill -0 "$confirmed_owner" 2>/dev/null; then owner_dead=1; fi ;;
+      esac
+      if [ -n "$owner_dead" ]; then
+        stale_lock="$lock_path.stale.$$"
+        if mv "$lock_path" "$stale_lock" 2>/dev/null; then
+          moved_owner=$(readlink "$stale_lock" 2>/dev/null || true)
+          if [ "$moved_owner" != "$confirmed_owner" ]; then
+            if [ ! -e "$lock_path" ] && [ ! -L "$lock_path" ]; then
+              mv "$stale_lock" "$lock_path" 2>/dev/null || true
+            fi
+            echo "remote sync finalize failed: lock ownership changed during recovery" >&2
+            exit 67
+          fi
+          rm -f "$stale_lock"
+          continue
+        fi
+      fi
+    fi
+  fi
+  lock_waits=$((lock_waits + 1))
+  if [ "$lock_waits" -ge 120 ]; then
+    echo "remote sync finalize failed: timed out waiting for active finalize" >&2
+    exit 67
+  fi
+done
+cleanup_finalize_lock() {
+  if [ "$(readlink "$lock_path" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$lock_path"
+  fi
+}
+trap cleanup_finalize_lock EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+`
 }
 
 func remoteSyncMetaDirScript() string {
