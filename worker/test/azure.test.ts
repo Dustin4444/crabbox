@@ -321,12 +321,21 @@ describe("azure provider", () => {
       if (!url.pathname.endsWith("/publicIPAddresses")) {
         return Response.json({ value: [] });
       }
+      const secondPage = url.searchParams.has("$skiptoken");
       return Response.json({
-        value: ["crabbox-blue-lobster", "crabbox-blue-lobster-retry"].map((cloudID) => ({
-          id: `${url.pathname}/${cloudID}-pip`,
-          name: `${cloudID}-pip`,
-          tags: ownedAzureTags(),
-        })),
+        value: [secondPage ? "crabbox-blue-lobster-retry" : "crabbox-blue-lobster"].map(
+          (cloudID) => ({
+            id: `${url.pathname}/${cloudID}-pip`,
+            name: `${cloudID}-pip`,
+            tags: ownedAzureTags(),
+          }),
+        ),
+        ...(secondPage
+          ? {}
+          : {
+              nextLink:
+                "https://management.azure.com/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses?api-version=2024-05-01&$skiptoken=page-2",
+            }),
       });
     };
 
@@ -337,6 +346,35 @@ describe("azure provider", () => {
         region: "eastus",
       }),
     ).rejects.toThrow("ambiguous Azure recovery");
+  });
+
+  it("fails closed when Azure recovery pagination leaves the management scope", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    client.fetcher = async (input) => {
+      const url = new URL(String(input));
+      if (!url.pathname.endsWith("/publicIPAddresses")) {
+        return Response.json({ value: [] });
+      }
+      return Response.json({
+        value: [
+          {
+            id: `${url.pathname}/crabbox-blue-lobster-pip`,
+            name: "crabbox-blue-lobster-pip",
+            tags: ownedAzureTags(),
+          },
+        ],
+        nextLink: "https://example.test/subscriptions/sub/resourceGroups/crabbox-leases",
+      });
+    };
+
+    await expect(
+      client.recoverServerForLease({
+        ...ownedAzureLease(),
+        serverType: "Standard_D2ads_v6",
+        region: "eastus",
+      }),
+    ).rejects.toThrow("invalid nextLink");
   });
 
   it("fails closed when an Azure resource claims the lease with mismatched ownership", async () => {
