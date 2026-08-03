@@ -65,6 +65,11 @@
 - Rejected authority-changing Semaphore pagination links before authenticated requests can leave the configured origin. Thanks @SebTardif.
 - Kept provider-backed details out of coordinator WebSocket error logs and removed narrowing conversion from inherited WebVNC listener descriptors. Thanks @vincentkoc.
 
+## 0.40.1 - Unpublished
+
+- No tag or GitHub release was published. Its prepared changes are included in
+  0.41.0.
+
 ## 0.40.0 - 2026-07-19
 
 ### Added
