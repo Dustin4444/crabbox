@@ -1571,6 +1571,7 @@ func remoteWriteSyncManifestsNew(workdir, finalizeToken string) string {
 	manifestName := remoteSyncPendingManifestName(finalizeToken)
 	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + `mkdir -p "$meta_dir"
+` + remoteSyncAbandonedMetadataCleanup() + `
 IFS= read -r manifest_len
 case "$manifest_len" in
   ''|*[!0-9]*) echo "invalid sync manifest length" >&2; exit 1 ;;
@@ -1630,8 +1631,13 @@ with open(sys.argv[2], "wb") as handle:
     handle.write(deleted)
 `
 	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\"\n" +
+		remoteSyncAbandonedMetadataCleanup() + "\n" +
 		"python3 -c " + shellQuote(python) + " \"$meta_dir/" + manifestName + "\" \"$meta_dir/" + deletedName + "\"\n"
 	return "bash -lc " + shellQuote(script)
+}
+
+func remoteSyncAbandonedMetadataCleanup() string {
+	return `find "$meta_dir" -type f \( -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' \) -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true`
 }
 
 func remoteSeedSyncManifestFromGit(workdir string) string {
@@ -1735,10 +1741,15 @@ if [ -f "$deleted" ]; then delete_paths < "$deleted"; fi
 if [ -f "$old" ] && [ -f "$new" ]; then
   old_sorted="$meta_dir/sync-manifest.` + finalizeToken + `.old.sorted"
   new_sorted="$meta_dir/sync-manifest.` + finalizeToken + `.new.sorted"
+  cleanup_sorted_manifests() {
+    rm -f "$old_sorted" "$new_sorted"
+  }
+  trap cleanup_sorted_manifests EXIT
   LC_ALL=C sort -z "$old" > "$old_sorted"
   LC_ALL=C sort -z "$new" > "$new_sorted"
   comm -z -23 "$old_sorted" "$new_sorted" | delete_paths
-  rm -f "$old_sorted" "$new_sorted"
+  cleanup_sorted_manifests
+  trap - EXIT
 fi
 `
 	return "bash -lc " + shellQuote(script)

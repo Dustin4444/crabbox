@@ -1618,6 +1618,13 @@ func testRemotePruneSyncManifestPrunesManagedFiles(t *testing.T, command func(st
 	if _, err := os.Stat(outside); err != nil {
 		t.Fatalf("unsafe deleted path should not escape workdir: %v", err)
 	}
+	sorted, err := filepath.Glob(filepath.Join(workdir, ".crabbox", "sync-manifest.*.sorted"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sorted) != 0 {
+		t.Fatalf("sorted manifest scratch files remain: %v", sorted)
+	}
 }
 
 func TestRemotePruneSyncManifestFallsBackToPerlWithoutPython(t *testing.T) {
@@ -2214,6 +2221,15 @@ func TestRemoteWriteSyncManifestsNew(t *testing.T) {
 	}
 	if string(gotDeleted) != deleted {
 		t.Fatalf("unexpected deleted manifest: %q", gotDeleted)
+	}
+}
+
+func TestRemoteWriteSyncManifestsNewCollectsOnlyOldTokenArtifacts(t *testing.T) {
+	got := remoteWriteSyncManifestsNew("/work/repo", "0123456789abcdef0123456789abcdef")
+	for _, want := range []string{"find \"$meta_dir\"", "-mtime +7", "sync-manifest.*.new", "sync-finalize-complete-token.tmp.*"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("manifest writer missing abandoned metadata cleanup %q: %s", want, got)
+		}
 	}
 }
 
