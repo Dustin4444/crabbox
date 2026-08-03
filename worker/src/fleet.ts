@@ -21060,6 +21060,25 @@ export class AzureProvider implements CloudProvider {
     return this.client.findServer(id);
   }
 
+  recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope) {
+      return Promise.reject(
+        new Error(
+          `refusing to recover Azure lease ${lease.id}: canonical provider scope was not persisted`,
+        ),
+      );
+    }
+    const recoveryLocation = lease.region?.trim() || this.location?.trim();
+    return new AzureClient(this.env, {
+      ...(recoveryLocation ? { location: recoveryLocation } : {}),
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+      ...(this.deferredCleanup ? { deferredCleanup: this.deferredCleanup } : {}),
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
+    }).recoverServerForLease(lease);
+  }
+
   async prepareLeaseConfig(
     config: ReturnType<typeof leaseConfig>,
   ): Promise<ReturnType<typeof leaseConfig>> {
