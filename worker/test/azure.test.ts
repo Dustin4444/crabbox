@@ -862,6 +862,56 @@ describe("azure provider", () => {
     expect(new Set(putKeys).size).toBe(2);
   });
 
+  it("cleans an exact Azure NIC and public IP set without a VM", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const deleted = new Set<string>();
+    const deletes: string[] = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        deleted.add(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (deleted.has(url.pathname)) {
+        return azureResourceNotFoundResponse(url);
+      }
+      if (url.pathname.endsWith("/networkInterfaces/crabbox-blue-lobster-nic")) {
+        return Response.json({
+          id: url.pathname,
+          name: "crabbox-blue-lobster-nic",
+          tags: ownedAzureTags(),
+          properties: {
+            ipConfigurations: [
+              {
+                properties: {
+                  publicIPAddress: {
+                    id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
+                  },
+                },
+              },
+            ],
+          },
+        });
+      }
+      if (url.pathname.endsWith("/publicIPAddresses/crabbox-blue-lobster-pip")) {
+        return Response.json({
+          id: url.pathname,
+          name: "crabbox-blue-lobster-pip",
+          tags: ownedAzureTags(),
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
+    expect(deletes).toEqual([
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
+    ]);
+  });
+
   it("cleans a fully tagged Azure disk when VM creation never completed", async () => {
     const { storage } = memoryAzureDeleteClaimStorage();
     const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
