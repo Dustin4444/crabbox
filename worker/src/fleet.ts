@@ -333,7 +333,6 @@ const runtimeAdapterMaxBufferedBytes = runtimeAdapterRelayFrameLimit * 2;
 const leaseCleanupRetryDelayMs = 5 * 60 * 1000;
 const leaseCleanupClaimStaleMs = 30 * 60 * 1000;
 const leaseCleanupBatchSize = 16;
-const interruptedProvisioningStaleMs = 30 * 60 * 1000;
 const interruptedProvisioningDeploySettleMs = 5 * 60 * 1000;
 const interruptedProvisioningAbsenceConfirmationMs = 30 * 60 * 1000;
 const interruptedProvisioningRecoveryBatchSize = 16;
@@ -4561,17 +4560,7 @@ export class FleetCoordinator {
     const provider = this.provider(workspace.provider, lease.region, lease.providerProject);
     let server: ProviderMachine | undefined;
     try {
-      if (provider.recoverServer) {
-        server = await provider.recoverServer(lease);
-      } else if (lease.cloudID && provider.getServer) {
-        server = await provider.getServer(lease.cloudID);
-      } else if (provider.findServerByLease) {
-        server = await provider.findServerByLease(lease.id);
-      } else {
-        server = (await provider.listCrabboxServers()).find(
-          (machine) => machine.labels?.["lease"] === lease.id,
-        );
-      }
+      server = await this.recoverProviderServer(workspace.provider, provider, lease);
     } catch (error) {
       if (!providerResourceNotFound(error)) {
         await this.recordWorkspaceRecoveryMiss(workspace, Number.POSITIVE_INFINITY);
@@ -5240,6 +5229,58 @@ export class FleetCoordinator {
       close(1011, coordinatorErrorMessage(this.env, error));
       throw error;
     }
+  }
+
+  private async recoverProviderServer(
+    providerName: Provider,
+    provider: CloudProvider,
+    lease: LeaseRecord,
+  ): Promise<ProviderMachine | undefined> {
+    const lookup = async (
+      find: (() => Promise<ProviderMachine | undefined>) | undefined,
+    ): Promise<ProviderMachine | undefined> => {
+      if (!find) return undefined;
+      try {
+        return await find();
+      } catch (error) {
+        if (providerResourceNotFound(error)) return undefined;
+        throw error;
+      }
+    };
+    let server = await lookup(
+      provider.recoverServer ? async () => await provider.recoverServer?.(lease) : undefined,
+    );
+    server ??= await lookup(
+      lease.cloudID && provider.getServer
+        ? async () => await provider.getServer?.(lease.cloudID)
+        : undefined,
+    );
+    server ??= await lookup(
+      provider.findServerByLease
+        ? async () => await provider.findServerByLease?.(lease.id)
+        : undefined,
+    );
+    if (!server && !provider.findServerByLease) {
+      const matches = (await provider.listCrabboxServers()).filter(
+        (candidate) => candidate.labels?.["lease"] === lease.id,
+      );
+      if (matches.length > 1) {
+        throw new Error(`multiple provider resources matched lease ${lease.id}`);
+      }
+      server = matches[0];
+    }
+    if (
+      server &&
+      !providerLabelsOwnedByLease(
+        server.labels ?? {},
+        lease,
+        providerName,
+        provider.ownershipLabelValue,
+      )
+    ) {
+      throw new Error(`provider resource ownership does not match lease ${lease.id}`);
+    }
+    return server;
   }
 
   private async cleanupExpiredNativeVNCTickets(now = Date.now()): Promise<void> {
@@ -12967,10 +13008,11 @@ export class FleetCoordinator {
         if (due.length >= interruptedProvisioningRecoveryBatchSize) {
           return;
         }
-        if (
-          interruptedProvisioningVersionMismatch(lease, this.env) &&
-          !Number.isFinite(Date.parse(lease.provisioningRecoveryObservedAt ?? ""))
-        ) {
+        const recoveryAt = interruptedProvisioningRecoveryAt(lease, this.env, now);
+        if (recoveryAt === undefined) {
+          return;
+        }
+        if (!Number.isFinite(Date.parse(lease.provisioningRecoveryObservedAt ?? ""))) {
           const observed = structuredClone(lease);
           observed.provisioningRecoveryObservedAt = new Date(now).toISOString();
           const retryAt = Date.parse(observed.cleanupRetryAt ?? "");
@@ -12982,8 +13024,7 @@ export class FleetCoordinator {
           await this.putLease(observed);
           return;
         }
-        const recoveryAt = interruptedProvisioningRecoveryAt(lease, this.env, now);
-        if (recoveryAt !== undefined && recoveryAt <= now) {
+        if (recoveryAt <= now) {
           due.push(structuredClone(lease));
         }
       });
@@ -13000,7 +13041,7 @@ export class FleetCoordinator {
     const provider = this.provider(providerName, lease.region, lease.providerProject);
     let server: ProviderMachine | undefined;
     try {
-      server = await this.findInterruptedProvisioningServer(providerName, provider, lease);
+      server = await this.recoverProviderServer(providerName, provider, lease);
     } catch (error) {
       const failure = `interrupted provisioning recovery failed: ${coordinatorErrorMessage(this.env, error)}`;
       await this.state.runExclusive(async () => {
@@ -13027,8 +13068,7 @@ export class FleetCoordinator {
       }
       const failedAtDate = new Date();
       const failedAt = failedAtDate.toISOString();
-      const interruption =
-        "coordinator deployment or runtime restart interrupted provider provisioning";
+      const interruption = "coordinator deployment interrupted provider provisioning";
       current.updatedAt = failedAt;
       if (server) {
         current.state = "failed";
@@ -13086,28 +13126,6 @@ export class FleetCoordinator {
       }
       await this.putLease(current);
     });
-  }
-
-  private async findInterruptedProvisioningServer(
-    providerName: Provider,
-    provider: CloudProvider,
-    lease: LeaseRecord,
-  ): Promise<ProviderMachine | undefined> {
-    let server = await provider.recoverServer?.(lease);
-    server ??= await provider.findServerByLease?.(lease.id);
-    if (!server && !provider.findServerByLease) {
-      const matches = (await provider.listCrabboxServers()).filter(
-        (candidate) => candidate.labels?.["lease"] === lease.id,
-      );
-      if (matches.length > 1) {
-        throw new Error(`multiple provider resources matched interrupted lease ${lease.id}`);
-      }
-      server = matches[0];
-    }
-    if (server && !providerLabelsOwnedByLease(server.labels ?? {}, lease, providerName)) {
-      throw new Error(`provider resource ownership does not match interrupted lease ${lease.id}`);
-    }
-    return server;
   }
 
   private async expireLeases(): Promise<void> {
@@ -19980,13 +19998,16 @@ function interruptedProvisioningRecoveryAt(
   if (!Number.isFinite(startedAt)) {
     return undefined;
   }
-  let recoveryAt = startedAt + interruptedProvisioningStaleMs;
-  if (interruptedProvisioningVersionMismatch(lease, env)) {
-    const observedAt = Date.parse(lease.provisioningRecoveryObservedAt ?? "");
-    recoveryAt = Number.isFinite(observedAt)
-      ? observedAt + interruptedProvisioningDeploySettleMs
-      : now;
+  if (!interruptedProvisioningVersionMismatch(lease, env)) {
+    // Provider creates have no shared upper bound, so age alone cannot distinguish an
+    // abandoned request from live provisioning. Only a deployment version change proves
+    // this Durable Object no longer owns the in-flight create.
+    return undefined;
   }
+  const observedAt = Date.parse(lease.provisioningRecoveryObservedAt ?? "");
+  const recoveryAt = Number.isFinite(observedAt)
+    ? observedAt + interruptedProvisioningDeploySettleMs
+    : now;
   const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
   return Number.isFinite(retryAt) && retryAt > recoveryAt ? retryAt : recoveryAt;
 }
@@ -20696,6 +20717,7 @@ interface CloudProvider {
   ): ProviderWorkspaceCapability | undefined;
   supportsSSHHostKeyInjection(config: ReturnType<typeof leaseConfig>): boolean;
   restrictedLeaseRequestFields?(input: LeaseRequest): string[];
+  ownershipLabelValue?(value: string): string;
   recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   resumeRecoveredServer?(
     config: ReturnType<typeof leaseConfig>,
@@ -21442,6 +21464,10 @@ export class GCPProvider implements CloudProvider {
       input.gcpTags?.length ? "gcpTags" : "",
       input.gcpServiceAccount ? "gcpServiceAccount" : "",
     ].filter(Boolean);
+  }
+
+  ownershipLabelValue(value: string): string {
+    return gcpProviderLabelValue(value);
   }
 
   listCrabboxServers(): Promise<ProviderMachine[]> {

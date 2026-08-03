@@ -18,8 +18,8 @@
 ### Fixed
 
 - Reconciled brokered leases whose provider provisioning was interrupted by a
-  coordinator deployment or runtime restart, recovering any owned cloud
-  resource for cleanup and failing resource-free leases with a durable reason.
+  coordinator deployment, recovering any owned cloud resource for cleanup and
+  failing resource-free leases with a durable reason.
 - Made Blacksmith doctor report all-organization inventory scope and a
   nonterminal active Testbox count for capacity-aware callers.
 - Kept default-derived Azure images out of normal broker lease requests so
