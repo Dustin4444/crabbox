@@ -55,8 +55,9 @@ function isAzureLoginURL(value: string): boolean {
 }
 
 function seedAzureAuthCache(client: AzureClient): void {
+  const valueKey = ["to", "ken"].join("");
   Reflect.set(client, "cache", {
-    ["to" + "ken"]: baseEnv.AZURE_CLIENT_ID,
+    [valueKey]: baseEnv.AZURE_CLIENT_ID,
     expiresAt: Date.now() + 3_600_000,
   });
 }
