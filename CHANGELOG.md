@@ -17,6 +17,9 @@
 
 ### Fixed
 
+- Recovered exact-owned Azure public IPs, network interfaces, and tagged OS
+  disks when a coordinator deployment interrupted provisioning before the VM
+  existed, while rejecting ambiguous or mismatched resource sets.
 - Reconciled brokered leases whose provider provisioning was interrupted by a
   coordinator deployment, recovering any owned cloud resource for cleanup and
   failing resource-free leases with a durable reason.
