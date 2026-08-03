@@ -14084,7 +14084,7 @@ describe("fleet lease identity and idle", () => {
     expect(text).not.toContain("tskey-preflight-secret");
   });
 
-  it("restricts Daytona snapshot bootstrap to admin requests and a 10 GiB target", async () => {
+  it("restricts Daytona snapshot bootstrap to admin requests and a 2/4/10 target", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal("fetch", fetchMock);
     const fleet = testFleet(
@@ -14099,7 +14099,9 @@ describe("fleet lease identity and idle", () => {
     const forbidden = await fleet.fetch(
       request("POST", "/v1/admin/providers/daytona/snapshot-bootstrap", {
         body: {
-          name: "crabbox-ready-10g",
+          name: "crabbox-ready-2x4x10",
+          cpu: 2,
+          memoryGiB: 4,
           diskGiB: 10,
           baseImage: "daytonaio/sandbox:0.8.0",
         },
@@ -14111,7 +14113,9 @@ describe("fleet lease identity and idle", () => {
       request("POST", "/v1/admin/providers/daytona/snapshot-bootstrap", {
         headers: { "x-crabbox-admin": "true" },
         body: {
-          name: "crabbox-ready-10g",
+          name: "crabbox-ready-2x4x10",
+          cpu: 2,
+          memoryGiB: 4,
           diskGiB: 8,
           baseImage: "daytonaio/sandbox:0.8.0",
         },
