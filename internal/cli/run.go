@@ -1392,7 +1392,7 @@ retrySync:
 				}
 			}
 			stepStart = time.Now()
-			if err := runSSHQuiet(ctx, target, remotePruneSyncManifestForTarget(target, workdir)); err != nil {
+			if err := runSSHQuiet(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken)); err != nil {
 				return recordFailure(exit(6, "remote sync prune failed: %v", err))
 			}
 			timings.syncSteps.prune = time.Since(stepStart)

@@ -564,7 +564,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		if err := runSSHQuiet(ctx, target, remoteSeedSyncManifestFromGit(workdir)); err != nil {
 			return exit(6, "remote sync seed manifest failed: %v", err)
 		}
-		if err := runSSHQuiet(ctx, target, remotePruneSyncManifestForTarget(target, workdir)); err != nil {
+		if err := runSSHQuiet(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken)); err != nil {
 			return exit(6, "remote sync prune failed: %v", err)
 		}
 	}

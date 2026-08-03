@@ -1539,6 +1539,14 @@ type remoteSyncFinalizeOptions struct {
 	Token              string
 }
 
+func remoteSyncPendingManifestName(token string) string {
+	return "sync-manifest." + token + ".new"
+}
+
+func remoteSyncPendingDeletedName(token string) string {
+	return "sync-deleted." + token + ".new"
+}
+
 func remoteWriteSyncManifestNew(workdir string) string {
 	script := "cd " + shellQuote(workdir) + " && " + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\" && cat > \"$meta_dir/sync-manifest.new\""
 	return "bash -lc " + shellQuote(script)
@@ -1560,6 +1568,8 @@ func remoteSyncInterpreterCommand(python, perl, args string) string {
 }
 
 func remoteWriteSyncManifestsNew(workdir, finalizeToken string) string {
+	manifestName := remoteSyncPendingManifestName(finalizeToken)
+	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + `mkdir -p "$meta_dir"
 IFS= read -r manifest_len
 case "$manifest_len" in
@@ -1568,9 +1578,8 @@ esac
 # Keep this to POSIX dd operands: minimal guests commonly provide BusyBox dd,
 # which rejects GNU's progress-suppression extension. Suppress only the summary;
 # dd's exit status still makes the fail-closed script abort on a short write.
-dd bs=1 count="$manifest_len" of="$meta_dir/sync-manifest.new" 2>/dev/null
-cat > "$meta_dir/sync-deleted.new"
-printf %s ` + shellQuote(finalizeToken) + ` > "$meta_dir/sync-finalize-token.new"
+dd bs=1 count="$manifest_len" of="$meta_dir/` + manifestName + `" 2>/dev/null
+cat > "$meta_dir/` + deletedName + `"
 `
 	return "bash -lc " + shellQuote(script)
 }
@@ -1592,6 +1601,8 @@ func remoteWriteSyncManifestsNewForTarget(target SSHTarget, workdir, finalizeTok
 }
 
 func remoteWriteSyncManifestsNewPython(workdir, finalizeToken string) string {
+	manifestName := remoteSyncPendingManifestName(finalizeToken)
+	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	python := `import base64
 import sys
 
@@ -1619,8 +1630,7 @@ with open(sys.argv[2], "wb") as handle:
     handle.write(deleted)
 `
 	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\"\n" +
-		"python3 -c " + shellQuote(python) + " \"$meta_dir/sync-manifest.new\" \"$meta_dir/sync-deleted.new\"\n" +
-		"printf %s " + shellQuote(finalizeToken) + " > \"$meta_dir/sync-finalize-token.new\"\n"
+		"python3 -c " + shellQuote(python) + " \"$meta_dir/" + manifestName + "\" \"$meta_dir/" + deletedName + "\"\n"
 	return "bash -lc " + shellQuote(script)
 }
 
@@ -1636,7 +1646,9 @@ fi
 	return "bash -lc " + shellQuote(script)
 }
 
-func remotePruneSyncManifest(workdir string) string {
+func remotePruneSyncManifest(workdir, finalizeToken string) string {
+	manifestName := remoteSyncPendingManifestName(finalizeToken)
+	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	python := `import sys
 
 def read_manifest(path):
@@ -1671,8 +1683,8 @@ print STDOUT map { $_ . "\0" } grep { !$new{$_} } @old;
 	script := "set -e -o pipefail\ncd " + shellQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `
 old="$meta_dir/sync-manifest"
-new="$meta_dir/sync-manifest.new"
-deleted="$meta_dir/sync-deleted.new"
+new="$meta_dir/` + manifestName + `"
+deleted="$meta_dir/` + deletedName + `"
 delete_paths() {
   while IFS= read -r -d '' rel; do
     case "$rel" in ''|/*|../*|*/../*) continue ;; esac
@@ -1693,19 +1705,21 @@ if [ -f "$old" ] && [ -f "$new" ]; then manifest_removed_paths | delete_paths; f
 	return "bash -lc " + shellQuote(script)
 }
 
-func remotePruneSyncManifestForTarget(target SSHTarget, workdir string) string {
+func remotePruneSyncManifestForTarget(target SSHTarget, workdir, finalizeToken string) string {
 	if isWindowsWSL2Target(target) {
-		return remotePruneSyncManifestCoreutils(workdir)
+		return remotePruneSyncManifestCoreutils(workdir, finalizeToken)
 	}
-	return remotePruneSyncManifest(workdir)
+	return remotePruneSyncManifest(workdir, finalizeToken)
 }
 
-func remotePruneSyncManifestCoreutils(workdir string) string {
+func remotePruneSyncManifestCoreutils(workdir, finalizeToken string) string {
+	manifestName := remoteSyncPendingManifestName(finalizeToken)
+	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	script := "set -e -o pipefail\ncd " + shellQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `
 old="$meta_dir/sync-manifest"
-new="$meta_dir/sync-manifest.new"
-deleted="$meta_dir/sync-deleted.new"
+new="$meta_dir/` + manifestName + `"
+deleted="$meta_dir/` + deletedName + `"
 delete_paths() {
   while IFS= read -r -d '' rel; do
     case "$rel" in ''|/*|../*|*/../*) continue ;; esac
@@ -1719,8 +1733,8 @@ delete_paths() {
 }
 if [ -f "$deleted" ]; then delete_paths < "$deleted"; fi
 if [ -f "$old" ] && [ -f "$new" ]; then
-  old_sorted="$meta_dir/sync-manifest.old.sorted"
-  new_sorted="$meta_dir/sync-manifest.new.sorted"
+  old_sorted="$meta_dir/sync-manifest.` + finalizeToken + `.old.sorted"
+  new_sorted="$meta_dir/sync-manifest.` + finalizeToken + `.new.sorted"
   LC_ALL=C sort -z "$old" > "$old_sorted"
   LC_ALL=C sort -z "$new" > "$new_sorted"
   comm -z -23 "$old_sorted" "$new_sorted" | delete_paths
@@ -1740,15 +1754,15 @@ func remoteFinalizeSync(workdir string, opts remoteSyncFinalizeOptions) string {
 	if opts.AllowMassDeletions {
 		allowValue = "1"
 	}
+	manifestName := remoteSyncPendingManifestName(opts.Token)
+	deletedName := remoteSyncPendingDeletedName(opts.Token)
 	script := `set -e
 cd ` + shellQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `
 mkdir -p "$meta_dir"
-new="$meta_dir/sync-manifest.new"
-deleted="$meta_dir/sync-deleted.new"
-rm -f "$deleted"
+new="$meta_dir/` + manifestName + `"
+deleted="$meta_dir/` + deletedName + `"
 manifest="$meta_dir/sync-manifest"
-pending_token="$meta_dir/sync-finalize-token.new"
 committed_token="$meta_dir/sync-finalize-token"
 complete_token="$meta_dir/sync-finalize-complete-token"
 expected_token=` + shellQuote(opts.Token) + `
@@ -1764,16 +1778,10 @@ if [ -f "$manifest" ] &&
   exit 0
 fi
 if [ -f "$new" ]; then
-  if [ -f "$pending_token" ]; then
-    if [ "$(cat "$pending_token")" != "$expected_token" ]; then
-      echo "remote sync finalize failed: pending token does not match this sync" >&2
-      exit 67
-    fi
-    mv "$pending_token" "$committed_token"
-  elif [ ! -f "$committed_token" ] || [ "$(cat "$committed_token")" != "$expected_token" ]; then
-    echo "remote sync finalize failed: pending token does not match this sync" >&2
-    exit 67
-  fi
+  committed_tmp="$committed_token.tmp.$$"
+  printf %s "$expected_token" > "$committed_tmp"
+  mv "$committed_tmp" "$committed_token"
+  rm -f "$deleted"
   mv "$new" "$manifest"
 elif [ ! -f "$manifest" ] || [ ! -f "$committed_token" ] || [ "$(cat "$committed_token")" != "$expected_token" ]; then
   echo "remote sync finalize failed: no committed manifest for this sync" >&2

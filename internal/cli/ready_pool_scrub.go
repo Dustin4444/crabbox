@@ -217,7 +217,8 @@ rm -rf -- .crabbox/env .crabbox/scripts .crabbox/logs .crabbox/captures .crabbox
 git_dir="$(safe_git rev-parse --git-dir)"
 meta_dir="$git_dir/crabbox"
 mkdir -p "$meta_dir"
-rm -f -- "$meta_dir/sync-fingerprint" "$meta_dir/sync-manifest" "$meta_dir/sync-manifest.new" "$meta_dir/sync-deleted.new"
+rm -f -- "$meta_dir/sync-fingerprint" "$meta_dir/sync-manifest" "$meta_dir/sync-finalize-token" "$meta_dir/sync-finalize-complete-token" "$meta_dir/sync-finalize-lock"
+rm -f -- "$meta_dir"/sync-manifest.*.new "$meta_dir"/sync-deleted.*.new "$meta_dir"/sync-finalize-lock.stale.*
 printf '%s %s\n' "$ref" "$target_commit" > "$meta_dir/git-hydrate-base"
 test "$(safe_git branch --show-current)" = "$ref"
 test "$(safe_git rev-parse HEAD)" = "$target_commit"
@@ -376,11 +377,16 @@ $gitDir = (& $git rev-parse --git-dir).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $gitDir) { throw "ready-pool Git metadata is missing" }
 $metaDir = Join-Path $gitDir 'crabbox'
 New-Item -ItemType Directory -Force -Path $metaDir | Out-Null
-foreach ($name in @('sync-fingerprint', 'sync-manifest', 'sync-manifest.new', 'sync-deleted.new')) {
+foreach ($name in @('sync-fingerprint', 'sync-manifest', 'sync-finalize-token', 'sync-finalize-complete-token', 'sync-finalize-lock')) {
   $metadataPath = Join-Path $metaDir $name
   if (Test-Path -LiteralPath $metadataPath) {
     Remove-Item -LiteralPath $metadataPath -Force -ErrorAction Stop
     if (Test-Path -LiteralPath $metadataPath) { throw "ready-pool stale Git metadata was not removed" }
+  }
+}
+foreach ($pattern in @('sync-manifest.*.new', 'sync-deleted.*.new', 'sync-finalize-lock.stale.*')) {
+  Get-ChildItem -LiteralPath $metaDir -Filter $pattern -Force -ErrorAction Stop | ForEach-Object {
+    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
   }
 }
 Set-Content -LiteralPath (Join-Path $metaDir 'git-hydrate-base') -Value "$ref $targetCommit"
