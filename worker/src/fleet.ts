@@ -1025,6 +1025,7 @@ export class FleetCoordinator {
   private readonly runtimeAdapterAgents = new Map<string, WebSocket>();
   private readonly runtimeAdapterPending = new Map<string, RuntimeAdapterPendingRequest>();
   private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
+  private readonly daytonaSnapshotBootstrapQueues = new Map<string, Promise<void>>();
   private readonly controlSockets = new Map<string, WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
   private readonly restoredBridgeSockets = new Set<WebSocket>();
@@ -12042,6 +12043,9 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    const cpu = input.cpu;
+    const memoryGiB = input.memoryGiB;
+    const diskGiB = input.diskGiB;
     const baseImage = typeof input.baseImage === "string" ? input.baseImage.trim() : "";
     if (!isImmutableOCIImageReference(baseImage)) {
       return json(
@@ -12052,14 +12056,16 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    const result = await new DaytonaClient(this.env).bootstrapSnapshot(
-      name,
-      input.cpu,
-      input.memoryGiB,
-      input.diskGiB,
-      baseImage,
-    );
-    return json({ snapshot: result });
+    return await this.withDaytonaSnapshotBootstrapLock(name, async () => {
+      const result = await new DaytonaClient(this.env).bootstrapSnapshot(
+        name,
+        cpu,
+        memoryGiB,
+        diskGiB,
+        baseImage,
+      );
+      return json({ snapshot: result });
+    });
   }
 
   private async adminTailscalePreflight(): Promise<Response> {
@@ -14651,6 +14657,31 @@ export class FleetCoordinator {
       return await operation();
     } finally {
       release();
+    }
+  }
+
+  private async withDaytonaSnapshotBootstrapLock<T>(
+    name: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    let release!: () => void;
+    const previous =
+      this.daytonaSnapshotBootstrapQueues.get(name)?.catch(() => {}) ?? Promise.resolve();
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => next);
+    this.daytonaSnapshotBootstrapQueues.set(name, tail);
+    await previous;
+    try {
+      // Daytona exposes async snapshot completion by name, so same-name
+      // bootstraps must not overlap and observe another request's active row.
+      return await operation();
+    } finally {
+      release();
+      if (this.daytonaSnapshotBootstrapQueues.get(name) === tail) {
+        this.daytonaSnapshotBootstrapQueues.delete(name);
+      }
     }
   }
 

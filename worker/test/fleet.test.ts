@@ -14566,9 +14566,15 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("restricts Daytona snapshot bootstrap to confirmed, bounded admin requests", async () => {
-    const fetchMock = vi.fn<typeof fetch>(
-      async () => new Response("provider unavailable", { status: 503 }),
-    );
+    let activeProviderRequests = 0;
+    let maxActiveProviderRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async () => {
+      activeProviderRequests += 1;
+      maxActiveProviderRequests = Math.max(maxActiveProviderRequests, activeProviderRequests);
+      await Promise.resolve();
+      activeProviderRequests -= 1;
+      return new Response("provider unavailable", { status: 503 });
+    });
     vi.stubGlobal("fetch", fetchMock);
     const baseImage = `daytonaio/sandbox@sha256:${"a".repeat(64)}`;
     const fleet = testFleet(
@@ -14618,6 +14624,7 @@ describe("fleet lease identity and idle", () => {
     );
     expect(acceptedResponses.map((response) => response.status)).toEqual([500, 500, 500, 500]);
     expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(maxActiveProviderRequests).toBe(1);
     fetchMock.mockClear();
 
     const invalidResults = await Promise.all(

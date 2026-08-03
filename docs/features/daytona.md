@@ -176,11 +176,13 @@ explicit `confirm: true` because it creates paid provider resources.
 ```
 
 CPU is limited to 1-4, memory to 1-8 GiB, and disk to 3-10 GiB. `baseImage`
-must use an immutable SHA-256 digest. The coordinator verifies the resources
-Daytona actually applied before snapshotting, deletes the temporary builder on
-success or failure, and configures Daytona to stop an idle builder after 30
-minutes and delete it after it remains stopped for another 60 minutes if the
-Worker cleanup request is lost.
+must use an immutable SHA-256 digest. The coordinator rejects an existing
+snapshot name, verifies the resources Daytona actually applied, waits for the
+new snapshot to become active for up to 20 minutes, and waits for the temporary
+builder to be destroyed or absent before reporting successful cleanup. It also
+configures Daytona to stop an idle builder after 30 minutes and delete it after
+it remains stopped for another 60 minutes if the Worker cleanup request is
+lost.
 
 After this route is deployed, mint a snapshot through the protected
 default-branch workflow. The `image-publisher` environment supplies coordinator
