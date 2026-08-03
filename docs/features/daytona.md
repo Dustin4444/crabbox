@@ -182,5 +182,25 @@ success or failure, and configures Daytona to stop an idle builder after 30
 minutes and delete it after it remains stopped for another 60 minutes if the
 Worker cleanup request is lost.
 
+After this route is deployed, mint a snapshot through the protected
+default-branch workflow. The `image-publisher` environment supplies coordinator
+admin auth, so the operator needs no Daytona credential:
+
+```sh
+gh workflow run daytona-snapshot-bootstrap.yml \
+  --ref main \
+  -f name=crabbox-ready \
+  -f cpu=2 \
+  -f memoryGiB=4 \
+  -f diskGiB=10 \
+  -f "baseImage=registry.example/crabbox@sha256:<digest>" \
+  -f confirm=create
+```
+
+The workflow requires the protected default-branch definition and environment
+approval, serializes snapshot creation, verifies the exact applied resources
+and `cleanup=deleted`, and uploads only sanitized proof without the builder ID
+or coordinator response.
+
 See [providers.md](../commands/providers.md) for the full provider matrix and
 [capabilities.md](capabilities.md) for opt-in lease features.
