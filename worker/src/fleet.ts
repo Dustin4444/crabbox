@@ -333,6 +333,10 @@ const runtimeAdapterMaxBufferedBytes = runtimeAdapterRelayFrameLimit * 2;
 const leaseCleanupRetryDelayMs = 5 * 60 * 1000;
 const leaseCleanupClaimStaleMs = 30 * 60 * 1000;
 const leaseCleanupBatchSize = 16;
+const interruptedProvisioningStaleMs = 30 * 60 * 1000;
+const interruptedProvisioningDeploySettleMs = 5 * 60 * 1000;
+const interruptedProvisioningAbsenceConfirmationMs = 30 * 60 * 1000;
+const interruptedProvisioningRecoveryBatchSize = 16;
 const awsOrphanSweepInitialDelayMs = 60 * 1000;
 const azureOrphanSweepInitialDelayMs = 60 * 1000;
 const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
@@ -2947,6 +2951,7 @@ export class FleetCoordinator {
     }
     await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
     await this.quarantineLegacyWorkspaces();
+    await this.reconcileInterruptedLeaseProvisioning();
     await this.expireLeases();
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.cleanupExpiredWebVNCPortalViewerAuth();
@@ -3266,6 +3271,9 @@ export class FleetCoordinator {
         delete reactivated.releaseDeletesServer;
         delete reactivated.failureError;
         delete reactivated.provisioningRequestStartedAt;
+        delete reactivated.provisioningCoordinatorVersion;
+        delete reactivated.provisioningRecoveryObservedAt;
+        delete reactivated.provisioningRecoveryMissingSince;
         clearLeaseCleanupMetadata(reactivated);
         const limitError = enforceCostLimitUsage(
           admission.costUsage,
@@ -3534,6 +3542,10 @@ export class FleetCoordinator {
         }
       }
       current.provisioningRequestStartedAt = new Date().toISOString();
+      const coordinatorVersion = this.env.CF_VERSION_METADATA?.id.trim();
+      if (coordinatorVersion) {
+        current.provisioningCoordinatorVersion = coordinatorVersion;
+      }
       current.updatedAt = current.provisioningRequestStartedAt;
       await this.putLease(current);
       return { started: true as const, current };
@@ -3627,6 +3639,9 @@ export class FleetCoordinator {
           record.state = "failed";
           record.updatedAt = failedAt;
           record.endedAt = failedAt;
+          delete record.provisioningCoordinatorVersion;
+          delete record.provisioningRecoveryObservedAt;
+          delete record.provisioningRecoveryMissingSince;
           record.cleanupFailedAt = failedAt;
           record.cleanupError = coordinatorErrorMessage(this.env, error);
           const awsOutcomeUncertain =
@@ -3693,6 +3708,9 @@ export class FleetCoordinator {
     record = structuredClone(current);
     record.state = "active";
     delete record.provisioningRequestStartedAt;
+    delete record.provisioningCoordinatorVersion;
+    delete record.provisioningRecoveryObservedAt;
+    delete record.provisioningRecoveryMissingSince;
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (server.hostID) {
@@ -4747,6 +4765,9 @@ export class FleetCoordinator {
         delete current.provisioningResourceMayExist;
         delete current.provisioningFailureRetryable;
         delete current.provisioningRequestStartedAt;
+        delete current.provisioningCoordinatorVersion;
+        delete current.provisioningRecoveryObservedAt;
+        delete current.provisioningRecoveryMissingSince;
         delete current.endedAt;
         delete current.releasedAt;
         clearLeaseCleanupMetadata(current);
@@ -4815,6 +4836,9 @@ export class FleetCoordinator {
       current.provisioningResourceMayExist = false;
       current.provisioningFailureRetryable = true;
       delete current.provisioningRequestStartedAt;
+      delete current.provisioningCoordinatorVersion;
+      delete current.provisioningRecoveryObservedAt;
+      delete current.provisioningRecoveryMissingSince;
       current.updatedAt = new Date().toISOString();
       await this.putLease(current);
       return current;
@@ -5733,6 +5757,9 @@ export class FleetCoordinator {
       current.provisioningResourceMayExist = false;
       current.provisioningFailureRetryable = false;
       delete current.provisioningRequestStartedAt;
+      delete current.provisioningCoordinatorVersion;
+      delete current.provisioningRecoveryObservedAt;
+      delete current.provisioningRecoveryMissingSince;
       if (releaseRequested) {
         current.releasedAt = failedAt;
         delete current.releaseDeletesServer;
@@ -12932,6 +12959,152 @@ export class FleetCoordinator {
     return json({ error: "not_found" }, { status: 404 });
   }
 
+  private async reconcileInterruptedLeaseProvisioning(): Promise<void> {
+    const now = Date.now();
+    const candidates = await this.state.runExclusive(async () => {
+      const due: LeaseRecord[] = [];
+      await this.visitLeaseRecords(async (lease) => {
+        if (due.length >= interruptedProvisioningRecoveryBatchSize) {
+          return;
+        }
+        if (
+          interruptedProvisioningVersionMismatch(lease, this.env) &&
+          !Number.isFinite(Date.parse(lease.provisioningRecoveryObservedAt ?? ""))
+        ) {
+          const observed = structuredClone(lease);
+          observed.provisioningRecoveryObservedAt = new Date(now).toISOString();
+          observed.updatedAt = observed.provisioningRecoveryObservedAt;
+          await this.putLease(observed);
+          return;
+        }
+        const recoveryAt = interruptedProvisioningRecoveryAt(lease, this.env, now);
+        if (recoveryAt !== undefined && recoveryAt <= now) {
+          due.push(structuredClone(lease));
+        }
+      });
+      return due;
+    });
+    await Promise.all(candidates.map((lease) => this.reconcileInterruptedLease(lease)));
+  }
+
+  private async reconcileInterruptedLease(lease: LeaseRecord): Promise<void> {
+    const providerName = managedLeaseProvider(lease);
+    if (!providerName) {
+      return;
+    }
+    const provider = this.provider(providerName, lease.region, lease.providerProject);
+    let server: ProviderMachine | undefined;
+    try {
+      server = await this.findInterruptedProvisioningServer(providerName, provider, lease);
+    } catch (error) {
+      const failure = `interrupted provisioning recovery failed: ${coordinatorErrorMessage(this.env, error)}`;
+      await this.state.runExclusive(async () => {
+        const current = await this.getLease(lease.id);
+        if (!sameProvisioningAttempt(current, lease)) {
+          return;
+        }
+        const failedAt = new Date();
+        current.cleanupAttempts = (current.cleanupAttempts ?? 0) + 1;
+        current.cleanupError = failure;
+        current.cleanupFailedAt = failedAt.toISOString();
+        current.cleanupRetryAt = new Date(
+          failedAt.getTime() + leaseCleanupRetryDelayMs,
+        ).toISOString();
+        current.updatedAt = failedAt.toISOString();
+        await this.putLease(current);
+      });
+      return;
+    }
+    await this.state.runExclusive(async () => {
+      const current = await this.getLease(lease.id);
+      if (!sameProvisioningAttempt(current, lease)) {
+        return;
+      }
+      const failedAtDate = new Date();
+      const failedAt = failedAtDate.toISOString();
+      const interruption =
+        "coordinator deployment or runtime restart interrupted provider provisioning";
+      current.updatedAt = failedAt;
+      if (server) {
+        current.state = "failed";
+        current.endedAt = failedAt;
+        delete current.provisioningRequestStartedAt;
+        delete current.provisioningCoordinatorVersion;
+        delete current.provisioningRecoveryObservedAt;
+        delete current.provisioningRecoveryMissingSince;
+        applyRecoveredServerIdentity(current, server);
+        current.releaseDeletesServer = true;
+        current.provisioningResourceMayExist = true;
+        current.provisioningFailureRetryable = false;
+        current.cleanupError = `${interruption}; recovered provider resource for cleanup`;
+        current.cleanupFailedAt = failedAt;
+        delete current.cleanupRetryAt;
+        delete current.failureError;
+      } else {
+        const missingSince = Date.parse(current.provisioningRecoveryMissingSince ?? "");
+        if (
+          !Number.isFinite(missingSince) ||
+          failedAtDate.getTime() < missingSince + interruptedProvisioningAbsenceConfirmationMs
+        ) {
+          // A negative inventory read can race an accepted asynchronous create. Keep checking
+          // until the provider has remained empty for the full confirmation window.
+          if (!Number.isFinite(missingSince)) {
+            current.provisioningRecoveryMissingSince = failedAt;
+          }
+          current.provisioningResourceMayExist = true;
+          current.provisioningFailureRetryable = true;
+          current.cleanupError = `${interruption}; provider resource not yet visible`;
+          current.cleanupFailedAt = failedAt;
+          current.cleanupRetryAt = new Date(
+            failedAtDate.getTime() + leaseCleanupRetryDelayMs,
+          ).toISOString();
+          delete current.failureError;
+          delete current.releaseDeletesServer;
+          await this.putLease(current);
+          return;
+        }
+        current.state = "failed";
+        current.endedAt = failedAt;
+        delete current.provisioningRequestStartedAt;
+        delete current.provisioningCoordinatorVersion;
+        delete current.provisioningRecoveryObservedAt;
+        delete current.provisioningRecoveryMissingSince;
+        current.cloudID = "";
+        current.serverID = 0;
+        current.serverName = "";
+        current.host = "";
+        current.failureError = `${interruption}; no provider resource found`;
+        current.provisioningResourceMayExist = false;
+        current.provisioningFailureRetryable = false;
+        delete current.releaseDeletesServer;
+        clearLeaseCleanupMetadata(current);
+      }
+      await this.putLease(current);
+    });
+  }
+
+  private async findInterruptedProvisioningServer(
+    providerName: Provider,
+    provider: CloudProvider,
+    lease: LeaseRecord,
+  ): Promise<ProviderMachine | undefined> {
+    let server = await provider.recoverServer?.(lease);
+    server ??= await provider.findServerByLease?.(lease.id);
+    if (!server && !provider.findServerByLease) {
+      const matches = (await provider.listCrabboxServers()).filter(
+        (candidate) => candidate.labels?.["lease"] === lease.id,
+      );
+      if (matches.length > 1) {
+        throw new Error(`multiple provider resources matched interrupted lease ${lease.id}`);
+      }
+      server = matches[0];
+    }
+    if (server && !providerLabelsOwnedByLease(server.labels ?? {}, lease, providerName)) {
+      throw new Error(`provider resource ownership does not match interrupted lease ${lease.id}`);
+    }
+    return server;
+  }
+
   private async expireLeases(): Promise<void> {
     const claims = await this.state.runExclusive(async () => {
       const now = Date.now();
@@ -12986,6 +13159,9 @@ export class FleetCoordinator {
           lease.state = "failed";
           lease.updatedAt = nowISO;
           lease.endedAt = nowISO;
+          delete lease.provisioningCoordinatorVersion;
+          delete lease.provisioningRecoveryObservedAt;
+          delete lease.provisioningRecoveryMissingSince;
           lease.cleanupFailedAt = nowISO;
           lease.cleanupError = "lease expired before provider returned a cloud resource";
           await this.putLease(lease, { noCache: true });
@@ -13145,7 +13321,7 @@ export class FleetCoordinator {
         lease.runtimeAdapterDeleteRequestedAt ||
         leaseNeedsCleanup(lease, now)
       ) {
-        retainAlarm(nextLeaseAlarmTime(lease));
+        retainAlarm(nextLeaseAlarmTime(lease, this.env));
       }
     });
     for (const handoffAlarm of await this.webVNCCredentialHandoffs.alarmTimes(now)) {
@@ -19782,9 +19958,69 @@ function retainProvisioningCleanupClaim(
   lease.cleanupRetryAt = new Date(Date.parse(failedAt) + leaseCleanupRetryDelayMs).toISOString();
 }
 
-function nextLeaseAlarmTime(lease: LeaseRecord): number {
+function interruptedProvisioningRecoveryAt(
+  lease: LeaseRecord,
+  env: Pick<Env, "CF_VERSION_METADATA">,
+  now = Date.now(),
+): number | undefined {
+  if (
+    lease.workspaceID ||
+    lease.state !== "provisioning" ||
+    lease.cloudID ||
+    !managedLeaseProvider(lease)
+  ) {
+    return undefined;
+  }
+  const startedAt = Date.parse(lease.provisioningRequestStartedAt ?? "");
+  if (!Number.isFinite(startedAt)) {
+    return undefined;
+  }
+  let recoveryAt = startedAt + interruptedProvisioningStaleMs;
+  if (interruptedProvisioningVersionMismatch(lease, env)) {
+    const observedAt = Date.parse(lease.provisioningRecoveryObservedAt ?? "");
+    recoveryAt = Number.isFinite(observedAt)
+      ? observedAt + interruptedProvisioningDeploySettleMs
+      : now;
+  }
+  const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
+  return Number.isFinite(retryAt) && retryAt > recoveryAt ? retryAt : recoveryAt;
+}
+
+function interruptedProvisioningVersionMismatch(
+  lease: LeaseRecord,
+  env: Pick<Env, "CF_VERSION_METADATA">,
+): boolean {
+  const currentVersion = env.CF_VERSION_METADATA?.id.trim();
+  return Boolean(
+    currentVersion &&
+    lease.provisioningCoordinatorVersion &&
+    lease.provisioningCoordinatorVersion !== currentVersion,
+  );
+}
+
+function sameProvisioningAttempt(
+  current: LeaseRecord | undefined,
+  expected: LeaseRecord,
+): current is LeaseRecord {
+  return Boolean(
+    current &&
+    current.state === "provisioning" &&
+    !current.cloudID &&
+    current.provisioningRequestStartedAt === expected.provisioningRequestStartedAt &&
+    current.provisioningCoordinatorVersion === expected.provisioningCoordinatorVersion &&
+    current.provisioningRecoveryObservedAt === expected.provisioningRecoveryObservedAt &&
+    current.provisioningRecoveryMissingSince === expected.provisioningRecoveryMissingSince,
+  );
+}
+
+function nextLeaseAlarmTime(lease: LeaseRecord, env: Pick<Env, "CF_VERSION_METADATA">): number {
   const now = Date.now();
   const expiresAt = Date.parse(lease.expiresAt);
+  const interruptedProvisioningAt = interruptedProvisioningRecoveryAt(lease, env);
+  const includeInterruptedProvisioning = (candidate: number): number =>
+    interruptedProvisioningAt === undefined
+      ? candidate
+      : Math.min(candidate, interruptedProvisioningAt);
   const runtimeAdapterDeleteRetryAt = Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "");
   const runtimeAdapterDeleteDispatchUntil = Date.parse(
     lease.runtimeAdapterDeleteDispatchUntil ?? "",
@@ -19799,29 +20035,33 @@ function nextLeaseAlarmTime(lease: LeaseRecord): number {
     ) {
       deleteAlarm = Math.max(deleteAlarm, runtimeAdapterDeleteDispatchUntil);
     }
-    return leaseIsLive(lease) && Number.isFinite(expiresAt)
-      ? Math.min(expiresAt, deleteAlarm)
-      : deleteAlarm;
+    return includeInterruptedProvisioning(
+      leaseIsLive(lease) && Number.isFinite(expiresAt)
+        ? Math.min(expiresAt, deleteAlarm)
+        : deleteAlarm,
+    );
   }
   if (lease.providerKeyCleanupPending && !lease.cleanupStartedAt) {
     const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
-    return Number.isFinite(retryAt) && retryAt > now ? retryAt : now + 1;
+    return includeInterruptedProvisioning(
+      Number.isFinite(retryAt) && retryAt > now ? retryAt : now + 1,
+    );
   }
   const claimDeadline = cleanupClaimDeadline(lease);
   if (lease.cleanupStartedAt && Number.isFinite(claimDeadline)) {
-    return claimDeadline;
+    return includeInterruptedProvisioning(claimDeadline);
   }
   const cleanupRetryAt = Date.parse(lease.cleanupRetryAt ?? "");
   if (Number.isFinite(cleanupRetryAt) && cleanupRetryAt <= now) {
-    return now + 1;
+    return includeInterruptedProvisioning(now + 1);
   }
   if (Number.isFinite(cleanupRetryAt)) {
     if (Number.isFinite(expiresAt) && expiresAt <= now) {
-      return cleanupRetryAt;
+      return includeInterruptedProvisioning(cleanupRetryAt);
     }
-    return Math.min(expiresAt, cleanupRetryAt);
+    return includeInterruptedProvisioning(Math.min(expiresAt, cleanupRetryAt));
   }
-  return expiresAt;
+  return includeInterruptedProvisioning(expiresAt);
 }
 
 function cleanupClaimDeadline(lease: LeaseRecord): number {
@@ -19858,6 +20098,9 @@ function terminalizeManualProviderCleanup(
   delete lease.cleanupClaimExpiresAt;
   delete lease.provisioningResourceMayExist;
   delete lease.provisioningFailureRetryable;
+  delete lease.provisioningCoordinatorVersion;
+  delete lease.provisioningRecoveryObservedAt;
+  delete lease.provisioningRecoveryMissingSince;
 }
 
 function clearRuntimeAdapterDeleteMetadata(lease: LeaseRecord): void {
@@ -19908,6 +20151,9 @@ function finalizedReleasedLease(
   lease.updatedAt = now;
   lease.releasedAt = now;
   lease.endedAt = now;
+  delete lease.provisioningCoordinatorVersion;
+  delete lease.provisioningRecoveryObservedAt;
+  delete lease.provisioningRecoveryMissingSince;
   if (wasUnprovisionedRelease) {
     lease.releaseDeletesServer = deleteServer;
   } else if (
