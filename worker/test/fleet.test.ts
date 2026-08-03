@@ -14565,9 +14565,12 @@ describe("fleet lease identity and idle", () => {
     expect(text).not.toContain("tskey-preflight-secret");
   });
 
-  it("restricts Daytona snapshot bootstrap to admin requests and a 2/4/10 target", async () => {
-    const fetchMock = vi.fn<typeof fetch>();
+  it("restricts Daytona snapshot bootstrap to confirmed, bounded admin requests", async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async () => new Response("provider unavailable", { status: 503 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
+    const baseImage = `daytonaio/sandbox@sha256:${"a".repeat(64)}`;
     const fleet = testFleet(
       new MemoryStorage(),
       {},
@@ -14584,26 +14587,93 @@ describe("fleet lease identity and idle", () => {
           cpu: 2,
           memoryGiB: 4,
           diskGiB: 10,
-          baseImage: "daytonaio/sandbox:0.8.0",
+          baseImage,
+          confirm: true,
         },
       }),
     );
     expect(forbidden.status).toBe(403);
 
-    const invalid = await fleet.fetch(
-      request("POST", "/v1/admin/providers/daytona/snapshot-bootstrap", {
-        headers: { "x-crabbox-admin": "true" },
-        body: {
-          name: "crabbox-ready-2x4x10",
-          cpu: 2,
-          memoryGiB: 4,
-          diskGiB: 8,
-          baseImage: "daytonaio/sandbox:0.8.0",
-        },
+    const acceptedResponses = await Promise.all(
+      [
+        baseImage,
+        `registry.example:5000/team/my--image@sha256:${"b".repeat(64)}`,
+        `registry.example/team/my__image:stable@sha256:${"c".repeat(64)}`,
+        `[2001:db8::1]:5000/team/image@sha256:${"d".repeat(64)}`,
+      ].map((validBaseImage) =>
+        fleet.fetch(
+          request("POST", "/v1/admin/providers/daytona/snapshot-bootstrap", {
+            headers: { "x-crabbox-admin": "true" },
+            body: {
+              name: "snapshot",
+              cpu: 2,
+              memoryGiB: 4,
+              diskGiB: 10,
+              baseImage: validBaseImage,
+              confirm: true,
+            },
+          }),
+        ),
+      ),
+    );
+    expect(acceptedResponses.map((response) => response.status)).toEqual([500, 500, 500, 500]);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    fetchMock.mockClear();
+
+    const invalidResults = await Promise.all(
+      [
+        [
+          { name: "snapshot", cpu: 2, memoryGiB: 4, diskGiB: 10, baseImage },
+          "snapshot_bootstrap_confirmation_required",
+        ],
+        [
+          { name: "snapshot", cpu: 5, memoryGiB: 4, diskGiB: 10, baseImage, confirm: true },
+          "invalid_snapshot_cpu",
+        ],
+        [
+          { name: "snapshot", cpu: 2, memoryGiB: 9, diskGiB: 10, baseImage, confirm: true },
+          "invalid_snapshot_memory",
+        ],
+        [
+          { name: "snapshot", cpu: 2, memoryGiB: 4, diskGiB: 11, baseImage, confirm: true },
+          "invalid_snapshot_disk",
+        ],
+        [
+          {
+            name: "snapshot",
+            cpu: 2,
+            memoryGiB: 4,
+            diskGiB: 10,
+            baseImage: "daytonaio/sandbox:latest",
+            confirm: true,
+          },
+          "invalid_base_image",
+        ],
+        [
+          {
+            name: "snapshot",
+            cpu: 2,
+            memoryGiB: 4,
+            diskGiB: 10,
+            baseImage: `registry/repository:5000/image@sha256:${"a".repeat(64)}`,
+            confirm: true,
+          },
+          "invalid_base_image",
+        ],
+      ].map(async ([body, error]) => {
+        const invalid = await fleet.fetch(
+          request("POST", "/v1/admin/providers/daytona/snapshot-bootstrap", {
+            headers: { "x-crabbox-admin": "true" },
+            body,
+          }),
+        );
+        return { status: invalid.status, body: await invalid.json(), error };
       }),
     );
-    expect(invalid.status).toBe(400);
-    await expect(invalid.json()).resolves.toMatchObject({ error: "invalid_snapshot_disk" });
+    for (const result of invalidResults) {
+      expect(result.status).toBe(400);
+      expect(result.body).toMatchObject({ error: result.error });
+    }
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

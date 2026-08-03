@@ -11,6 +11,7 @@ const baseEnv: Env = {
   CRABBOX_DAYTONA_API_URL: "https://daytona.example/api",
   CRABBOX_DAYTONA_SNAPSHOT: "crabbox-ready",
 };
+const baseImage = `daytonaio/sandbox@sha256:${"a".repeat(64)}`;
 
 describe("daytona coordinator client", () => {
   it("requires a dedicated Worker secret and a safe API URL", () => {
@@ -231,9 +232,9 @@ describe("daytona coordinator client", () => {
     });
 
     await expect(
-      client.bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, "daytonaio/sandbox:0.8.0"),
+      client.bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, baseImage),
     ).resolves.toEqual({
-      sourceSnapshot: "daytonaio/sandbox:0.8.0",
+      sourceSnapshot: baseImage,
       sourceCPU: 2,
       sourceMemoryGiB: 4,
       sourceDiskGiB: 10,
@@ -256,14 +257,18 @@ describe("daytona coordinator client", () => {
     ]);
     expect(calls[0]?.body).toMatchObject({
       buildInfo: {
-        dockerfileContent: "FROM daytonaio/sandbox:0.8.0",
+        dockerfileContent: `FROM ${baseImage}`,
       },
+      autoStopInterval: 30,
+      autoDeleteInterval: 60,
+      ttlMinutes: 30,
       cpu: 2,
       memory: 4,
       disk: 10,
       labels: {
         created_by: "crabbox",
         purpose: "snapshot-bootstrap",
+        snapshot_name: "crabbox-ready-2x4x10",
       },
     });
     expect(calls[0]?.body).not.toMatchObject({
@@ -302,10 +307,45 @@ describe("daytona coordinator client", () => {
     });
 
     await expect(
-      client.bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, "daytonaio/sandbox:0.8.0"),
+      client.bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, baseImage),
     ).rejects.toThrow("http 503");
     expect(methods.at(-1)).toBe("DELETE /api/sandbox/snapshot-builder");
   });
+
+  it.each([2, 6])(
+    "deletes the builder when Daytona applies %d GiB instead of the requested memory",
+    async (appliedMemoryGiB) => {
+      const methods: string[] = [];
+      const client = new DaytonaClient(baseEnv);
+      client.pollDelayMs = 0;
+      client.fetcher = vi.fn<typeof fetch>(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        methods.push(`${request.method} ${url.pathname}`);
+        if (request.method === "POST" && url.pathname === "/api/sandbox") {
+          return Response.json({ id: "undersized-builder", state: "creating" });
+        }
+        if (request.method === "GET") {
+          return Response.json({
+            id: "undersized-builder",
+            state: "started",
+            cpu: 2,
+            memory: appliedMemoryGiB,
+            disk: 10,
+          });
+        }
+        if (request.method === "DELETE") {
+          return new Response(null, { status: 204 });
+        }
+        throw new Error(`unexpected request ${request.method} ${request.url}`);
+      });
+
+      await expect(
+        client.bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, baseImage),
+      ).rejects.toThrow(`has ${appliedMemoryGiB} GiB memory after 4 GiB image build`);
+      expect(methods.at(-1)).toBe("DELETE /api/sandbox/undersized-builder");
+    },
+  );
 
   it.each(["started", "running", "ready", "active", " Active "])(
     "accepts Daytona ready state %j",

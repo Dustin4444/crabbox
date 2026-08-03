@@ -198,9 +198,13 @@ export class DaytonaClient {
       labels: {
         created_by: "crabbox",
         purpose: "snapshot-bootstrap",
+        snapshot_name: name,
       },
-      autoStopInterval: 0,
-      autoDeleteInterval: -1,
+      // The normal cleanup path deletes immediately. Provider-side expiry keeps a
+      // lost Worker request from leaving a paid bootstrap sandbox indefinitely.
+      autoStopInterval: 30,
+      autoDeleteInterval: 60,
+      ttlMinutes: 30,
       buildInfo: {
         dockerfileContent: `FROM ${baseImage}`,
       },
@@ -215,20 +219,23 @@ export class DaytonaClient {
     let operationError: unknown;
     try {
       const created = await this.request<DaytonaSandbox>("POST", "/sandbox", body);
-      sandboxID = created.id;
+      sandboxID = created.id?.trim() ?? "";
+      if (!sandboxID) {
+        throw new Error("daytona snapshot bootstrap returned no sandbox id");
+      }
       await this.waitForState(sandboxID, ["started", "running", "ready", "active"]);
       const built = await this.getSandbox(sandboxID);
-      if (built.cpu === undefined || built.cpu < cpu) {
+      if (built.cpu !== cpu) {
         throw new Error(
           `daytona sandbox ${sandboxID} has ${built.cpu ?? "unknown"} CPU after ${cpu} CPU image build`,
         );
       }
-      if (built.memory === undefined || built.memory < memoryGiB) {
+      if (built.memory !== memoryGiB) {
         throw new Error(
           `daytona sandbox ${sandboxID} has ${built.memory ?? "unknown"} GiB memory after ${memoryGiB} GiB image build`,
         );
       }
-      if (built.disk === undefined || built.disk < diskGiB) {
+      if (built.disk !== diskGiB) {
         throw new Error(
           `daytona sandbox ${sandboxID} disk is ${built.disk ?? "unknown"} GiB after ${diskGiB} GiB image build`,
         );

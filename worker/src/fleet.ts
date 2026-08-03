@@ -11993,7 +11993,18 @@ export class FleetCoordinator {
       memoryGiB?: unknown;
       diskGiB?: unknown;
       baseImage?: unknown;
+      confirm?: unknown;
     }>(request);
+    if (input.confirm !== true) {
+      return json(
+        {
+          error: "snapshot_bootstrap_confirmation_required",
+          message:
+            "confirm=true is required because this operation creates paid provider resources",
+        },
+        { status: 400 },
+      );
+    }
     const name = typeof input.name === "string" ? input.name.trim() : "";
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/.test(name)) {
       return json(
@@ -12004,39 +12015,39 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    if (input.cpu !== 2) {
+    if (!integerInRange(input.cpu, 1, 4)) {
       return json(
         {
           error: "invalid_snapshot_cpu",
-          message: "temporary Daytona snapshot bootstrap requires cpu=2",
+          message: "cpu must be an integer from 1 through 4",
         },
         { status: 400 },
       );
     }
-    if (input.memoryGiB !== 4) {
+    if (!integerInRange(input.memoryGiB, 1, 8)) {
       return json(
         {
           error: "invalid_snapshot_memory",
-          message: "temporary Daytona snapshot bootstrap requires memoryGiB=4",
+          message: "memoryGiB must be an integer from 1 through 8",
         },
         { status: 400 },
       );
     }
-    if (input.diskGiB !== 10) {
+    if (!integerInRange(input.diskGiB, 3, 10)) {
       return json(
         {
           error: "invalid_snapshot_disk",
-          message: "temporary Daytona snapshot bootstrap requires diskGiB=10",
+          message: "diskGiB must be an integer from 3 through 10",
         },
         { status: 400 },
       );
     }
     const baseImage = typeof input.baseImage === "string" ? input.baseImage.trim() : "";
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,254}$/.test(baseImage)) {
+    if (!isImmutableOCIImageReference(baseImage)) {
       return json(
         {
           error: "invalid_base_image",
-          message: "baseImage must be a single OCI image reference",
+          message: "baseImage must be an OCI image reference pinned by sha256 digest",
         },
         { status: 400 },
       );
@@ -18498,6 +18509,64 @@ function clampLimit(value: string | null, fallback: number): number {
     return fallback;
   }
   return Math.min(Math.trunc(parsed), 500);
+}
+
+function integerInRange(value: unknown, minimum: number, maximum: number): value is number {
+  return Number.isInteger(value) && Number(value) >= minimum && Number(value) <= maximum;
+}
+
+function isImmutableOCIImageReference(value: string): boolean {
+  const match = /^(.*)@sha256:([a-f0-9]{64})$/.exec(value);
+  if (!match) return false;
+  let name = match[1] ?? "";
+  const lastSlash = name.lastIndexOf("/");
+  const lastColon = name.lastIndexOf(":");
+  if (lastColon > lastSlash) {
+    const tag = name.slice(lastColon + 1);
+    if (!/^[\w][\w.-]{0,127}$/.test(tag)) return false;
+    name = name.slice(0, lastColon);
+  }
+  if (!name || name.length > 255) return false;
+
+  const components = name.split("/");
+  if (components.some((component) => !component)) return false;
+  const first = components[0] ?? "";
+  const hasRegistryAuthority =
+    components.length > 1 &&
+    (first === "localhost" || first.includes(".") || first.includes(":") || first.startsWith("["));
+  if (hasRegistryAuthority && !isOCIRegistryAuthority(first)) return false;
+
+  const repositoryComponents = hasRegistryAuthority ? components.slice(1) : components;
+  return repositoryComponents.every((component) =>
+    /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$/.test(component),
+  );
+}
+
+function isOCIRegistryAuthority(value: string): boolean {
+  if (value.startsWith("[")) {
+    try {
+      const parsed = new URL(`https://${value}`);
+      return (
+        parsed.hostname.startsWith("[") &&
+        parsed.pathname === "/" &&
+        !parsed.username &&
+        !parsed.password &&
+        !parsed.search &&
+        !parsed.hash
+      );
+    } catch {
+      return false;
+    }
+  }
+  const domainComponent = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
+  const domain = `(?:${domainComponent})(?:\\.${domainComponent})*`;
+  if (!new RegExp(`^${domain}(?::[0-9]+)?$`, "i").test(value)) return false;
+  try {
+    const parsed = new URL(`https://${value}`);
+    return parsed.pathname === "/" && !parsed.username && !parsed.password && !parsed.search;
+  } catch {
+    return false;
+  }
 }
 
 function orgFilterKey(url: URL): string | null | undefined {
