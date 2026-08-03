@@ -583,7 +583,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		BaseSHA:            gitHydrateBaseSHA(repo, cfg.Sync.BaseRef),
 		Fingerprint:        fingerprint,
 	})
-	if out, err := runSSHCombinedOutput(ctx, target, finalizeCommand); err != nil {
+	if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
 		if out != "" {
 			return exit(6, "remote sync finalize failed: %s: %v", out, err)
 		}
@@ -2268,25 +2268,11 @@ func runActionsHydrationQuiet(ctx context.Context, target SSHTarget, remote stri
 	return err
 }
 
-var actionsHydrationMarkerRetryDelay = 2 * time.Second
-
 func clearActionsHydrationState(ctx context.Context, target SSHTarget, leaseID string) error {
 	remote := remoteClearActionsHydrationStateForTarget(target, leaseID)
-	var lastErr error
-	var lastOutput string
-	for attempt := 0; attempt < 2; attempt++ {
-		lastOutput, lastErr = runSSHCombinedOutput(ctx, target, remote)
-		if lastErr == nil {
-			return nil
-		}
-		if !shouldRetrySSHPort(lastErr) || attempt == 1 {
-			break
-		}
-		// Marker removal is idempotent, so a bounded retry can absorb a gateway
-		// transport refusal without risking duplicate user or workflow commands.
-		if err := sleepContext(ctx, actionsHydrationMarkerRetryDelay); err != nil {
-			return exit(7, "clear GitHub Actions hydration marker on %s: %v", target.Host, err)
-		}
+	lastOutput, lastErr := runIdempotentSSHCombinedOutput(ctx, target, remote, idempotentSSHRetryDelay)
+	if lastErr == nil {
+		return nil
 	}
 	details := strings.TrimSpace(lastOutput)
 	if target.AuthSecret {

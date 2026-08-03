@@ -1519,9 +1519,9 @@ exit 0
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
-	originalDelay := actionsHydrationMarkerRetryDelay
-	actionsHydrationMarkerRetryDelay = 0
-	t.Cleanup(func() { actionsHydrationMarkerRetryDelay = originalDelay })
+	originalDelay := idempotentSSHRetryDelay
+	idempotentSSHRetryDelay = 0
+	t.Cleanup(func() { idempotentSSHRetryDelay = originalDelay })
 
 	err := clearActionsHydrationState(context.Background(), SSHTarget{
 		User: "crabbox",
@@ -1557,9 +1557,9 @@ exit 255
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
-	originalDelay := actionsHydrationMarkerRetryDelay
-	actionsHydrationMarkerRetryDelay = 0
-	t.Cleanup(func() { actionsHydrationMarkerRetryDelay = originalDelay })
+	originalDelay := idempotentSSHRetryDelay
+	idempotentSSHRetryDelay = 0
+	t.Cleanup(func() { idempotentSSHRetryDelay = originalDelay })
 
 	err := clearActionsHydrationState(context.Background(), SSHTarget{
 		User:       "opaque-access-token",

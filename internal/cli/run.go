@@ -1417,7 +1417,7 @@ retrySync:
 			BaseSHA:            baseSHA,
 			Fingerprint:        fingerprint,
 		})
-		if out, err := runSSHCombinedOutput(ctx, target, finalizeCommand); err != nil {
+		if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
 			if out != "" {
 				return recordFailure(exit(6, "remote sync finalize failed: %s: %v", out, err))
 			}
