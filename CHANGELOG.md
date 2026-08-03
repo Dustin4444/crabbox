@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added an admin-only Daytona snapshot bootstrap route and protected
+  default-branch workflow with bounded resources, immutable base images,
+  applied-capacity and active-snapshot verification, sanitized proof, and
+  completion-verified builder cleanup.
 - Added a protected broker soak workflow that records sanitized AWS/Azure
   maintenance evidence and runs one bounded, cleanup-verified Daytona canary
   without direct provider credentials or a warm pool.

@@ -50,12 +50,12 @@ Each variable also has a `CRABBOX_`-prefixed form that takes precedence over the
 bare Daytona name (useful when other tooling already owns the unprefixed
 variable):
 
-| Crabbox-prefixed                  | Daytona name               | Config key                |
-| --------------------------------- | -------------------------- | ------------------------- |
-| `CRABBOX_DAYTONA_API_KEY`         | `DAYTONA_API_KEY`          | `daytona.apiKey`          |
-| `CRABBOX_DAYTONA_JWT_TOKEN`       | `DAYTONA_JWT_TOKEN`        | `daytona.jwtToken`        |
-| `CRABBOX_DAYTONA_ORGANIZATION_ID` | `DAYTONA_ORGANIZATION_ID`  | `daytona.organizationId`  |
-| `CRABBOX_DAYTONA_API_URL`         | `DAYTONA_API_URL`          | `daytona.apiUrl`          |
+| Crabbox-prefixed                  | Daytona name              | Config key               |
+| --------------------------------- | ------------------------- | ------------------------ |
+| `CRABBOX_DAYTONA_API_KEY`         | `DAYTONA_API_KEY`         | `daytona.apiKey`         |
+| `CRABBOX_DAYTONA_JWT_TOKEN`       | `DAYTONA_JWT_TOKEN`       | `daytona.jwtToken`       |
+| `CRABBOX_DAYTONA_ORGANIZATION_ID` | `DAYTONA_ORGANIZATION_ID` | `daytona.organizationId` |
+| `CRABBOX_DAYTONA_API_URL`         | `DAYTONA_API_URL`         | `daytona.apiUrl`         |
 
 The API URL defaults to `https://app.daytona.io/api`.
 
@@ -96,15 +96,15 @@ daytona:
   sshAccessMinutes: 30 # SSH access token TTL
 ```
 
-| Config key             | Flag                          | Default                     |
-| ---------------------- | ----------------------------- | --------------------------- |
-| `daytona.snapshot`     | `--daytona-snapshot`          | _(required)_                |
-| `daytona.target`       | `--daytona-target`            | _(empty)_                   |
-| `daytona.user`         | `--daytona-user`              | `daytona`                   |
-| `daytona.workRoot`     | `--daytona-work-root`         | `/home/daytona/crabbox`     |
-| `daytona.sshGatewayHost` | `--daytona-ssh-gateway-host` | `ssh.app.daytona.io`       |
-| `daytona.sshAccessMinutes` | `--daytona-ssh-access-minutes` | `30`                  |
-| `daytona.apiUrl`       | `--daytona-api-url`           | `https://app.daytona.io/api` |
+| Config key                 | Flag                           | Default                      |
+| -------------------------- | ------------------------------ | ---------------------------- |
+| `daytona.snapshot`         | `--daytona-snapshot`           | _(required)_                 |
+| `daytona.target`           | `--daytona-target`             | _(empty)_                    |
+| `daytona.user`             | `--daytona-user`               | `daytona`                    |
+| `daytona.workRoot`         | `--daytona-work-root`          | `/home/daytona/crabbox`      |
+| `daytona.sshGatewayHost`   | `--daytona-ssh-gateway-host`   | `ssh.app.daytona.io`         |
+| `daytona.sshAccessMinutes` | `--daytona-ssh-access-minutes` | `30`                         |
+| `daytona.apiUrl`           | `--daytona-api-url`            | `https://app.daytona.io/api` |
 
 A snapshot is required; `warmup`/`run` fail without `--daytona-snapshot` or
 `daytona.snapshot`.
@@ -156,6 +156,53 @@ lease labels before destructive cleanup, refreshes the SSH token before expiry,
 redacts that token from the portal, and treats an already absent owned sandbox
 as successful cleanup. Workspaces and ready pools are disabled because they
 persist an SSH endpoint beyond the rotating credential.
+
+## Snapshot bootstrap administration
+
+The coordinator exposes `POST /v1/admin/providers/daytona/snapshot-bootstrap`
+for creating a reusable Daytona snapshot without giving clients Daytona
+credentials. The request requires coordinator admin authentication and an
+explicit `confirm: true` because it creates paid provider resources.
+
+```json
+{
+	"name": "crabbox-ready",
+	"cpu": 2,
+	"memoryGiB": 4,
+	"diskGiB": 10,
+	"baseImage": "registry.example/crabbox@sha256:<64 lowercase hex characters>",
+	"confirm": true
+}
+```
+
+CPU is limited to 1-4, memory to 1-8 GiB, and disk to 3-10 GiB. `baseImage`
+must use an immutable SHA-256 digest. The coordinator rejects an existing
+snapshot name, verifies the resources Daytona actually applied, waits for the
+new snapshot to become active for up to 20 minutes, and waits for the temporary
+builder to be destroyed or absent before reporting successful cleanup. It also
+configures Daytona to stop an idle builder after 30 minutes and delete it after
+it remains stopped for another 60 minutes if the Worker cleanup request is
+lost.
+
+After this route is deployed, mint a snapshot through the protected
+default-branch workflow. The `image-publisher` environment supplies coordinator
+admin auth, so the operator needs no Daytona credential:
+
+```sh
+gh workflow run daytona-snapshot-bootstrap.yml \
+  --ref main \
+  -f name=crabbox-ready \
+  -f cpu=2 \
+  -f memoryGiB=4 \
+  -f diskGiB=10 \
+  -f "baseImage=registry.example/crabbox@sha256:<digest>" \
+  -f confirm=create
+```
+
+The workflow requires the protected default-branch definition and environment
+approval, serializes snapshot creation, verifies the exact applied resources
+and `cleanup=deleted`, and uploads only sanitized proof without the builder ID
+or coordinator response.
 
 See [providers.md](../commands/providers.md) for the full provider matrix and
 [capabilities.md](capabilities.md) for opt-in lease features.
