@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.41.0 - 2026-08-03
 
 ### Added
 
@@ -13,11 +13,21 @@
   without direct provider credentials or a warm pool.
 - Added a protected default-branch workflow for rotating the coordinator admin
   token from a one-time environment secret without exposing it on argv.
-- Added exact brokered lease image identity and provider startup phase timings, plus Azure OS disk snapshot promotion and automatic scoped selection.
-- Added a project vision that defines Crabbox as a remote execution and evidence layer called by agents, with agent orchestration and model-credential delivery explicitly outside its scope.
+- Added exact brokered lease image identity and provider startup phase timings,
+  plus Azure OS disk snapshot promotion and automatic scoped selection. Thanks
+  @vincentkoc.
+- Added checksum-pinned TruffleHog to Linux, macOS, Windows, Azure, and WSL2
+  developer environments, plus a protected workflow for publishing and proving
+  promoted AWS images.
+- Added use-case and pricing guides, an accessible workload router with
+  runnable provider recommendations, and a project vision that keeps agent
+  orchestration and model credentials outside Crabbox. Thanks @zozo123.
+- Documented Tensorlake's public `tl-crabbox` image and Pi coding-agent skill
+  discovery.
 - Added coordinator-owned ready-pool desired capacity with atomic fill claims, provider-neutral compatibility keys, borrow heartbeats, abandoned-borrow quarantine, stale-record pruning, and pool counters.
 - Added reserved `CRABBOX_LEASE_ID`, `CRABBOX_RUN_ID`, and `CRABBOX_SLUG` metadata to every remote command, with Crabbox-owned values taking precedence over forwarded environment variables.
 - Added browser-initiated, owner-bound coordinator pairing grants and revocable credential-free device tokens for read-only lease status.
+- Redesigned the portal, OAuth results, WebVNC and Code interstitials, and CLI-served pages with the Carapace design system, added run and provider charts, and fixed clipped or stretched layouts. Thanks @vincentkoc.
 
 ### Fixed
 
@@ -39,22 +49,26 @@
   coordinator-managed image policy no longer requires admin-token auth.
 - Made brokered Daytona usable with Crabbox auth alone, added a read-only
   fallback readiness probe with truthful control/data-plane diagnostics, and
-  made repeated sandbox cleanup idempotent.
+  made repeated sandbox cleanup idempotent. Thanks @vincentkoc.
 - Quarantined exact-owned AWS and Azure orphan candidates across consecutive successful inventories before deletion, and added bounded provider reconciliation backoff after inventory failures.
 - Made AWS developer-image publication prove the exact promoted AMI was selected, and skip redundant base-package APT bootstrap on verified prebaked Linux images.
+- Prevented Hyper-V provisioning from hanging while Windows guests boot and
+  made plain templates install a checksum-pinned OpenSSH package without
+  depending on Windows Features on Demand.
+- Forwarded explicit ARM64 and AMD64 guest architecture selections to Apple
+  Container while preserving the implicit native ARM64 path.
 - Bounded device membership revalidation to one GitHub revalidation per token per minute while preserving immediate token revocation, fail-closed errors, and a distinct re-pairing response for expired OAuth grants.
 - Kept ready-pool reconciliation rollout-compatible with older CLIs and coordinators, preserved unexpired in-flight claims across policy changes, and required actual ready capacity for `pool ensure` success.
 - Authorized RunPod SSH access with the configured public key while rejecting missing, empty, or invalid key files before creating a paid pod. Thanks @morluto.
+- Restored Blaxel runs against current APIs with lifecycle policies, full-document label updates, absolute filesystem paths, and bounded workload-readiness retries. Thanks @arcabotai.
+- Made Apple VM helper termination polls cancellation-aware while preserving bounded cleanup after a cancelled start. Thanks @SebTardif.
+- Rejected authority-changing Semaphore pagination links before authenticated requests can leave the configured origin. Thanks @SebTardif.
+- Kept provider-backed details out of coordinator WebSocket error logs and removed narrowing conversion from inherited WebVNC listener descriptors. Thanks @vincentkoc.
 
-## 0.40.1 - 2026-07-23
+## 0.40.1 - Unpublished
 
-### Added
-
-- Documented Tensorlake's public `tl-crabbox` image, its writable `/workspace`, and its pnpm-ready setup guide.
-
-### Fixed
-
-- Forwarded explicit ARM64 and AMD64 guest architecture selections to Apple Container while preserving the implicit native ARM64 path.
+- No tag or GitHub release was published. Its prepared changes are included in
+  0.41.0.
 
 ## 0.40.0 - 2026-07-19
 
