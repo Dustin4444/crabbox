@@ -11919,7 +11919,9 @@ export class FleetCoordinator {
   }
 
   private async adminDaytonaSnapshotBootstrap(request: Request): Promise<Response> {
-    const input = await readJson<{ name?: unknown; diskGiB?: unknown }>(request);
+    const input = await readJson<{ name?: unknown; diskGiB?: unknown; baseImage?: unknown }>(
+      request,
+    );
     const name = typeof input.name === "string" ? input.name.trim() : "";
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/.test(name)) {
       return json(
@@ -11939,7 +11941,21 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    const result = await new DaytonaClient(this.env).bootstrapSnapshot(name, input.diskGiB);
+    const baseImage = typeof input.baseImage === "string" ? input.baseImage.trim() : "";
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,254}$/.test(baseImage)) {
+      return json(
+        {
+          error: "invalid_base_image",
+          message: "baseImage must be a single OCI image reference",
+        },
+        { status: 400 },
+      );
+    }
+    const result = await new DaytonaClient(this.env).bootstrapSnapshot(
+      name,
+      input.diskGiB,
+      baseImage,
+    );
     return json({ snapshot: result });
   }
 
