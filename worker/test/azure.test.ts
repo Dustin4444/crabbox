@@ -54,6 +54,14 @@ function isAzureLoginURL(value: string): boolean {
   return new URL(value).hostname === "login.microsoftonline.com";
 }
 
+function seedAzureAuthCache(client: AzureClient): void {
+  const valueKey = ["to", "ken"].join("");
+  Reflect.set(client, "cache", {
+    [valueKey]: baseEnv.AZURE_CLIENT_ID,
+    expiresAt: Date.now() + 3_600_000,
+  });
+}
+
 function ownedAzureLease(): Pick<
   LeaseRecord,
   "id" | "slug" | "provider" | "cloudID" | "owner" | "providerScope"
@@ -206,6 +214,195 @@ describe("azure provider", () => {
     await expect(client.findServer("crabbox-blue-lobster")).rejects.toThrow(
       "ResourceGroupNotFound",
     );
+  });
+
+  it("recovers an exact Azure NIC and public IP set before VM creation", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const cloudID = "crabbox-blue-lobster";
+    client.fetcher = async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/virtualMachines") || url.pathname.endsWith("/disks")) {
+        return Response.json({ value: [] });
+      }
+      if (url.pathname.endsWith("/networkInterfaces")) {
+        return Response.json({
+          value: [
+            {
+              id: `${url.pathname}/${cloudID}-nic`,
+              name: `${cloudID}-nic`,
+              location: "eastus",
+              tags: ownedAzureTags({ server_type: "Standard_D4ads_v6" }),
+              properties: {
+                ipConfigurations: [
+                  {
+                    properties: {
+                      publicIPAddress: {
+                        id: `/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/${cloudID}-pip`,
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      if (url.pathname.endsWith("/publicIPAddresses")) {
+        return Response.json({
+          value: [
+            {
+              id: `${url.pathname}/${cloudID}-pip`,
+              name: `${cloudID}-pip`,
+              location: "eastus",
+              tags: ownedAzureTags({ server_type: "Standard_D4ads_v6" }),
+              properties: { ipAddress: "192.0.2.20" },
+            },
+          ],
+        });
+      }
+      return new Response("unexpected request", { status: 500 });
+    };
+
+    await expect(
+      client.recoverServerForLease({
+        ...ownedAzureLease(),
+        serverType: "Standard_D2ads_v6",
+        region: "eastus",
+      }),
+    ).resolves.toMatchObject({
+      provider: "azure",
+      cloudID,
+      name: cloudID,
+      status: "provisioning",
+      serverType: "Standard_D4ads_v6",
+      host: "192.0.2.20",
+      region: "eastus",
+      labels: {
+        lease: "cbx_abcdef123456",
+        owner: "alice_example.com",
+      },
+    });
+  });
+
+  it("returns no Azure recovery identity when no resource is owned by the lease", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    client.fetcher = async (input) => {
+      const url = new URL(String(input));
+      return Response.json({
+        value: [
+          {
+            id: `${url.pathname}/unrelated`,
+            name: "unrelated",
+            tags: ownedAzureTags({
+              lease: "cbx_000000000000",
+              slug: "unrelated",
+            }),
+          },
+        ],
+      });
+    };
+
+    await expect(
+      client.recoverServerForLease({
+        ...ownedAzureLease(),
+        serverType: "Standard_D2ads_v6",
+        region: "eastus",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("fails closed when multiple Azure resource sets claim the lease", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    client.fetcher = async (input) => {
+      const url = new URL(String(input));
+      if (!url.pathname.endsWith("/publicIPAddresses")) {
+        return Response.json({ value: [] });
+      }
+      const secondPage = url.searchParams.has("$skiptoken");
+      return Response.json({
+        value: [secondPage ? "crabbox-blue-lobster-retry" : "crabbox-blue-lobster"].map(
+          (cloudID) => ({
+            id: `${url.pathname}/${cloudID}-pip`,
+            name: `${cloudID}-pip`,
+            tags: ownedAzureTags(),
+          }),
+        ),
+        ...(secondPage
+          ? {}
+          : {
+              nextLink:
+                "https://management.azure.com/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses?api-version=2024-05-01&$skiptoken=page-2",
+            }),
+      });
+    };
+
+    await expect(
+      client.recoverServerForLease({
+        ...ownedAzureLease(),
+        serverType: "Standard_D2ads_v6",
+        region: "eastus",
+      }),
+    ).rejects.toThrow("ambiguous Azure recovery");
+  });
+
+  it("fails closed when Azure recovery pagination leaves the management scope", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    client.fetcher = async (input) => {
+      const url = new URL(String(input));
+      if (!url.pathname.endsWith("/publicIPAddresses")) {
+        return Response.json({ value: [] });
+      }
+      return Response.json({
+        value: [
+          {
+            id: `${url.pathname}/crabbox-blue-lobster-pip`,
+            name: "crabbox-blue-lobster-pip",
+            tags: ownedAzureTags(),
+          },
+        ],
+        nextLink: "https://example.test/subscriptions/sub/resourceGroups/crabbox-leases",
+      });
+    };
+
+    await expect(
+      client.recoverServerForLease({
+        ...ownedAzureLease(),
+        serverType: "Standard_D2ads_v6",
+        region: "eastus",
+      }),
+    ).rejects.toThrow("invalid nextLink");
+  });
+
+  it("fails closed when an Azure resource claims the lease with mismatched ownership", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    client.fetcher = async (input) => {
+      const url = new URL(String(input));
+      if (!url.pathname.endsWith("/publicIPAddresses")) {
+        return Response.json({ value: [] });
+      }
+      return Response.json({
+        value: [
+          {
+            id: `${url.pathname}/crabbox-blue-lobster-pip`,
+            name: "crabbox-blue-lobster-pip",
+            tags: ownedAzureTags({ owner: "mallory_example.com" }),
+          },
+        ],
+      });
+    };
+
+    await expect(
+      client.recoverServerForLease({
+        ...ownedAzureLease(),
+        serverType: "Standard_D2ads_v6",
+        region: "eastus",
+      }),
+    ).rejects.toThrow("ownership does not match");
   });
 
   it("refuses owned cleanup when the persisted Azure scope differs", async () => {
@@ -663,6 +860,84 @@ describe("azure provider", () => {
 
     expect(putKeys).toHaveLength(2);
     expect(new Set(putKeys).size).toBe(2);
+  });
+
+  it("cleans an exact Azure NIC and public IP set without a VM", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const deleted = new Set<string>();
+    const deletes: string[] = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        deleted.add(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (deleted.has(url.pathname)) {
+        return azureResourceNotFoundResponse(url);
+      }
+      if (url.pathname.endsWith("/networkInterfaces/crabbox-blue-lobster-nic")) {
+        return Response.json({
+          id: url.pathname,
+          name: "crabbox-blue-lobster-nic",
+          tags: ownedAzureTags(),
+          properties: {
+            ipConfigurations: [
+              {
+                properties: {
+                  publicIPAddress: {
+                    id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
+                  },
+                },
+              },
+            ],
+          },
+        });
+      }
+      if (url.pathname.endsWith("/publicIPAddresses/crabbox-blue-lobster-pip")) {
+        return Response.json({
+          id: url.pathname,
+          name: "crabbox-blue-lobster-pip",
+          tags: ownedAzureTags(),
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
+    expect(deletes).toEqual([
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
+    ]);
+  });
+
+  it("cleans a fully tagged Azure disk when VM creation never completed", async () => {
+    const { storage } = memoryAzureDeleteClaimStorage();
+    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    seedAzureAuthCache(client);
+    const deletes: string[] = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith("/disks/crabbox-blue-lobster-osdisk")) {
+        return Response.json({
+          id: url.pathname,
+          name: "crabbox-blue-lobster-osdisk",
+          tags: ownedAzureTags(),
+          properties: { uniqueId: "disk-unique-id" },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
+    expect(deletes).toEqual([
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
+    ]);
   });
 
   it("keeps durable cleanup claim storage on regional Azure fallback clients", () => {

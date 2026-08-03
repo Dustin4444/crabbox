@@ -136,6 +136,7 @@ interface AzureSnapshot {
 interface AzurePublicIP {
   id?: string;
   name?: string;
+  location?: string;
   tags?: Record<string, string>;
   properties?: { ipAddress?: string };
 }
@@ -143,6 +144,7 @@ interface AzurePublicIP {
 interface AzureNIC {
   id?: string;
   name?: string;
+  location?: string;
   tags?: Record<string, string>;
   properties?: {
     ipConfigurations?: { properties?: { publicIPAddress?: { id?: string } } }[];
@@ -152,6 +154,7 @@ interface AzureNIC {
 interface AzureDisk {
   id?: string;
   name?: string;
+  location?: string;
   managedBy?: string;
   tags?: Record<string, string>;
   properties?: { uniqueId?: string };
@@ -180,6 +183,11 @@ interface AzureOwnedDeleteClaim {
     resourceID: string;
     uniqueID: string;
   };
+}
+
+interface AzureResourceList<T> {
+  value?: T[];
+  nextLink?: string;
 }
 
 export interface AzureOwnedDeleteClaimStorage {
@@ -322,6 +330,162 @@ export class AzureClient {
       if (azureVMNotFound(error, name)) return undefined;
       throw error;
     }
+  }
+
+  async recoverServerForLease(
+    lease: Pick<
+      LeaseRecord,
+      | "id"
+      | "slug"
+      | "provider"
+      | "owner"
+      | "providerOwner"
+      | "workspaceID"
+      | "serverType"
+      | "region"
+    >,
+  ): Promise<ProviderMachine | undefined> {
+    const [vms, nics, pips, disks] = await Promise.all([
+      this.listResources<AzureVM>(
+        `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/virtualMachines`,
+        API_VERSIONS.compute,
+      ),
+      this.listResources<AzureNIC>(
+        `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Network/networkInterfaces`,
+        API_VERSIONS.network,
+      ),
+      this.listResources<AzurePublicIP>(
+        `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Network/publicIPAddresses`,
+        API_VERSIONS.network,
+      ),
+      this.listResources<AzureDisk>(
+        `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks`,
+        API_VERSIONS.disks,
+      ),
+    ]);
+    const resources = [
+      ...vms.map((resource) => ({ kind: "virtualMachines" as const, resource })),
+      ...nics.map((resource) => ({ kind: "networkInterfaces" as const, resource })),
+      ...pips.map((resource) => ({ kind: "publicIPAddresses" as const, resource })),
+      ...disks.map((resource) => ({ kind: "disks" as const, resource })),
+    ];
+    const ownedCloudIDs = new Set<string>();
+    for (const candidate of resources) {
+      const labels = azureLabelsFromTags(candidate.resource.tags ?? {});
+      if (labels["lease"] !== lease.id) continue;
+      if (!providerLabelsOwnedByLease(labels, lease, "azure")) {
+        throw new Error(
+          `refusing to recover Azure lease ${lease.id}: ${candidate.kind} ownership does not match`,
+        );
+      }
+      ownedCloudIDs.add(azureRecoveryCloudID(candidate.kind, candidate.resource.name, lease.id));
+    }
+    if (ownedCloudIDs.size === 0) return undefined;
+    if (ownedCloudIDs.size > 1) {
+      throw new Error(
+        `ambiguous Azure recovery for ${lease.id}: ${ownedCloudIDs.size} resource sets`,
+      );
+    }
+
+    const cloudID = [...ownedCloudIDs][0]!;
+    const vm = vms.find((resource) => resource.name === cloudID);
+    const nic = nics.find((resource) => resource.name === `${cloudID}-nic`);
+    const pip = pips.find((resource) => resource.name === `${cloudID}-pip`);
+    const disk = disks.find((resource) => resource.name === `${cloudID}-osdisk`);
+    const exactResources = [
+      {
+        kind: "VM",
+        resource: vm,
+        path: vmPath(this.resourceGroup, cloudID),
+      },
+      {
+        kind: "NIC",
+        resource: nic,
+        path: networkPath(this.resourceGroup, "networkInterfaces", `${cloudID}-nic`),
+      },
+      {
+        kind: "public IP",
+        resource: pip,
+        path: networkPath(this.resourceGroup, "publicIPAddresses", `${cloudID}-pip`),
+      },
+    ];
+    for (const candidate of exactResources) {
+      if (candidate.resource) {
+        this.requireOwnedResource(candidate.kind, candidate.resource, candidate.path, lease);
+      }
+    }
+
+    const diskPath = `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks/${cloudID}-osdisk`;
+    if (disk) {
+      this.requireResourceIdentity("disk", disk, diskPath, lease.id);
+      const diskLabels = azureLabelsFromTags(disk.tags ?? {});
+      if (!providerLabelsOwnedByLease(diskLabels, lease, "azure")) {
+        if (azureHasOwnershipClaims(diskLabels) || !vm) {
+          throw new Error(
+            `refusing to recover Azure lease ${lease.id}: disk ownership does not match`,
+          );
+        }
+      }
+    }
+
+    const expectedNICID = this.resourceID(
+      networkPath(this.resourceGroup, "networkInterfaces", `${cloudID}-nic`),
+    );
+    const expectedPIPID = this.resourceID(
+      networkPath(this.resourceGroup, "publicIPAddresses", `${cloudID}-pip`),
+    );
+    const expectedVMID = this.resourceID(vmPath(this.resourceGroup, cloudID));
+    if (
+      vm &&
+      !vm.properties?.networkProfile?.networkInterfaces?.some((item) =>
+        azureResourceIDEqual(item.id, expectedNICID),
+      )
+    ) {
+      throw new Error(`refusing to recover Azure lease ${lease.id}: VM ownership is incomplete`);
+    }
+    if (
+      nic &&
+      pip &&
+      !nic.properties?.ipConfigurations?.some((config) =>
+        azureResourceIDEqual(config.properties?.publicIPAddress?.id, expectedPIPID),
+      )
+    ) {
+      throw new Error(`refusing to recover Azure lease ${lease.id}: NIC ownership is incomplete`);
+    }
+    if (disk?.managedBy && !azureResourceIDEqual(disk.managedBy, expectedVMID)) {
+      throw new Error(`refusing to recover Azure lease ${lease.id}: disk ownership is incomplete`);
+    }
+
+    if (vm) {
+      return toMachine(vm, pip?.properties?.ipAddress ?? "");
+    }
+    const labeled = [nic, pip, disk].find((resource) =>
+      providerLabelsOwnedByLease(azureLabelsFromTags(resource?.tags ?? {}), lease, "azure"),
+    );
+    const labels = azureLabelsFromTags(labeled?.tags ?? {});
+    const locations = new Set(
+      [nic?.location, pip?.location, disk?.location].filter((value): value is string =>
+        Boolean(value?.trim()),
+      ),
+    );
+    if (locations.size > 1) {
+      throw new Error(`refusing to recover Azure lease ${lease.id}: resource locations differ`);
+    }
+    return {
+      provider: "azure",
+      id: 0,
+      cloudID,
+      name: cloudID,
+      status: "provisioning",
+      serverType: labels["server_type"] || lease.serverType,
+      host: pip?.properties?.ipAddress ?? "",
+      ...(locations.size === 1
+        ? { region: [...locations][0] }
+        : lease.region
+          ? { region: lease.region }
+          : {}),
+      labels,
+    };
   }
 
   async createServerWithFallback(
@@ -645,14 +809,20 @@ export class AzureClient {
     }
 
     let disk = initialDisk;
+    let diskOwnedByLease = false;
     if (disk) {
       this.requireResourceIdentity("disk", disk, diskResourcePath, lease.id);
+      diskOwnedByLease = providerLabelsOwnedByLease(
+        azureLabelsFromTags(disk.tags ?? {}),
+        lease,
+        "azure",
+      );
       if (vm && !azureResourceIDEqual(vmDiskID, expectedDiskID)) {
         throw new Error(
           `refusing to delete Azure resources for ${name}: VM does not own ${name}-osdisk`,
         );
       }
-      if (!providerLabelsOwnedByLease(azureLabelsFromTags(disk.tags ?? {}), lease, "azure")) {
+      if (!diskOwnedByLease) {
         const diskLabels = azureLabelsFromTags(disk.tags ?? {});
         if (azureHasOwnershipClaims(diskLabels)) {
           throw new Error(
@@ -688,16 +858,25 @@ export class AzureClient {
           );
         }
         disk = taggedDisk;
+        diskOwnedByLease = true;
       } else {
         this.requireOwnedResource("disk", disk, diskResourcePath, lease);
       }
 
       const uniqueID = this.requireDiskUniqueID(disk, lease.id);
       if (options.prepareClaim) {
-        if (
-          !vm ||
-          !azureResourceIDEqual(vmDiskID, expectedDiskID) ||
-          !azureResourceIDEqual(disk.managedBy, this.resourceID(vmResourcePath))
+        if (vm) {
+          if (
+            !azureResourceIDEqual(vmDiskID, expectedDiskID) ||
+            !azureResourceIDEqual(disk.managedBy, this.resourceID(vmResourcePath))
+          ) {
+            throw new Error(
+              `refusing to delete Azure disk ${name}-osdisk: live association does not match lease ${lease.id}`,
+            );
+          }
+        } else if (
+          !diskOwnedByLease ||
+          (disk.managedBy && !azureResourceIDEqual(disk.managedBy, this.resourceID(vmResourcePath)))
         ) {
           throw new Error(
             `refusing to delete Azure disk ${name}-osdisk: live association does not match lease ${lease.id}`,
@@ -805,6 +984,57 @@ export class AzureClient {
       if (azureResourceNotFound(error, kind, name)) return undefined;
       throw error;
     }
+  }
+
+  private async listResources<T>(path: string, apiVersion: string): Promise<T[]> {
+    let response = await this.arm<AzureResourceList<T>>("GET", path, apiVersion).catch(
+      (error): AzureResourceList<T> => {
+        if (isNotFound(error)) return { value: [] };
+        throw error;
+      },
+    );
+    const resources = [...(response.value ?? [])];
+    const seen = new Set<string>();
+    while (response.nextLink) {
+      const nextLink = this.validatedNextLink(response.nextLink);
+      if (seen.has(nextLink)) {
+        throw new Error(`azure resource listing returned a pagination cycle for ${path}`);
+      }
+      seen.add(nextLink);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- every page is identified by the prior response.
+      response = await this.fetchResourcePage<T>(nextLink);
+      resources.push(...(response.value ?? []));
+    }
+    return resources;
+  }
+
+  private validatedNextLink(value: string): string {
+    const url = new URL(value);
+    const expectedPrefix = `/subscriptions/${this.subscription}/`.toLowerCase();
+    if (
+      url.origin !== "https://management.azure.com" ||
+      url.username ||
+      url.password ||
+      !url.pathname.toLowerCase().startsWith(expectedPrefix)
+    ) {
+      throw new Error("azure resource listing returned an invalid nextLink");
+    }
+    return url.toString();
+  }
+
+  private async fetchResourcePage<T>(url: string): Promise<AzureResourceList<T>> {
+    const response = await this.fetcher(url, {
+      headers: { authorization: `Bearer ${await this.token()}` },
+    });
+    if (!response.ok) {
+      throw new AzureHTTPError(
+        "GET",
+        new URL(url).pathname,
+        response.status,
+        await safeBody(response),
+      );
+    }
+    return (await response.json()) as AzureResourceList<T>;
   }
 
   private requireOwnedResource(
@@ -1819,6 +2049,34 @@ function azureSnapshotPath(rg: string, name: string): string {
 
 function azureResourceName(value: string): string {
   return value.slice(value.lastIndexOf("/") + 1);
+}
+
+function azureRecoveryCloudID(
+  kind: "virtualMachines" | "networkInterfaces" | "publicIPAddresses" | "disks",
+  name: string | undefined,
+  leaseID: string,
+): string {
+  const suffix =
+    kind === "networkInterfaces"
+      ? "-nic"
+      : kind === "publicIPAddresses"
+        ? "-pip"
+        : kind === "disks"
+          ? "-osdisk"
+          : "";
+  const resourceName = name?.trim() ?? "";
+  const cloudID =
+    suffix && resourceName.endsWith(suffix)
+      ? resourceName.slice(0, -suffix.length)
+      : suffix
+        ? ""
+        : resourceName;
+  if (!cloudID) {
+    throw new Error(
+      `refusing to recover Azure lease ${leaseID}: invalid ${kind} resource identity`,
+    );
+  }
+  return cloudID;
 }
 
 function shellQuote(value: string): string {
