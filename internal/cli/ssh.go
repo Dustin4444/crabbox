@@ -1536,6 +1536,7 @@ type remoteSyncFinalizeOptions struct {
 	BaseRef            string
 	BaseSHA            string
 	Fingerprint        string
+	Token              string
 }
 
 func remoteWriteSyncManifestNew(workdir string) string {
@@ -1558,7 +1559,7 @@ func remoteSyncInterpreterCommand(python, perl, args string) string {
 		"; else echo " + shellQuote("missing required sync interpreter: need python3, python, or perl") + " >&2; exit 127; fi"
 }
 
-func remoteWriteSyncManifestsNew(workdir string) string {
+func remoteWriteSyncManifestsNew(workdir, finalizeToken string) string {
 	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + `mkdir -p "$meta_dir"
 IFS= read -r manifest_len
 case "$manifest_len" in
@@ -1569,6 +1570,7 @@ esac
 # dd's exit status still makes the fail-closed script abort on a short write.
 dd bs=1 count="$manifest_len" of="$meta_dir/sync-manifest.new" 2>/dev/null
 cat > "$meta_dir/sync-deleted.new"
+printf %s ` + shellQuote(finalizeToken) + ` > "$meta_dir/sync-finalize-token.new"
 `
 	return "bash -lc " + shellQuote(script)
 }
@@ -1582,14 +1584,14 @@ func syncManifestInputForTarget(target SSHTarget, manifestData, deletedData []by
 	return fmt.Sprintf("%d\n", len(manifestData)) + string(manifestData) + string(deletedData)
 }
 
-func remoteWriteSyncManifestsNewForTarget(target SSHTarget, workdir string) string {
+func remoteWriteSyncManifestsNewForTarget(target SSHTarget, workdir, finalizeToken string) string {
 	if isWindowsWSL2Target(target) {
-		return remoteWriteSyncManifestsNewPython(workdir)
+		return remoteWriteSyncManifestsNewPython(workdir, finalizeToken)
 	}
-	return remoteWriteSyncManifestsNew(workdir)
+	return remoteWriteSyncManifestsNew(workdir, finalizeToken)
 }
 
-func remoteWriteSyncManifestsNewPython(workdir string) string {
+func remoteWriteSyncManifestsNewPython(workdir, finalizeToken string) string {
 	python := `import base64
 import sys
 
@@ -1617,7 +1619,8 @@ with open(sys.argv[2], "wb") as handle:
     handle.write(deleted)
 `
 	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\"\n" +
-		"python3 -c " + shellQuote(python) + " \"$meta_dir/sync-manifest.new\" \"$meta_dir/sync-deleted.new\"\n"
+		"python3 -c " + shellQuote(python) + " \"$meta_dir/sync-manifest.new\" \"$meta_dir/sync-deleted.new\"\n" +
+		"printf %s " + shellQuote(finalizeToken) + " > \"$meta_dir/sync-finalize-token.new\"\n"
 	return "bash -lc " + shellQuote(script)
 }
 
@@ -1745,10 +1748,27 @@ new="$meta_dir/sync-manifest.new"
 deleted="$meta_dir/sync-deleted.new"
 rm -f "$deleted"
 manifest="$meta_dir/sync-manifest"
+pending_token="$meta_dir/sync-finalize-token.new"
+committed_token="$meta_dir/sync-finalize-token"
+expected_token=` + shellQuote(opts.Token) + `
+if [ -z "$expected_token" ]; then
+  echo "remote sync finalize failed: missing sync token" >&2
+  exit 67
+fi
 if [ -f "$new" ]; then
+  if [ -f "$pending_token" ]; then
+    if [ "$(cat "$pending_token")" != "$expected_token" ]; then
+      echo "remote sync finalize failed: pending token does not match this sync" >&2
+      exit 67
+    fi
+    mv "$pending_token" "$committed_token"
+  elif [ ! -f "$committed_token" ] || [ "$(cat "$committed_token")" != "$expected_token" ]; then
+    echo "remote sync finalize failed: pending token does not match this sync" >&2
+    exit 67
+  fi
   mv "$new" "$manifest"
-elif [ ! -f "$manifest" ]; then
-  echo "remote sync finalize failed: pending and committed manifests are missing" >&2
+elif [ ! -f "$manifest" ] || [ ! -f "$committed_token" ] || [ "$(cat "$committed_token")" != "$expected_token" ]; then
+  echo "remote sync finalize failed: no committed manifest for this sync" >&2
   exit 67
 fi
 if test -d .git && git status --short >/tmp/crabbox-git-status 2>/dev/null; then

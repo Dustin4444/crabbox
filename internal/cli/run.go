@@ -1359,6 +1359,10 @@ retrySync:
 		}
 		manifestData := manifest.NUL()
 		deletedData := manifest.DeletedNUL()
+		finalizeToken, err := randomHex(16)
+		if err != nil {
+			return recordFailure(exit(6, "create sync finalize token: %v", err))
+		}
 		stepStart = time.Now()
 		manifestInput := syncManifestInputForTarget(target, manifestData, deletedData)
 		manifestCtx := ctx
@@ -1367,7 +1371,7 @@ retrySync:
 			manifestCtx, cancelManifest = context.WithTimeout(ctx, cfg.Sync.Timeout)
 		}
 		stopManifestHeartbeat := startSyncHeartbeat(a.Stderr, stepStart, 15*time.Second)
-		manifestErr := runSSHInput(manifestCtx, target, remoteWriteSyncManifestsNewForTarget(target, workdir), strings.NewReader(manifestInput), io.Discard, a.Stderr)
+		manifestErr := runSSHInput(manifestCtx, target, remoteWriteSyncManifestsNewForTarget(target, workdir, finalizeToken), strings.NewReader(manifestInput), io.Discard, a.Stderr)
 		stopManifestHeartbeat()
 		if cancelManifest != nil {
 			cancelManifest()
@@ -1416,6 +1420,7 @@ retrySync:
 			BaseRef:            cfg.Sync.BaseRef,
 			BaseSHA:            baseSHA,
 			Fingerprint:        fingerprint,
+			Token:              finalizeToken,
 		})
 		if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
 			if out != "" {
