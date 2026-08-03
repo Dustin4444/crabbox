@@ -21,6 +21,8 @@
   transient SSH transport failure, while preserving redacted terminal diagnostics.
 - Made Blacksmith doctor report all-organization inventory scope and a
   nonterminal active Testbox count for capacity-aware callers.
+- Kept default-derived Azure images out of normal broker lease requests so
+  coordinator-managed image policy no longer requires admin-token auth.
 - Made brokered Daytona usable with Crabbox auth alone, added a read-only
   fallback readiness probe with truthful control/data-plane diagnostics, and
   made repeated sandbox cleanup idempotent.

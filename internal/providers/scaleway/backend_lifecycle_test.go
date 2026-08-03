@@ -16,6 +16,7 @@ import (
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestScalewayAcquireListResolveTouchReleaseLifecycle(t *testing.T) {
@@ -789,8 +790,7 @@ func TestScalewayDoctorReportsInventoryAndMissingAuth(t *testing.T) {
 
 func newTestBackend(t *testing.T) (*Backend, *fakeScalewayClient) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	fake := newFakeScalewayClient()
 	cfg := core.Config{
 		Provider: providerName,

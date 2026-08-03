@@ -21,8 +21,7 @@ func TestNewRunIDUsesCanonicalFormatAndIsUnique(t *testing.T) {
 }
 
 func TestTestboxKeyPathRejectsTraversalIDs(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	isolateTestUserDirs(t)
 
 	for _, leaseID := range []string{"../target", "nested/target", `nested\target`, " cbx_123 "} {
 		if path, err := testboxKeyPath(leaseID); err == nil {
@@ -32,8 +31,7 @@ func TestTestboxKeyPathRejectsTraversalIDs(t *testing.T) {
 }
 
 func TestTestboxKeyPathAllowsSafeCustomIDs(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	isolateTestUserDirs(t)
 
 	path, err := testboxKeyPath("morphvm_123")
 	if err != nil {
@@ -50,8 +48,7 @@ func TestTestboxKeyPathAllowsSafeCustomIDs(t *testing.T) {
 }
 
 func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	isolateTestUserDirs(t)
 
 	const leaseID = "cbx_abcdef123456"
 	target := SSHTarget{User: "root", Host: "provider-resource", Port: "22"}
@@ -86,8 +83,7 @@ func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
 }
 
 func TestUseLeaseKnownHostsFailsClosedWhenDirectoryCannotBePrepared(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	isolateTestUserDirs(t)
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)

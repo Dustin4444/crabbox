@@ -12,6 +12,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type fakeDigitalOceanAPI struct {
@@ -184,9 +185,7 @@ func removeDropletByID(items []droplet, id int64) []droplet {
 
 func newTestBackend(t *testing.T, api *fakeDigitalOceanAPI) *digitalOceanLeaseBackend {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", home)
+	testutil.IsolateUserDirs(t)
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
@@ -2911,5 +2910,5 @@ type fixedClock struct{ t time.Time }
 func (c fixedClock) Now() time.Time { return c.t }
 
 func TestMain(m *testing.M) {
-	os.Exit(m.Run())
+	os.Exit(testutil.RunWithIsolatedUserDirs(m))
 }

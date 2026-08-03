@@ -1070,6 +1070,7 @@ xcpNg:
 }
 
 func TestLoadLeaseTargetConfigAllowsExistingLeaseDespiteUnsupportedProvisioningTarget(t *testing.T) {
+	isolateTestUserDirs(t)
 	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	if err := os.WriteFile(configPath, []byte(`provider: xcp-ng
@@ -1099,6 +1100,7 @@ xcpNg:
 }
 
 func TestLoadLeaseTargetConfigAllowsAWSMacOSWithoutProvisioningHost(t *testing.T) {
+	isolateTestUserDirs(t)
 	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	t.Setenv("CRABBOX_HOST_ID", "")

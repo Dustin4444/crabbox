@@ -834,6 +834,7 @@ func TestCollectPondMembersDoesNotRestoreStoppedClaim(t *testing.T) {
 }
 
 func TestCollectPondMembersDoesNotPreparePortlessMembers(t *testing.T) {
+	isolateTestUserDirs(t)
 	backend := &pondMeshResolveRecordingBackend{}
 	servers := []Server{
 		{Name: "client", Labels: map[string]string{pondLabelKey: "alpha", "slug": "client", "lease": "cbx_client"}},

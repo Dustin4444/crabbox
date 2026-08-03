@@ -17,9 +17,7 @@ import (
 )
 
 func TestWriteBrokerLoginStoresTokenInUserConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	isolateTestUserDirs(t)
 	t.Setenv("CRABBOX_CONFIG", "")
 	t.Setenv("CRABBOX_COORDINATOR", "")
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
