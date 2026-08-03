@@ -136,7 +136,16 @@ func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 			t.Fatalf("leases state=%q", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"leases": []CoordinatorLease{
-			{ID: "cbx_123", Provider: "daytona", State: "active", SSHUser: "daytona-live-token"},
+			{
+				ID:              "cbx_123",
+				Provider:        "daytona",
+				State:           "provisioning",
+				SSHUser:         "daytona-live-token",
+				CleanupAttempts: 2,
+				CleanupError:    "provider resource not yet visible",
+				CleanupRetryAt:  "2026-08-03T11:05:00Z",
+				FailureError:    "interrupted provisioning",
+			},
 		}})
 	}))
 	defer server.Close()
@@ -162,6 +171,12 @@ func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 	}
 	if leases[0].SSHUser != "<token>" {
 		t.Fatalf("sshUser=%q, want redacted token", leases[0].SSHUser)
+	}
+	if leases[0].CleanupAttempts != 2 ||
+		leases[0].CleanupError != "provider resource not yet visible" ||
+		leases[0].CleanupRetryAt != "2026-08-03T11:05:00Z" ||
+		leases[0].FailureError != "interrupted provisioning" {
+		t.Fatalf("recovery diagnostics were not preserved: %#v", leases[0])
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("unexpected warning: %q", stderr.String())
@@ -676,6 +691,7 @@ func TestCoordinatorResolveFallsBackToAdminToken(t *testing.T) {
 }
 
 func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
+	isolateTestUserDirs(t)
 	adminReleased := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/leases/cbx_admin/release" && r.URL.Path != "/v1/leases/cbx_admin/release" {

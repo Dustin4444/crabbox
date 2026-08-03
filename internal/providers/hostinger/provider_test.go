@@ -19,14 +19,12 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func isolateHostingerTestState(t *testing.T) {
 	t.Helper()
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	testutil.IsolateUserDirs(t)
 }
 
 func TestProviderSpecAndFlags(t *testing.T) {

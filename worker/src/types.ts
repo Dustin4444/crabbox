@@ -9,6 +9,11 @@ export type AWSCredentialProvider = () => Promise<AWSCredentials>;
 
 export interface Env {
   FLEET: DurableObjectNamespace;
+  CF_VERSION_METADATA?: {
+    id: string;
+    tag?: string;
+    timestamp: string;
+  };
   HETZNER_TOKEN: string;
   awsCredentialProvider?: AWSCredentialProvider;
   AWS_ACCESS_KEY_ID?: string;
@@ -465,6 +470,9 @@ export interface LeaseRecord {
   provisioningResourceMayExist?: boolean;
   provisioningFailureRetryable?: boolean;
   provisioningRequestStartedAt?: string;
+  provisioningCoordinatorVersion?: string;
+  provisioningRecoveryObservedAt?: string;
+  provisioningRecoveryMissingSince?: string;
   releaseDeletesServer?: boolean;
   releasedAt?: string;
   endedAt?: string;

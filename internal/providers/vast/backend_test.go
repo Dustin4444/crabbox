@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type fakeVastAPI struct {
@@ -187,9 +188,7 @@ func (f *fakeVastAPI) DetachInstanceSSHKey(_ context.Context, id int, keyID stri
 
 func newTestBackend(t *testing.T, api *fakeVastAPI) *backend {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", home)
+	testutil.IsolateUserDirs(t)
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux

@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added an admin-only Daytona snapshot bootstrap route and protected
+  default-branch workflow with bounded resources, immutable base images,
+  applied-capacity and active-snapshot verification, sanitized proof, and
+  completion-verified builder cleanup.
 - Added a protected broker soak workflow that records sanitized AWS/Azure
   maintenance evidence and runs one bounded, cleanup-verified Daytona canary
   without direct provider credentials or a warm pool.
@@ -19,8 +23,16 @@
 
 - Kept the brokered Daytona fallback on its operator-managed snapshot by
   applying the private snapshot binding during every coordinator deployment.
+- Recovered exact-owned Azure public IPs, network interfaces, and tagged OS
+  disks when a coordinator deployment interrupted provisioning before the VM
+  existed, while rejecting ambiguous or mismatched resource sets.
+- Reconciled brokered leases whose provider provisioning was interrupted by a
+  coordinator deployment, recovering any owned cloud resource for cleanup and
+  failing resource-free leases with a durable reason.
 - Made Blacksmith doctor report all-organization inventory scope and a
   nonterminal active Testbox count for capacity-aware callers.
+- Kept default-derived Azure images out of normal broker lease requests so
+  coordinator-managed image policy no longer requires admin-token auth.
 - Made brokered Daytona usable with Crabbox auth alone, added a read-only
   fallback readiness probe with truthful control/data-plane diagnostics, and
   made repeated sandbox cleanup idempotent.
@@ -535,6 +547,7 @@
 - Added direct SSH login helpers for kept Islo sandboxes through the official Islo CLI proxy. Thanks @zozo123.
 - Added a portable Node.js and PostgreSQL coordinator runtime with durable pg-boss maintenance jobs, WebSocket bridges, trusted reverse-proxy identity support, container packaging, and the existing Cloudflare Worker/Durable Object runtime preserved as an adapter over the same fleet implementation.
 - Added refreshable coordinator bearer authentication through a shell-free JSON argv token command, including HTTP and reconnecting WebSocket bridges behind expiring upstream identity proxies.
+
 ### Fixed
 
 - Fixed pond ACL bootstrap to preserve Tailscale HuJSON comments, ordering, trailing commas, and unrelated policy sections while failing closed on ambiguous shapes. Thanks @coygeek.

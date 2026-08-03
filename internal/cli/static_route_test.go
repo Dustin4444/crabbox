@@ -249,6 +249,7 @@ func TestAutoRouteStaticLeaseSkipsClaimScanForExplicitNonStaticProvider(t *testi
 }
 
 func TestAutoRouteStaticLeaseRespectsExplicitStaticHost(t *testing.T) {
+	isolateTestUserDirs(t)
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)
 	target := registerTargetFlags(fs, defaults)
@@ -271,6 +272,7 @@ func TestAutoRouteStaticLeaseRespectsExplicitStaticHost(t *testing.T) {
 }
 
 func TestAutoRouteStaticLeaseIgnoresNonStaticIDs(t *testing.T) {
+	isolateTestUserDirs(t)
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)
 	registerTargetFlags(fs, defaults)
@@ -382,6 +384,7 @@ func TestStopDispatchesExplicitReclaimContract(t *testing.T) {
 }
 
 func TestStopRejectsReclaimForSSHLeaseProvider(t *testing.T) {
+	isolateTestUserDirs(t)
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
 		"--provider", "ssh", "--static-host", "host.example.test", "--id", "static_host-example-test", "--reclaim",
 	})

@@ -1980,16 +1980,14 @@ func TestResolveLeaseClaimFallbacks(t *testing.T) {
 }
 
 func TestClaimStateDirFallbackAndMissingClaim(t *testing.T) {
-	home := t.TempDir()
+	dirs := isolateTestUserDirs(t)
 	t.Setenv("XDG_STATE_HOME", "")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	dir, err := crabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(dir, home) || filepath.Base(dir) != "state" {
-		t.Fatalf("state dir=%q should live under home %q and end in state", dir, home)
+	if !strings.Contains(dir, dirs.Root) || filepath.Base(dir) != "state" {
+		t.Fatalf("state dir=%q should live under test root %q and end in state", dir, dirs.Root)
 	}
 	claim, err := readLeaseClaim("cbx_missing")
 	if err != nil {

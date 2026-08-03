@@ -17,6 +17,16 @@ interface DaytonaSandbox {
   labels?: Record<string, string>;
   target?: string;
   state?: string;
+  cpu?: number;
+  memory?: number;
+  disk?: number;
+}
+
+interface DaytonaSnapshot {
+  id: string;
+  name: string;
+  state?: string;
+  errorReason?: string | null;
 }
 
 interface DaytonaSandboxListResponse {
@@ -35,6 +45,19 @@ export interface DaytonaSSHEndpoint {
   host: string;
   port: string;
   expiresAt: string;
+}
+
+export interface DaytonaSnapshotBootstrap {
+  sourceSnapshot: string;
+  sourceCPU: number;
+  sourceMemoryGiB: number;
+  sourceDiskGiB: number;
+  snapshot: string;
+  cpu: number;
+  memoryGiB: number;
+  diskGiB: number;
+  sandboxID: string;
+  cleanup: "deleted";
 }
 
 export class DaytonaHTTPError extends Error {
@@ -59,6 +82,8 @@ export class DaytonaClient {
   fetcher: typeof fetch = (input, init) => fetch(input, init);
   pollDelayMs = 2_000;
   maxWaitMs = 5 * 60_000;
+  snapshotWaitMs = 20 * 60_000;
+  snapshotAcceptanceWaitMs = 10_000;
 
   private readonly apiURL: string;
   private readonly token: string;
@@ -113,9 +138,7 @@ export class DaytonaClient {
   }
 
   async getServer(id: string): Promise<ProviderMachine> {
-    return daytonaMachine(
-      await this.request<DaytonaSandbox>("GET", `/sandbox/${encodeURIComponent(id)}?verbose=true`),
-    );
+    return daytonaMachine(await this.getSandbox(id));
   }
 
   async createServer(
@@ -171,6 +194,134 @@ export class DaytonaClient {
     }
   }
 
+  async bootstrapSnapshot(
+    name: string,
+    cpu: number,
+    memoryGiB: number,
+    diskGiB: number,
+    baseImage: string,
+  ): Promise<DaytonaSnapshotBootstrap> {
+    await this.assertSnapshotAbsent(name);
+
+    const body: Record<string, unknown> = {
+      name: `crabbox-snapshot-bootstrap-${crypto.randomUUID().slice(0, 8)}`,
+      user: this.user,
+      labels: {
+        created_by: "crabbox",
+        purpose: "snapshot-bootstrap",
+        snapshot_name: name,
+      },
+      // The normal cleanup path deletes immediately. If that request is lost,
+      // Daytona stops an idle builder after 30 minutes and deletes it after it
+      // remains stopped for another 60 minutes.
+      autoStopInterval: 30,
+      autoDeleteInterval: 60,
+      buildInfo: {
+        dockerfileContent: `FROM ${baseImage}`,
+      },
+      cpu,
+      memory: memoryGiB,
+      disk: diskGiB,
+    };
+    if (this.target) body["target"] = this.target;
+
+    let sandboxID = "";
+    let snapshotRequested = false;
+    let snapshotRequestConfirmed = false;
+    let result: Omit<DaytonaSnapshotBootstrap, "cleanup"> | undefined;
+    let operationError: unknown;
+    try {
+      const created = await this.request<DaytonaSandbox>("POST", "/sandbox", body);
+      sandboxID = created.id?.trim() ?? "";
+      if (!sandboxID) {
+        throw new Error("daytona snapshot bootstrap returned no sandbox id");
+      }
+      await this.waitForState(sandboxID, ["started", "running", "ready", "active"]);
+      const built = await this.getSandbox(sandboxID);
+      if (built.cpu !== cpu) {
+        throw new Error(
+          `daytona sandbox ${sandboxID} has ${built.cpu ?? "unknown"} CPU after ${cpu} CPU image build`,
+        );
+      }
+      if (built.memory !== memoryGiB) {
+        throw new Error(
+          `daytona sandbox ${sandboxID} has ${built.memory ?? "unknown"} GiB memory after ${memoryGiB} GiB image build`,
+        );
+      }
+      if (built.disk !== diskGiB) {
+        throw new Error(
+          `daytona sandbox ${sandboxID} disk is ${built.disk ?? "unknown"} GiB after ${diskGiB} GiB image build`,
+        );
+      }
+      await this.request<DaytonaSandbox>("POST", `/sandbox/${encodeURIComponent(sandboxID)}/stop`);
+      await this.waitForState(sandboxID, ["stopped"]);
+      snapshotRequested = true;
+      await this.request<DaytonaSandbox>(
+        "POST",
+        `/sandbox/${encodeURIComponent(sandboxID)}/snapshot`,
+        { name },
+      );
+      snapshotRequestConfirmed = true;
+      // Daytona persists snapshot resources from this already verified source
+      // sandbox, so the active snapshot state is the authoritative completion signal.
+      await this.waitForSnapshotActive(name);
+      result = {
+        sourceSnapshot: baseImage,
+        sourceCPU: built.cpu,
+        sourceMemoryGiB: built.memory,
+        sourceDiskGiB: built.disk,
+        snapshot: name,
+        cpu: built.cpu,
+        memoryGiB: built.memory,
+        diskGiB: built.disk,
+        sandboxID,
+      };
+    } catch (error) {
+      operationError = error;
+    }
+
+    try {
+      if (sandboxID) {
+        let transitionError: unknown;
+        if (snapshotRequested) {
+          try {
+            await this.waitForSnapshotTransition(sandboxID, !snapshotRequestConfirmed);
+          } catch (error) {
+            transitionError = error;
+          }
+        }
+        try {
+          await this.deleteSandboxAndWait(sandboxID);
+        } catch (deleteError) {
+          if (!transitionError) throw deleteError;
+          const transitionMessage =
+            transitionError instanceof Error ? transitionError.message : String(transitionError);
+          const deleteMessage =
+            deleteError instanceof Error ? deleteError.message : String(deleteError);
+          throw new Error(
+            `daytona sandbox ${sandboxID} snapshot transition observation failed: ${transitionMessage}; deletion also failed: ${deleteMessage}`,
+            { cause: deleteError },
+          );
+        }
+      }
+    } catch (cleanupError) {
+      if (operationError) {
+        const operationMessage =
+          operationError instanceof Error ? operationError.message : String(operationError);
+        const cleanupMessage =
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        throw new Error(
+          `daytona snapshot bootstrap failed: ${operationMessage}; sandbox ${sandboxID} cleanup also failed: ${cleanupMessage}`,
+          { cause: cleanupError },
+        );
+      }
+      throw cleanupError;
+    }
+    if (operationError) throw operationError;
+    if (!result) throw new Error("daytona snapshot bootstrap completed without a result");
+    return { ...result, cleanup: "deleted" };
+  }
+
   async createSSHAccess(
     id: string,
     lease?: Pick<LeaseRecord, "expiresAt">,
@@ -212,6 +363,160 @@ export class DaytonaClient {
     }
     const responseBody = await response.text();
     return responseBody.trim() ? (JSON.parse(responseBody) as T) : (undefined as T);
+  }
+
+  private async getSandbox(id: string): Promise<DaytonaSandbox> {
+    return await this.request<DaytonaSandbox>(
+      "GET",
+      `/sandbox/${encodeURIComponent(id)}?verbose=true`,
+    );
+  }
+
+  private async getSnapshot(idOrName: string): Promise<DaytonaSnapshot> {
+    return await this.request<DaytonaSnapshot>("GET", `/snapshots/${encodeURIComponent(idOrName)}`);
+  }
+
+  private async assertSnapshotAbsent(name: string): Promise<void> {
+    try {
+      const snapshot = await this.getSnapshot(name);
+      throw new Error(
+        `daytona snapshot ${name} already exists (state=${snapshot.state ?? "unknown"})`,
+      );
+    } catch (error) {
+      if (!isDaytonaNotFound(error)) throw error;
+    }
+  }
+
+  private async waitForSnapshotActive(name: string): Promise<DaytonaSnapshot> {
+    const deadline = Date.now() + this.snapshotWaitMs;
+    let lastState = "not_found";
+    while (Date.now() <= deadline) {
+      try {
+        // Snapshot-from-sandbox is asynchronous; the row appears only after the
+        // runner has persisted the image, so 404 remains a pending state here.
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each poll observes the latest provider state.
+        const snapshot = await this.getSnapshot(name);
+        lastState = snapshot.state ?? "";
+        const normalized = normalizeDaytonaState(lastState);
+        if (normalized === "active") return snapshot;
+        if (daytonaSnapshotTerminalState(normalized)) {
+          const reason = snapshot.errorReason?.trim();
+          throw new Error(
+            `daytona snapshot ${name} entered terminal state=${lastState || "unknown"}${reason ? `: ${reason}` : ""}`,
+          );
+        }
+      } catch (error) {
+        if (isDaytonaNotFound(error)) {
+          lastState = "not_found";
+        } else if (isDaytonaTransient(error)) {
+          lastState =
+            error instanceof DaytonaHTTPError ? `http_${error.status}` : "network_unavailable";
+        } else {
+          throw error;
+        }
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- delay between sequential state probes.
+      await new Promise((resolve) => setTimeout(resolve, this.pollDelayMs));
+    }
+    throw new Error(
+      `timed out waiting for daytona snapshot ${name} to become active (state=${lastState || "unknown"})`,
+    );
+  }
+
+  private async deleteSandboxAndWait(id: string): Promise<void> {
+    const deadline = Date.now() + this.maxWaitMs;
+    let deleteRequested = false;
+    let lastState = "";
+    while (Date.now() <= deadline) {
+      if (!deleteRequested) {
+        try {
+          // DELETE returns 409 while snapshotting or another state change is
+          // pending. Retry that authoritative conflict instead of abandoning cleanup.
+          // deleteServer already normalizes an already-absent sandbox to success.
+          // oxlint-disable-next-line eslint/no-await-in-loop -- each retry observes provider state.
+          await this.deleteServer(id);
+          deleteRequested = true;
+        } catch (error) {
+          if (!isDaytonaConflict(error)) throw error;
+          lastState = "state_change_in_progress";
+          // oxlint-disable-next-line eslint/no-await-in-loop -- delay between sequential cleanup retries.
+          await new Promise((resolve) => setTimeout(resolve, this.pollDelayMs));
+          continue;
+        }
+      }
+      try {
+        // DELETE only requests Daytona's asynchronous soft-delete transition.
+        // Do not report cleanup until provider teardown reaches its terminal state.
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each poll observes the latest provider state.
+        const sandbox = await this.getSandbox(id);
+        lastState = sandbox.state ?? "";
+        const normalized = normalizeDaytonaState(lastState);
+        if (normalized === "destroyed" || normalized === "deleted") return;
+      } catch (error) {
+        if (isDaytonaNotFound(error)) return;
+        if (isDaytonaTransient(error)) {
+          lastState =
+            error instanceof DaytonaHTTPError ? `http_${error.status}` : "network_unavailable";
+        } else {
+          throw error;
+        }
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- delay between sequential cleanup probes.
+      await new Promise((resolve) => setTimeout(resolve, this.pollDelayMs));
+    }
+    throw new Error(
+      `timed out waiting for daytona sandbox ${id} cleanup (state=${lastState || "unknown"})`,
+    );
+  }
+
+  private async waitForSnapshotTransition(id: string, uncertainAcceptance: boolean): Promise<void> {
+    const startedAt = Date.now();
+    const deadline = startedAt + (uncertainAcceptance ? this.snapshotWaitMs : this.maxWaitMs);
+    const acceptanceDeadline = startedAt + Math.min(this.snapshotAcceptanceWaitMs, this.maxWaitMs);
+    let sawSnapshotting = false;
+    let lastState = "";
+    while (Date.now() <= deadline) {
+      try {
+        // Daytona persists the active snapshot before clearing the sandbox's
+        // pending snapshot transition. DELETE is rejected until this state clears.
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each poll observes the latest provider state.
+        const sandbox = await this.getSandbox(id);
+        lastState = sandbox.state ?? "";
+        if (normalizeDaytonaState(lastState) === "snapshotting") {
+          sawSnapshotting = true;
+        } else if (sawSnapshotting || !uncertainAcceptance || Date.now() >= acceptanceDeadline) {
+          return;
+        }
+      } catch (error) {
+        if (isDaytonaNotFound(error)) return;
+        throw error;
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- delay between sequential state probes.
+      await new Promise((resolve) => setTimeout(resolve, this.pollDelayMs));
+    }
+    throw new Error(
+      `timed out waiting for daytona sandbox ${id} snapshot transition (state=${lastState || "unknown"})`,
+    );
+  }
+
+  private async waitForState(id: string, expectedStates: string[]): Promise<DaytonaSandbox> {
+    const expected = new Set(expectedStates.map(normalizeDaytonaState));
+    const deadline = Date.now() + this.maxWaitMs;
+    let lastState = "";
+    while (Date.now() <= deadline) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each poll observes the latest provider state.
+      const sandbox = await this.getSandbox(id);
+      lastState = sandbox.state ?? "";
+      if (expected.has(normalizeDaytonaState(lastState))) return sandbox;
+      if (daytonaTerminalState(lastState)) {
+        throw new Error(`daytona sandbox ${id} entered terminal state=${lastState}`);
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- delay between sequential state probes.
+      await new Promise((resolve) => setTimeout(resolve, this.pollDelayMs));
+    }
+    throw new Error(
+      `timed out waiting for daytona sandbox ${id} state=${expectedStates.join("|")} (state=${lastState || "unknown"})`,
+    );
   }
 }
 
@@ -258,6 +563,17 @@ export function isDaytonaNotFound(error: unknown): boolean {
   return error instanceof DaytonaHTTPError && error.status === 404;
 }
 
+function isDaytonaConflict(error: unknown): boolean {
+  return error instanceof DaytonaHTTPError && error.status === 409;
+}
+
+function isDaytonaTransient(error: unknown): boolean {
+  return (
+    error instanceof TypeError ||
+    (error instanceof DaytonaHTTPError && (error.status === 429 || error.status >= 500))
+  );
+}
+
 function daytonaMachine(sandbox: DaytonaSandbox): ProviderMachine {
   return {
     provider: "daytona",
@@ -291,6 +607,10 @@ function daytonaTerminalState(state: string): boolean {
     "destroying",
     "deleted",
   ].includes(normalizeDaytonaState(state));
+}
+
+function daytonaSnapshotTerminalState(state: string): boolean {
+  return ["inactive", "error", "build_failed", "removing"].includes(normalizeDaytonaState(state));
 }
 
 function daytonaReadyState(state: string): boolean {

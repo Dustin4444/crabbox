@@ -16,6 +16,7 @@ import (
 	"time"
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestCreateDaytonaSyncArchiveWritesTempFile(t *testing.T) {
@@ -206,9 +207,7 @@ func TestDaytonaAuthRequiresOrganizationForJWT(t *testing.T) {
 }
 
 func TestDaytonaAuthFallsBackToCLIConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	testutil.IsolateUserDirs(t)
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)
@@ -255,9 +254,7 @@ func TestDaytonaAuthFallsBackToCLIConfig(t *testing.T) {
 }
 
 func TestDaytonaEnvAuthOverridesCLIConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	testutil.IsolateUserDirs(t)
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)
