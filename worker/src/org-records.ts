@@ -13,10 +13,14 @@ export type PortalExternalRunnerRecord = ExternalRunnerRecord & {
 };
 
 export function publicLeaseRecord(record: LeaseRecord): LeaseRecord {
-  return {
+  const publicRecord = {
     ...record,
     org: orgLabelForDisplay(record.org),
   };
+  delete publicRecord.provisioningCoordinatorVersion;
+  delete publicRecord.provisioningRecoveryObservedAt;
+  delete publicRecord.provisioningRecoveryMissingSince;
+  return publicRecord;
 }
 
 export function publicRunRecord(record: RunRecord): RunRecord {
@@ -52,10 +56,7 @@ export function publicExternalRunnerRecord(record: ExternalRunnerRecord): Extern
 
 /** Portal rows carry a non-secret identity kind so display labels never drive authorization links. */
 export function portalLeaseRecord(record: LeaseRecord): PortalLeaseRecord {
-  const publicRecord = {
-    ...record,
-    org: orgLabelForDisplay(record.org),
-  };
+  const publicRecord = publicLeaseRecord(record);
   const portalOrgKind = portalOrgKindForKey(record.org);
   return portalOrgKind ? { ...publicRecord, portalOrgKind } : publicRecord;
 }

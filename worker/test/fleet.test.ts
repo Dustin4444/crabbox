@@ -41,9 +41,11 @@ import {
   workspaceTerminalOriginAllowed,
   type WebVNCBuffer,
 } from "../src/fleet";
+import { gcpProviderLabelValue } from "../src/gcp";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
+import { providerLabelValue } from "../src/provider-labels";
 import {
   ProviderProvisioningCleanupError,
   providerProvisioningCleanupClaim,
@@ -8435,7 +8437,14 @@ describe("fleet lease identity and idle", () => {
                 status: "running",
                 serverType: "cpx62",
                 host: "192.0.2.106",
-                labels: { lease: leaseID },
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  lease: leaseID,
+                  owner: "alice_example.com",
+                  provider: "hetzner",
+                  slug: "fleet-is-106",
+                },
               },
             ],
           },
@@ -8592,7 +8601,14 @@ describe("fleet lease identity and idle", () => {
                       status: "running",
                       serverType: "cpx62",
                       host: "192.0.2.112",
-                      labels: { lease: leaseID },
+                      labels: {
+                        crabbox: "true",
+                        created_by: "crabbox",
+                        lease: leaseID,
+                        owner: "alice_example.com",
+                        provider: "hetzner",
+                        slug: "fleet-is-112",
+                      },
                     },
                   ];
             },
@@ -8685,7 +8701,14 @@ describe("fleet lease identity and idle", () => {
                 status: "running",
                 serverType: "cpx62",
                 host: "192.0.2.112",
-                labels: { lease: lease.id },
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  lease: lease.id,
+                  owner: providerLabelValue(lease.owner),
+                  provider: "hetzner",
+                  slug: providerLabelValue(lease.slug ?? ""),
+                },
               };
             },
             onReleaseLease(lease) {
@@ -8812,6 +8835,8 @@ describe("fleet lease identity and idle", () => {
               created_by: "crabbox",
               provider: "gcp",
               lease: leaseID,
+              owner: "alice_example_com",
+              slug: "fleet-is-gcp-recovery",
             },
           };
         },
@@ -9884,12 +9909,22 @@ describe("fleet lease identity and idle", () => {
               status: "initializing",
               serverType: "cpx62",
               host: "",
-              labels: { lease: leaseID },
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                lease: leaseID,
+                owner: "alice_example.com",
+                provider: "hetzner",
+                slug: "fleet-is-109",
+              },
             },
           ],
         },
         async () => {
           providerReleases += 1;
+        },
+        async () => {
+          throw new Error("hetzner GET /servers/missing-cloud-id: http 404: not_found");
         },
       ),
     });
@@ -9920,7 +9955,7 @@ describe("fleet lease identity and idle", () => {
       desktop: false,
       browser: false,
       code: false,
-      cloudID: "",
+      cloudID: "missing-cloud-id",
       owner: "alice@example.com",
       org: "example-org",
       profile: "default",
@@ -9993,7 +10028,14 @@ describe("fleet lease identity and idle", () => {
             status: "initializing",
             serverType: "cx53",
             host: "192.0.2.129",
-            labels: { lease: leaseID },
+            labels: {
+              crabbox: "true",
+              created_by: "crabbox",
+              lease: leaseID,
+              owner: "alice_example.com",
+              provider: "hetzner",
+              slug: "fleet-is-129",
+            },
           },
         ],
       }),
@@ -10287,6 +10329,445 @@ describe("fleet lease identity and idle", () => {
 
     expect(providerReleases).toBe(0);
     expect(storage.value<LeaseRecord>("lease:cbx_000000000098")?.state).toBe("expired");
+  });
+
+  it("fails interrupted deployment provisioning when no provider resource exists", async () => {
+    const storage = new MemoryStorage();
+    let providerLookups = 0;
+    const now = Date.now();
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          onList() {
+            providerLookups += 1;
+            return [];
+          },
+        }),
+      },
+      {
+        CF_VERSION_METADATA: {
+          id: "new-version",
+          timestamp: new Date(now - 10 * 60_000).toISOString(),
+        },
+      },
+    );
+    storage.seed(
+      "lease:cbx_000000000091",
+      testLease({
+        id: "cbx_000000000091",
+        slug: "interrupted",
+        provider: "azure",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        state: "provisioning",
+        provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+        provisioningCoordinatorVersion: "old-version",
+        provisioningRecoveryObservedAt: new Date(now - 10 * 60_000).toISOString(),
+        provisioningRecoveryMissingSince: new Date(now - 31 * 60_000).toISOString(),
+        expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      }),
+    );
+
+    await fleet.alarm();
+
+    expect(providerLookups).toBe(1);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000091")).toMatchObject({
+      state: "failed",
+      cloudID: "",
+      failureError:
+        "coordinator deployment interrupted provider provisioning; no provider resource found",
+      provisioningResourceMayExist: false,
+      provisioningFailureRetryable: false,
+    });
+    expect(
+      storage.value<LeaseRecord>("lease:cbx_000000000091")?.provisioningCoordinatorVersion,
+    ).toBeUndefined();
+  });
+
+  it("waits for the deployment settle window before reconciling interrupted provisioning", async () => {
+    const storage = new MemoryStorage();
+    let providerLookups = 0;
+    const now = Date.now();
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          onList() {
+            providerLookups += 1;
+            return [];
+          },
+        }),
+      },
+      {
+        CF_VERSION_METADATA: {
+          id: "new-version",
+          timestamp: new Date(now - 60 * 60_000).toISOString(),
+        },
+      },
+    );
+    storage.seed(
+      "lease:cbx_000000000092",
+      testLease({
+        id: "cbx_000000000092",
+        slug: "settling",
+        provider: "azure",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        state: "provisioning",
+        provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+        provisioningCoordinatorVersion: "old-version",
+        cleanupRetryAt: new Date(now + 60_000).toISOString(),
+        expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      }),
+    );
+
+    await fleet.alarm();
+
+    expect(providerLookups).toBe(0);
+    const stored = storage.value<LeaseRecord>("lease:cbx_000000000092");
+    expect(stored?.state).toBe("provisioning");
+    expect(Date.parse(stored?.provisioningRecoveryObservedAt ?? "")).toBeGreaterThanOrEqual(now);
+    expect(storage.alarm()).toBe(
+      Date.parse(stored?.provisioningRecoveryObservedAt ?? "") + 5 * 60_000,
+    );
+    const visible = await fleet.fetch(
+      request("GET", "/v1/leases/cbx_000000000092", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    const visibleLease = (await visible.json()) as { lease: LeaseRecord };
+    expect(visibleLease.lease.provisioningCoordinatorVersion).toBeUndefined();
+    expect(visibleLease.lease.provisioningRecoveryObservedAt).toBeUndefined();
+    expect(visibleLease.lease.provisioningRecoveryMissingSince).toBeUndefined();
+  });
+
+  it("does not reconcile same-version long-running AWS Mac provisioning", async () => {
+    const storage = new MemoryStorage();
+    let providerLookups = 0;
+    const now = Date.now();
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, {
+          provider: "aws",
+          onList() {
+            providerLookups += 1;
+            return [];
+          },
+        }),
+      },
+      {
+        CF_VERSION_METADATA: {
+          id: "current-version",
+          timestamp: new Date(now - 60 * 60_000).toISOString(),
+        },
+      },
+    );
+    storage.seed(
+      "lease:cbx_000000000096",
+      testLease({
+        id: "cbx_000000000096",
+        slug: "long-running-mac",
+        provider: "aws",
+        target: "macos",
+        serverType: "mac2.metal",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        state: "provisioning",
+        provisioningRequestStartedAt: new Date(now - 31 * 60_000).toISOString(),
+        provisioningCoordinatorVersion: "current-version",
+        expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      }),
+    );
+
+    await fleet.alarm();
+
+    expect(providerLookups).toBe(0);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000096")).toMatchObject({
+      state: "provisioning",
+      provisioningCoordinatorVersion: "current-version",
+    });
+  });
+
+  it("keeps checking after an empty interrupted provisioning lookup", async () => {
+    const storage = new MemoryStorage();
+    const now = Date.now();
+    let providerLookups = 0;
+    let providerReleases = 0;
+    const leaseID = "cbx_000000000096";
+    const server: ProviderMachine = {
+      provider: "azure",
+      id: 0,
+      cloudID: "crabbox-delayed",
+      name: "crabbox-delayed",
+      status: "running",
+      serverType: "Standard_D4ads_v6",
+      host: "192.0.2.96",
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        lease: leaseID,
+        owner: "alice_example.com",
+        provider: "azure",
+        slug: "delayed",
+      },
+    };
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          onList() {
+            providerLookups += 1;
+            return providerLookups === 1 ? [] : [server];
+          },
+          onReleaseLease() {
+            providerReleases += 1;
+          },
+        }),
+      },
+      {
+        CF_VERSION_METADATA: {
+          id: "new-version",
+          timestamp: new Date(now - 10 * 60_000).toISOString(),
+        },
+      },
+    );
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "delayed",
+        provider: "azure",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        state: "provisioning",
+        provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+        provisioningCoordinatorVersion: "old-version",
+        provisioningRecoveryObservedAt: new Date(now - 10 * 60_000).toISOString(),
+        expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      }),
+    );
+
+    await fleet.alarm();
+
+    const uncertain = storage.value<LeaseRecord>(`lease:${leaseID}`);
+    expect(uncertain).toMatchObject({
+      state: "provisioning",
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: true,
+      cleanupError:
+        "coordinator deployment interrupted provider provisioning; provider resource not yet visible",
+    });
+    expect(Date.parse(uncertain?.provisioningRecoveryMissingSince ?? "")).toBeGreaterThanOrEqual(
+      now,
+    );
+    expect(Date.parse(uncertain?.cleanupRetryAt ?? "")).toBeGreaterThan(now);
+
+    storage.seed(`lease:${leaseID}`, {
+      ...uncertain,
+      cleanupRetryAt: new Date(now - 1).toISOString(),
+    });
+    await fleet.alarm();
+
+    expect(providerLookups).toBe(2);
+    expect(providerReleases).toBe(1);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: "crabbox-delayed",
+      provisioningResourceMayExist: false,
+      provisioningFailureRetryable: false,
+    });
+  });
+
+  it("records the coordinator version only while provider provisioning is active", async () => {
+    const storage = new MemoryStorage();
+    let activeVersion: string | undefined;
+    const fleet = testFleet(
+      storage,
+      {
+        hetzner: fakeProvider(() => {
+          activeVersion =
+            storage.value<LeaseRecord>("lease:cbx_000000000095")?.provisioningCoordinatorVersion;
+        }),
+      },
+      {
+        CF_VERSION_METADATA: {
+          id: "current-version",
+          timestamp: new Date().toISOString(),
+        },
+      },
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_000000000095",
+          provider: "hetzner",
+          sshPublicKey: "ssh-ed25519 version-test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(activeVersion).toBe("current-version");
+    expect(
+      storage.value<LeaseRecord>("lease:cbx_000000000095")?.provisioningCoordinatorVersion,
+    ).toBeUndefined();
+  });
+
+  it("recovers and cleans an owned resource after interrupted deployment", async () => {
+    const storage = new MemoryStorage();
+    const now = Date.now();
+    let providerReleases = 0;
+    const leaseID = "cbx_000000000093";
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          onRecoverServer() {
+            return undefined;
+          },
+          servers: [
+            {
+              provider: "azure",
+              id: 0,
+              cloudID: "crabbox-interrupted",
+              name: "crabbox-interrupted",
+              status: "running",
+              serverType: "Standard_D4ads_v6",
+              host: "192.0.2.93",
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                lease: leaseID,
+                owner: "alice_example.com",
+                provider: "azure",
+                slug: "interrupted",
+              },
+            },
+          ],
+          onReleaseLease() {
+            providerReleases += 1;
+          },
+        }),
+      },
+      {
+        CF_VERSION_METADATA: {
+          id: "new-version",
+          timestamp: new Date(now - 10 * 60_000).toISOString(),
+        },
+      },
+    );
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "interrupted",
+        provider: "azure",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        state: "provisioning",
+        provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+        provisioningCoordinatorVersion: "old-version",
+        provisioningRecoveryObservedAt: new Date(now - 10 * 60_000).toISOString(),
+        expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      }),
+    );
+
+    await fleet.alarm();
+
+    expect(providerReleases).toBe(1);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: "crabbox-interrupted",
+      failureError:
+        "coordinator deployment interrupted provider provisioning; recovered provider resource for cleanup",
+      provisioningResourceMayExist: false,
+      provisioningFailureRetryable: false,
+    });
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toBeUndefined();
+  });
+
+  it("backs off interrupted provisioning recovery when provider inventory fails", async () => {
+    const storage = new MemoryStorage();
+    const now = Date.now();
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          onList() {
+            throw new Error("azure inventory unavailable");
+          },
+        }),
+      },
+      {
+        CF_VERSION_METADATA: {
+          id: "new-version",
+          timestamp: new Date(now - 10 * 60_000).toISOString(),
+        },
+      },
+    );
+    storage.seed(
+      "lease:cbx_000000000094",
+      testLease({
+        id: "cbx_000000000094",
+        slug: "inventory",
+        provider: "azure",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        state: "provisioning",
+        provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+        provisioningCoordinatorVersion: "old-version",
+        provisioningRecoveryObservedAt: new Date(now - 10 * 60_000).toISOString(),
+        expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      }),
+    );
+
+    await fleet.alarm();
+
+    const lease = storage.value<LeaseRecord>("lease:cbx_000000000094");
+    expect(lease).toMatchObject({
+      state: "provisioning",
+      cleanupAttempts: 1,
+      cleanupError: "interrupted provisioning recovery failed: azure inventory unavailable",
+    });
+    expect(Date.parse(lease?.cleanupRetryAt ?? "")).toBeGreaterThan(now);
+    expect(storage.alarm()).toBe(Date.parse(lease?.cleanupRetryAt ?? ""));
   });
 
   it("does not let registration overwrite another owner or managed lease", async () => {
@@ -29467,6 +29948,13 @@ function fakeProvider(
     restrictedLeaseRequestFields(input: LeaseRequest) {
       return result.onRestrictedLeaseRequestFields?.(input) ?? [];
     },
+    ...(result.provider === "gcp"
+      ? {
+          ownershipLabelValue(value: string) {
+            return gcpProviderLabelValue(value);
+          },
+        }
+      : {}),
     ...(result.onRecoverServer
       ? {
           async recoverServer(lease: LeaseRecord) {
