@@ -185,6 +185,8 @@ describe("daytona coordinator client", () => {
   it("creates a larger snapshot from the configured base and deletes its builder", async () => {
     const calls: Array<{ method: string; path: string; body?: unknown }> = [];
     let state = "creating";
+    let cpu = 1;
+    let memory = 1;
     let disk = 3;
     const client = new DaytonaClient(baseEnv);
     client.pollDelayMs = 0;
@@ -195,11 +197,13 @@ describe("daytona coordinator client", () => {
       calls.push({ method: request.method, path: url.pathname, ...(body ? { body } : {}) });
       if (request.method === "POST" && url.pathname === "/api/sandbox") {
         state = "started";
-        disk = (body as { disk: number }).disk;
+        ({ cpu, memory, disk } = body as { cpu: number; memory: number; disk: number });
         return Response.json({
           id: "snapshot-builder",
           name: "crabbox-snapshot-bootstrap-test",
           state: "creating",
+          cpu,
+          memory,
           disk,
         });
       }
@@ -208,6 +212,8 @@ describe("daytona coordinator client", () => {
           id: "snapshot-builder",
           name: "crabbox-snapshot-bootstrap-test",
           state,
+          cpu,
+          memory,
           disk,
         });
       }
@@ -225,11 +231,15 @@ describe("daytona coordinator client", () => {
     });
 
     await expect(
-      client.bootstrapSnapshot("crabbox-ready-10g", 10, "daytonaio/sandbox:0.8.0"),
+      client.bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, "daytonaio/sandbox:0.8.0"),
     ).resolves.toEqual({
       sourceSnapshot: "daytonaio/sandbox:0.8.0",
+      sourceCPU: 2,
+      sourceMemoryGiB: 4,
       sourceDiskGiB: 10,
-      snapshot: "crabbox-ready-10g",
+      snapshot: "crabbox-ready-2x4x10",
+      cpu: 2,
+      memoryGiB: 4,
       diskGiB: 10,
       sandboxID: "snapshot-builder",
       cleanup: "deleted",
@@ -248,6 +258,8 @@ describe("daytona coordinator client", () => {
       buildInfo: {
         dockerfileContent: "FROM daytonaio/sandbox:0.8.0",
       },
+      cpu: 2,
+      memory: 4,
       disk: 10,
       labels: {
         created_by: "crabbox",
@@ -257,7 +269,7 @@ describe("daytona coordinator client", () => {
     expect(calls[0]?.body).not.toMatchObject({
       labels: { crabbox: "true" },
     });
-    expect(calls[5]?.body).toEqual({ name: "crabbox-ready-10g" });
+    expect(calls[5]?.body).toEqual({ name: "crabbox-ready-2x4x10" });
   });
 
   it("deletes the builder when Daytona snapshot bootstrap fails", async () => {
@@ -272,7 +284,13 @@ describe("daytona coordinator client", () => {
         return Response.json({ id: "snapshot-builder", state: "creating" });
       }
       if (request.method === "GET") {
-        return Response.json({ id: "snapshot-builder", state: "started", disk: 10 });
+        return Response.json({
+          id: "snapshot-builder",
+          state: "started",
+          cpu: 2,
+          memory: 4,
+          disk: 10,
+        });
       }
       if (request.method === "POST" && url.pathname.endsWith("/stop")) {
         return new Response("provider unavailable", { status: 503 });
@@ -284,7 +302,7 @@ describe("daytona coordinator client", () => {
     });
 
     await expect(
-      client.bootstrapSnapshot("crabbox-ready-10g", 10, "daytonaio/sandbox:0.8.0"),
+      client.bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, "daytonaio/sandbox:0.8.0"),
     ).rejects.toThrow("http 503");
     expect(methods.at(-1)).toBe("DELETE /api/sandbox/snapshot-builder");
   });

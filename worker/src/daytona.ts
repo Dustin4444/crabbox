@@ -42,8 +42,12 @@ export interface DaytonaSSHEndpoint {
 
 export interface DaytonaSnapshotBootstrap {
   sourceSnapshot: string;
-  sourceDiskGiB?: number;
+  sourceCPU: number;
+  sourceMemoryGiB: number;
+  sourceDiskGiB: number;
   snapshot: string;
+  cpu: number;
+  memoryGiB: number;
   diskGiB: number;
   sandboxID: string;
   cleanup: "deleted";
@@ -183,6 +187,8 @@ export class DaytonaClient {
 
   async bootstrapSnapshot(
     name: string,
+    cpu: number,
+    memoryGiB: number,
     diskGiB: number,
     baseImage: string,
   ): Promise<DaytonaSnapshotBootstrap> {
@@ -198,6 +204,8 @@ export class DaytonaClient {
       buildInfo: {
         dockerfileContent: `FROM ${baseImage}`,
       },
+      cpu,
+      memory: memoryGiB,
       disk: diskGiB,
     };
     if (this.target) body["target"] = this.target;
@@ -210,9 +218,19 @@ export class DaytonaClient {
       sandboxID = created.id;
       await this.waitForState(sandboxID, ["started", "running", "ready", "active"]);
       const built = await this.getSandbox(sandboxID);
-      if (built.disk !== undefined && built.disk < diskGiB) {
+      if (built.cpu === undefined || built.cpu < cpu) {
         throw new Error(
-          `daytona sandbox ${sandboxID} disk is ${built.disk} GiB after ${diskGiB} GiB image build`,
+          `daytona sandbox ${sandboxID} has ${built.cpu ?? "unknown"} CPU after ${cpu} CPU image build`,
+        );
+      }
+      if (built.memory === undefined || built.memory < memoryGiB) {
+        throw new Error(
+          `daytona sandbox ${sandboxID} has ${built.memory ?? "unknown"} GiB memory after ${memoryGiB} GiB image build`,
+        );
+      }
+      if (built.disk === undefined || built.disk < diskGiB) {
+        throw new Error(
+          `daytona sandbox ${sandboxID} disk is ${built.disk ?? "unknown"} GiB after ${diskGiB} GiB image build`,
         );
       }
       await this.request<DaytonaSandbox>("POST", `/sandbox/${encodeURIComponent(sandboxID)}/stop`);
@@ -227,9 +245,13 @@ export class DaytonaClient {
       }
       result = {
         sourceSnapshot: baseImage,
-        ...(built.disk === undefined ? {} : { sourceDiskGiB: built.disk }),
+        sourceCPU: built.cpu,
+        sourceMemoryGiB: built.memory,
+        sourceDiskGiB: built.disk,
         snapshot: name,
-        diskGiB: built.disk ?? diskGiB,
+        cpu: built.cpu,
+        memoryGiB: built.memory,
+        diskGiB: built.disk,
         sandboxID,
       };
     } catch (error) {

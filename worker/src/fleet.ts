@@ -11987,15 +11987,37 @@ export class FleetCoordinator {
   }
 
   private async adminDaytonaSnapshotBootstrap(request: Request): Promise<Response> {
-    const input = await readJson<{ name?: unknown; diskGiB?: unknown; baseImage?: unknown }>(
-      request,
-    );
+    const input = await readJson<{
+      name?: unknown;
+      cpu?: unknown;
+      memoryGiB?: unknown;
+      diskGiB?: unknown;
+      baseImage?: unknown;
+    }>(request);
     const name = typeof input.name === "string" ? input.name.trim() : "";
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/.test(name)) {
       return json(
         {
           error: "invalid_snapshot_name",
           message: "name must be 1-63 letters, numbers, dots, underscores, or hyphens",
+        },
+        { status: 400 },
+      );
+    }
+    if (input.cpu !== 2) {
+      return json(
+        {
+          error: "invalid_snapshot_cpu",
+          message: "temporary Daytona snapshot bootstrap requires cpu=2",
+        },
+        { status: 400 },
+      );
+    }
+    if (input.memoryGiB !== 4) {
+      return json(
+        {
+          error: "invalid_snapshot_memory",
+          message: "temporary Daytona snapshot bootstrap requires memoryGiB=4",
         },
         { status: 400 },
       );
@@ -12021,6 +12043,8 @@ export class FleetCoordinator {
     }
     const result = await new DaytonaClient(this.env).bootstrapSnapshot(
       name,
+      input.cpu,
+      input.memoryGiB,
       input.diskGiB,
       baseImage,
     );
