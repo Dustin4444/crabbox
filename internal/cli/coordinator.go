@@ -924,7 +924,6 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"awsSSHCIDRsPinned":               cfg.AWSSSHCIDRsPinned,
 		"awsMacHostID":                    cfg.AWSMacHostID,
 		"azureLocation":                   cfg.AzureLocation,
-		"azureImage":                      cfg.AzureImage,
 		"azureSnapshot":                   cfg.AzureSnapshot,
 		"sshUser":                         cfg.SSHUser,
 		"sshPort":                         cfg.SSHPort,
@@ -949,6 +948,9 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 	}
 	if cfg.osImageExplicit {
 		req["os"] = cfg.OSImage
+	}
+	if cfg.azureImageExplicit {
+		req["azureImage"] = cfg.AzureImage
 	}
 	if cfg.AzureOSDiskExplicit {
 		req["azureOSDisk"] = cfg.AzureOSDisk
