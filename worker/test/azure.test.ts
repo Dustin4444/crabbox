@@ -210,12 +210,13 @@ describe("azure provider", () => {
 
   it("recovers an exact Azure NIC and public IP set before VM creation", async () => {
     const client = new AzureClient(baseEnv);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: baseEnv.AZURE_CLIENT_ID!,
+      expiresAt: Date.now() + 3_600_000,
+    };
     const cloudID = "crabbox-blue-lobster";
     client.fetcher = async (input) => {
       const url = new URL(String(input));
-      if (isAzureLoginURL(url.toString())) {
-        return Response.json({ access_token: "tkn", expires_in: 3600 });
-      }
       if (url.pathname.endsWith("/virtualMachines") || url.pathname.endsWith("/disks")) {
         return Response.json({ value: [] });
       }
@@ -281,11 +282,12 @@ describe("azure provider", () => {
 
   it("returns no Azure recovery identity when no resource is owned by the lease", async () => {
     const client = new AzureClient(baseEnv);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: baseEnv.AZURE_CLIENT_ID!,
+      expiresAt: Date.now() + 3_600_000,
+    };
     client.fetcher = async (input) => {
       const url = new URL(String(input));
-      if (isAzureLoginURL(url.toString())) {
-        return Response.json({ access_token: "tkn", expires_in: 3600 });
-      }
       return Response.json({
         value: [
           {
@@ -311,11 +313,12 @@ describe("azure provider", () => {
 
   it("fails closed when multiple Azure resource sets claim the lease", async () => {
     const client = new AzureClient(baseEnv);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: baseEnv.AZURE_CLIENT_ID!,
+      expiresAt: Date.now() + 3_600_000,
+    };
     client.fetcher = async (input) => {
       const url = new URL(String(input));
-      if (isAzureLoginURL(url.toString())) {
-        return Response.json({ access_token: "tkn", expires_in: 3600 });
-      }
       if (!url.pathname.endsWith("/publicIPAddresses")) {
         return Response.json({ value: [] });
       }
@@ -339,11 +342,12 @@ describe("azure provider", () => {
 
   it("fails closed when an Azure resource claims the lease with mismatched ownership", async () => {
     const client = new AzureClient(baseEnv);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: baseEnv.AZURE_CLIENT_ID!,
+      expiresAt: Date.now() + 3_600_000,
+    };
     client.fetcher = async (input) => {
       const url = new URL(String(input));
-      if (isAzureLoginURL(url.toString())) {
-        return Response.json({ access_token: "tkn", expires_in: 3600 });
-      }
       if (!url.pathname.endsWith("/publicIPAddresses")) {
         return Response.json({ value: [] });
       }
@@ -828,7 +832,7 @@ describe("azure provider", () => {
     const { storage } = memoryAzureDeleteClaimStorage();
     const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
     (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
+      token: baseEnv.AZURE_CLIENT_ID!,
       expiresAt: Date.now() + 3_600_000,
     };
     const deletes: string[] = [];
