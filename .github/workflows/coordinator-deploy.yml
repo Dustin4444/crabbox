@@ -60,6 +60,21 @@ jobs:
         run: npm ci
         working-directory: worker
 
+      - name: Configure Daytona snapshot
+        if: steps.token.outputs.ready == 'true'
+        run: |
+          if [ -z "${CRABBOX_DAYTONA_SNAPSHOT}" ]; then
+            echo "::error::CRABBOX_DAYTONA_SNAPSHOT is not set in the 'coordinator' environment."
+            exit 1
+          fi
+          printf '%s' "${CRABBOX_DAYTONA_SNAPSHOT}" |
+            npx wrangler secret put CRABBOX_DAYTONA_SNAPSHOT
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: "91b59577e757131d68d55a471fe32aca"
+          CRABBOX_DAYTONA_SNAPSHOT: ${{ secrets.CRABBOX_DAYTONA_SNAPSHOT }}
+
       - name: Deploy
         if: steps.token.outputs.ready == 'true'
         # `npm run deploy` runs the predeploy bundle (vendor-novnc) then

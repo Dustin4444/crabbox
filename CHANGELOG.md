@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- Kept the brokered Daytona fallback on its operator-managed snapshot by
+  applying the private snapshot binding during every coordinator deployment.
 - Made Blacksmith doctor report all-organization inventory scope and a
   nonterminal active Testbox count for capacity-aware callers.
 - Made brokered Daytona usable with Crabbox auth alone, added a read-only
