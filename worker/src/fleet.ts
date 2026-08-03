@@ -12973,6 +12973,11 @@ export class FleetCoordinator {
         ) {
           const observed = structuredClone(lease);
           observed.provisioningRecoveryObservedAt = new Date(now).toISOString();
+          const retryAt = Date.parse(observed.cleanupRetryAt ?? "");
+          const settleAt = now + interruptedProvisioningDeploySettleMs;
+          if (Number.isFinite(retryAt) && retryAt < settleAt) {
+            observed.cleanupRetryAt = new Date(settleAt).toISOString();
+          }
           observed.updatedAt = observed.provisioningRecoveryObservedAt;
           await this.putLease(observed);
           return;

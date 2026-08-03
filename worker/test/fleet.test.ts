@@ -10385,6 +10385,7 @@ describe("fleet lease identity and idle", () => {
         state: "provisioning",
         provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
         provisioningCoordinatorVersion: "old-version",
+        cleanupRetryAt: new Date(now + 60_000).toISOString(),
         expiresAt: new Date(now + 60 * 60_000).toISOString(),
       }),
     );
