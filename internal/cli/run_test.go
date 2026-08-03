@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -315,6 +316,68 @@ func TestRunCommandInjectsReservedMetadataAcrossSSHCommandModes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunCommandRetriesIdempotentRemoteWorkdirCreation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	mkdirCallsPath := filepath.Join(dir, "mkdir-calls")
+	firstMkdirPath := filepath.Join(dir, "first-mkdir")
+	mkdirCommandPath := filepath.Join(dir, "mkdir-command")
+	script := `#!/bin/sh
+remote=""
+for arg do remote="$arg"; done
+case "$remote" in
+  "mkdir -p "*)
+    if [ ! -e "$CRABBOX_FAKE_SSH_MKDIR_COMMAND" ]; then
+      printf '%s\n' "$remote" > "$CRABBOX_FAKE_SSH_MKDIR_COMMAND"
+    fi
+    IFS= read -r mkdir_command < "$CRABBOX_FAKE_SSH_MKDIR_COMMAND"
+    if [ "$remote" = "$mkdir_command" ]; then
+      printf 'call\n' >> "$CRABBOX_FAKE_SSH_MKDIR_CALLS"
+      if [ ! -e "$CRABBOX_FAKE_SSH_FIRST_MKDIR" ]; then
+        : > "$CRABBOX_FAKE_SSH_FIRST_MKDIR"
+        exit 255
+      fi
+    fi
+    ;;
+esac
+/bin/cat >/dev/null || true
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	t.Setenv("CRABBOX_FAKE_SSH_MKDIR_CALLS", mkdirCallsPath)
+	t.Setenv("CRABBOX_FAKE_SSH_FIRST_MKDIR", firstMkdirPath)
+	t.Setenv("CRABBOX_FAKE_SSH_MKDIR_COMMAND", mkdirCommandPath)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+
+	var stdout, stderr bytes.Buffer
+	if err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--no-hydrate",
+		"--",
+		"true",
+	}); err != nil {
+		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	calls, err := os.ReadFile(mkdirCallsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(calls), "call\n"); got != 2 {
+		t.Fatalf("remote mkdir calls=%d want 2", got)
 	}
 }
 

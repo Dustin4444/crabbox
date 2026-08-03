@@ -333,6 +333,9 @@ const runtimeAdapterMaxBufferedBytes = runtimeAdapterRelayFrameLimit * 2;
 const leaseCleanupRetryDelayMs = 5 * 60 * 1000;
 const leaseCleanupClaimStaleMs = 30 * 60 * 1000;
 const leaseCleanupBatchSize = 16;
+const interruptedProvisioningDeploySettleMs = 5 * 60 * 1000;
+const interruptedProvisioningAbsenceConfirmationMs = 30 * 60 * 1000;
+const interruptedProvisioningRecoveryBatchSize = 16;
 const awsOrphanSweepInitialDelayMs = 60 * 1000;
 const azureOrphanSweepInitialDelayMs = 60 * 1000;
 const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
@@ -1022,6 +1025,7 @@ export class FleetCoordinator {
   private readonly runtimeAdapterAgents = new Map<string, WebSocket>();
   private readonly runtimeAdapterPending = new Map<string, RuntimeAdapterPendingRequest>();
   private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
+  private readonly daytonaSnapshotBootstrapQueues = new Map<string, Promise<void>>();
   private readonly controlSockets = new Map<string, WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
   private readonly restoredBridgeSockets = new Set<WebSocket>();
@@ -1146,6 +1150,12 @@ export class FleetCoordinator {
       }
       if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
         return await this.adminProviderIdentity(request);
+      }
+      if (
+        method === "POST" &&
+        parts.join("/") === "v1/admin/providers/daytona/snapshot-bootstrap"
+      ) {
+        return await this.adminDaytonaSnapshotBootstrap(request);
       }
       if (method === "POST" && parts.join("/") === "v1/admin/tailscale-preflight") {
         return await this.adminTailscalePreflight();
@@ -2947,6 +2957,7 @@ export class FleetCoordinator {
     }
     await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
     await this.quarantineLegacyWorkspaces();
+    await this.reconcileInterruptedLeaseProvisioning();
     await this.expireLeases();
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.cleanupExpiredWebVNCPortalViewerAuth();
@@ -3266,6 +3277,9 @@ export class FleetCoordinator {
         delete reactivated.releaseDeletesServer;
         delete reactivated.failureError;
         delete reactivated.provisioningRequestStartedAt;
+        delete reactivated.provisioningCoordinatorVersion;
+        delete reactivated.provisioningRecoveryObservedAt;
+        delete reactivated.provisioningRecoveryMissingSince;
         clearLeaseCleanupMetadata(reactivated);
         const limitError = enforceCostLimitUsage(
           admission.costUsage,
@@ -3534,6 +3548,10 @@ export class FleetCoordinator {
         }
       }
       current.provisioningRequestStartedAt = new Date().toISOString();
+      const coordinatorVersion = this.env.CF_VERSION_METADATA?.id.trim();
+      if (coordinatorVersion) {
+        current.provisioningCoordinatorVersion = coordinatorVersion;
+      }
       current.updatedAt = current.provisioningRequestStartedAt;
       await this.putLease(current);
       return { started: true as const, current };
@@ -3627,6 +3645,9 @@ export class FleetCoordinator {
           record.state = "failed";
           record.updatedAt = failedAt;
           record.endedAt = failedAt;
+          delete record.provisioningCoordinatorVersion;
+          delete record.provisioningRecoveryObservedAt;
+          delete record.provisioningRecoveryMissingSince;
           record.cleanupFailedAt = failedAt;
           record.cleanupError = coordinatorErrorMessage(this.env, error);
           const awsOutcomeUncertain =
@@ -3693,6 +3714,9 @@ export class FleetCoordinator {
     record = structuredClone(current);
     record.state = "active";
     delete record.provisioningRequestStartedAt;
+    delete record.provisioningCoordinatorVersion;
+    delete record.provisioningRecoveryObservedAt;
+    delete record.provisioningRecoveryMissingSince;
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (server.hostID) {
@@ -4543,17 +4567,7 @@ export class FleetCoordinator {
     const provider = this.provider(workspace.provider, lease.region, lease.providerProject);
     let server: ProviderMachine | undefined;
     try {
-      if (provider.recoverServer) {
-        server = await provider.recoverServer(lease);
-      } else if (lease.cloudID && provider.getServer) {
-        server = await provider.getServer(lease.cloudID);
-      } else if (provider.findServerByLease) {
-        server = await provider.findServerByLease(lease.id);
-      } else {
-        server = (await provider.listCrabboxServers()).find(
-          (machine) => machine.labels?.["lease"] === lease.id,
-        );
-      }
+      server = await this.recoverProviderServer(workspace.provider, provider, lease);
     } catch (error) {
       if (!providerResourceNotFound(error)) {
         await this.recordWorkspaceRecoveryMiss(workspace, Number.POSITIVE_INFINITY);
@@ -4747,6 +4761,9 @@ export class FleetCoordinator {
         delete current.provisioningResourceMayExist;
         delete current.provisioningFailureRetryable;
         delete current.provisioningRequestStartedAt;
+        delete current.provisioningCoordinatorVersion;
+        delete current.provisioningRecoveryObservedAt;
+        delete current.provisioningRecoveryMissingSince;
         delete current.endedAt;
         delete current.releasedAt;
         clearLeaseCleanupMetadata(current);
@@ -4815,6 +4832,9 @@ export class FleetCoordinator {
       current.provisioningResourceMayExist = false;
       current.provisioningFailureRetryable = true;
       delete current.provisioningRequestStartedAt;
+      delete current.provisioningCoordinatorVersion;
+      delete current.provisioningRecoveryObservedAt;
+      delete current.provisioningRecoveryMissingSince;
       current.updatedAt = new Date().toISOString();
       await this.putLease(current);
       return current;
@@ -5216,6 +5236,58 @@ export class FleetCoordinator {
       close(1011, coordinatorErrorMessage(this.env, error));
       throw error;
     }
+  }
+
+  private async recoverProviderServer(
+    providerName: Provider,
+    provider: CloudProvider,
+    lease: LeaseRecord,
+  ): Promise<ProviderMachine | undefined> {
+    const lookup = async (
+      find: (() => Promise<ProviderMachine | undefined>) | undefined,
+    ): Promise<ProviderMachine | undefined> => {
+      if (!find) return undefined;
+      try {
+        return await find();
+      } catch (error) {
+        if (providerResourceNotFound(error)) return undefined;
+        throw error;
+      }
+    };
+    let server = await lookup(
+      provider.recoverServer ? async () => await provider.recoverServer?.(lease) : undefined,
+    );
+    server ??= await lookup(
+      lease.cloudID && provider.getServer
+        ? async () => await provider.getServer?.(lease.cloudID)
+        : undefined,
+    );
+    server ??= await lookup(
+      provider.findServerByLease
+        ? async () => await provider.findServerByLease?.(lease.id)
+        : undefined,
+    );
+    if (!server && !provider.findServerByLease) {
+      const matches = (await provider.listCrabboxServers()).filter(
+        (candidate) => candidate.labels?.["lease"] === lease.id,
+      );
+      if (matches.length > 1) {
+        throw new Error(`multiple provider resources matched lease ${lease.id}`);
+      }
+      server = matches[0];
+    }
+    if (
+      server &&
+      !providerLabelsOwnedByLease(
+        server.labels ?? {},
+        lease,
+        providerName,
+        provider.ownershipLabelValue,
+      )
+    ) {
+      throw new Error(`provider resource ownership does not match lease ${lease.id}`);
+    }
+    return server;
   }
 
   private async cleanupExpiredNativeVNCTickets(now = Date.now()): Promise<void> {
@@ -5733,6 +5805,9 @@ export class FleetCoordinator {
       current.provisioningResourceMayExist = false;
       current.provisioningFailureRetryable = false;
       delete current.provisioningRequestStartedAt;
+      delete current.provisioningCoordinatorVersion;
+      delete current.provisioningRecoveryObservedAt;
+      delete current.provisioningRecoveryMissingSince;
       if (releaseRequested) {
         current.releasedAt = failedAt;
         delete current.releaseDeletesServer;
@@ -11912,6 +11987,87 @@ export class FleetCoordinator {
     return await this.adminAWSIdentity(request);
   }
 
+  private async adminDaytonaSnapshotBootstrap(request: Request): Promise<Response> {
+    const input = await readJson<{
+      name?: unknown;
+      cpu?: unknown;
+      memoryGiB?: unknown;
+      diskGiB?: unknown;
+      baseImage?: unknown;
+      confirm?: unknown;
+    }>(request);
+    if (input.confirm !== true) {
+      return json(
+        {
+          error: "snapshot_bootstrap_confirmation_required",
+          message:
+            "confirm=true is required because this operation creates paid provider resources",
+        },
+        { status: 400 },
+      );
+    }
+    const name = typeof input.name === "string" ? input.name.trim() : "";
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/.test(name)) {
+      return json(
+        {
+          error: "invalid_snapshot_name",
+          message: "name must be 1-63 letters, numbers, dots, underscores, or hyphens",
+        },
+        { status: 400 },
+      );
+    }
+    if (!integerInRange(input.cpu, 1, 4)) {
+      return json(
+        {
+          error: "invalid_snapshot_cpu",
+          message: "cpu must be an integer from 1 through 4",
+        },
+        { status: 400 },
+      );
+    }
+    if (!integerInRange(input.memoryGiB, 1, 8)) {
+      return json(
+        {
+          error: "invalid_snapshot_memory",
+          message: "memoryGiB must be an integer from 1 through 8",
+        },
+        { status: 400 },
+      );
+    }
+    if (!integerInRange(input.diskGiB, 3, 10)) {
+      return json(
+        {
+          error: "invalid_snapshot_disk",
+          message: "diskGiB must be an integer from 3 through 10",
+        },
+        { status: 400 },
+      );
+    }
+    const cpu = input.cpu;
+    const memoryGiB = input.memoryGiB;
+    const diskGiB = input.diskGiB;
+    const baseImage = typeof input.baseImage === "string" ? input.baseImage.trim() : "";
+    if (!isImmutableOCIImageReference(baseImage)) {
+      return json(
+        {
+          error: "invalid_base_image",
+          message: "baseImage must be an OCI image reference pinned by sha256 digest",
+        },
+        { status: 400 },
+      );
+    }
+    return await this.withDaytonaSnapshotBootstrapLock(name, async () => {
+      const result = await new DaytonaClient(this.env).bootstrapSnapshot(
+        name,
+        cpu,
+        memoryGiB,
+        diskGiB,
+        baseImage,
+      );
+      return json({ snapshot: result });
+    });
+  }
+
   private async adminTailscalePreflight(): Promise<Response> {
     return json({ tailscale: await tailscalePreflight(this.env) });
   }
@@ -12932,6 +13088,134 @@ export class FleetCoordinator {
     return json({ error: "not_found" }, { status: 404 });
   }
 
+  private async reconcileInterruptedLeaseProvisioning(): Promise<void> {
+    const now = Date.now();
+    const candidates = await this.state.runExclusive(async () => {
+      const due: LeaseRecord[] = [];
+      await this.visitLeaseRecords(async (lease) => {
+        if (due.length >= interruptedProvisioningRecoveryBatchSize) {
+          return;
+        }
+        const recoveryAt = interruptedProvisioningRecoveryAt(lease, this.env, now);
+        if (recoveryAt === undefined) {
+          return;
+        }
+        if (!Number.isFinite(Date.parse(lease.provisioningRecoveryObservedAt ?? ""))) {
+          const observed = structuredClone(lease);
+          observed.provisioningRecoveryObservedAt = new Date(now).toISOString();
+          const retryAt = Date.parse(observed.cleanupRetryAt ?? "");
+          const settleAt = now + interruptedProvisioningDeploySettleMs;
+          if (Number.isFinite(retryAt) && retryAt < settleAt) {
+            observed.cleanupRetryAt = new Date(settleAt).toISOString();
+          }
+          observed.updatedAt = observed.provisioningRecoveryObservedAt;
+          await this.putLease(observed);
+          return;
+        }
+        if (recoveryAt <= now) {
+          due.push(structuredClone(lease));
+        }
+      });
+      return due;
+    });
+    await Promise.all(candidates.map((lease) => this.reconcileInterruptedLease(lease)));
+  }
+
+  private async reconcileInterruptedLease(lease: LeaseRecord): Promise<void> {
+    const providerName = managedLeaseProvider(lease);
+    if (!providerName) {
+      return;
+    }
+    const provider = this.provider(providerName, lease.region, lease.providerProject);
+    let server: ProviderMachine | undefined;
+    try {
+      server = await this.recoverProviderServer(providerName, provider, lease);
+    } catch (error) {
+      const failure = `interrupted provisioning recovery failed: ${coordinatorErrorMessage(this.env, error)}`;
+      await this.state.runExclusive(async () => {
+        const current = await this.getLease(lease.id);
+        if (!sameProvisioningAttempt(current, lease)) {
+          return;
+        }
+        const failedAt = new Date();
+        current.cleanupAttempts = (current.cleanupAttempts ?? 0) + 1;
+        current.cleanupError = failure;
+        current.cleanupFailedAt = failedAt.toISOString();
+        current.cleanupRetryAt = new Date(
+          failedAt.getTime() + leaseCleanupRetryDelayMs,
+        ).toISOString();
+        current.updatedAt = failedAt.toISOString();
+        await this.putLease(current);
+      });
+      return;
+    }
+    await this.state.runExclusive(async () => {
+      const current = await this.getLease(lease.id);
+      if (!sameProvisioningAttempt(current, lease)) {
+        return;
+      }
+      const failedAtDate = new Date();
+      const failedAt = failedAtDate.toISOString();
+      const interruption = "coordinator deployment interrupted provider provisioning";
+      current.updatedAt = failedAt;
+      if (server) {
+        current.state = "failed";
+        current.endedAt = failedAt;
+        delete current.provisioningRequestStartedAt;
+        delete current.provisioningCoordinatorVersion;
+        delete current.provisioningRecoveryObservedAt;
+        delete current.provisioningRecoveryMissingSince;
+        applyRecoveredServerIdentity(current, server);
+        current.releaseDeletesServer = true;
+        current.provisioningResourceMayExist = true;
+        current.provisioningFailureRetryable = false;
+        current.cleanupError = `${interruption}; recovered provider resource for cleanup`;
+        current.cleanupFailedAt = failedAt;
+        delete current.cleanupRetryAt;
+        delete current.failureError;
+      } else {
+        const missingSince = Date.parse(current.provisioningRecoveryMissingSince ?? "");
+        if (
+          !Number.isFinite(missingSince) ||
+          failedAtDate.getTime() < missingSince + interruptedProvisioningAbsenceConfirmationMs
+        ) {
+          // A negative inventory read can race an accepted asynchronous create. Keep checking
+          // until the provider has remained empty for the full confirmation window.
+          if (!Number.isFinite(missingSince)) {
+            current.provisioningRecoveryMissingSince = failedAt;
+          }
+          current.provisioningResourceMayExist = true;
+          current.provisioningFailureRetryable = true;
+          current.cleanupError = `${interruption}; provider resource not yet visible`;
+          current.cleanupFailedAt = failedAt;
+          current.cleanupRetryAt = new Date(
+            failedAtDate.getTime() + leaseCleanupRetryDelayMs,
+          ).toISOString();
+          delete current.failureError;
+          delete current.releaseDeletesServer;
+          await this.putLease(current);
+          return;
+        }
+        current.state = "failed";
+        current.endedAt = failedAt;
+        delete current.provisioningRequestStartedAt;
+        delete current.provisioningCoordinatorVersion;
+        delete current.provisioningRecoveryObservedAt;
+        delete current.provisioningRecoveryMissingSince;
+        current.cloudID = "";
+        current.serverID = 0;
+        current.serverName = "";
+        current.host = "";
+        current.failureError = `${interruption}; no provider resource found`;
+        current.provisioningResourceMayExist = false;
+        current.provisioningFailureRetryable = false;
+        delete current.releaseDeletesServer;
+        clearLeaseCleanupMetadata(current);
+      }
+      await this.putLease(current);
+    });
+  }
+
   private async expireLeases(): Promise<void> {
     const claims = await this.state.runExclusive(async () => {
       const now = Date.now();
@@ -12986,6 +13270,9 @@ export class FleetCoordinator {
           lease.state = "failed";
           lease.updatedAt = nowISO;
           lease.endedAt = nowISO;
+          delete lease.provisioningCoordinatorVersion;
+          delete lease.provisioningRecoveryObservedAt;
+          delete lease.provisioningRecoveryMissingSince;
           lease.cleanupFailedAt = nowISO;
           lease.cleanupError = "lease expired before provider returned a cloud resource";
           await this.putLease(lease, { noCache: true });
@@ -13145,7 +13432,7 @@ export class FleetCoordinator {
         lease.runtimeAdapterDeleteRequestedAt ||
         leaseNeedsCleanup(lease, now)
       ) {
-        retainAlarm(nextLeaseAlarmTime(lease));
+        retainAlarm(nextLeaseAlarmTime(lease, this.env));
       }
     });
     for (const handoffAlarm of await this.webVNCCredentialHandoffs.alarmTimes(now)) {
@@ -14370,6 +14657,31 @@ export class FleetCoordinator {
       return await operation();
     } finally {
       release();
+    }
+  }
+
+  private async withDaytonaSnapshotBootstrapLock<T>(
+    name: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    let release!: () => void;
+    const previous =
+      this.daytonaSnapshotBootstrapQueues.get(name)?.catch(() => {}) ?? Promise.resolve();
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => next);
+    this.daytonaSnapshotBootstrapQueues.set(name, tail);
+    await previous;
+    try {
+      // Daytona exposes async snapshot completion by name, so same-name
+      // bootstraps must not overlap and observe another request's active row.
+      return await operation();
+    } finally {
+      release();
+      if (this.daytonaSnapshotBootstrapQueues.get(name) === tail) {
+        this.daytonaSnapshotBootstrapQueues.delete(name);
+      }
     }
   }
 
@@ -18230,6 +18542,64 @@ function clampLimit(value: string | null, fallback: number): number {
   return Math.min(Math.trunc(parsed), 500);
 }
 
+function integerInRange(value: unknown, minimum: number, maximum: number): value is number {
+  return Number.isInteger(value) && Number(value) >= minimum && Number(value) <= maximum;
+}
+
+function isImmutableOCIImageReference(value: string): boolean {
+  const match = /^(.*)@sha256:([a-f0-9]{64})$/.exec(value);
+  if (!match) return false;
+  let name = match[1] ?? "";
+  const lastSlash = name.lastIndexOf("/");
+  const lastColon = name.lastIndexOf(":");
+  if (lastColon > lastSlash) {
+    const tag = name.slice(lastColon + 1);
+    if (!/^[\w][\w.-]{0,127}$/.test(tag)) return false;
+    name = name.slice(0, lastColon);
+  }
+  if (!name || name.length > 255) return false;
+
+  const components = name.split("/");
+  if (components.some((component) => !component)) return false;
+  const first = components[0] ?? "";
+  const hasRegistryAuthority =
+    components.length > 1 &&
+    (first === "localhost" || first.includes(".") || first.includes(":") || first.startsWith("["));
+  if (hasRegistryAuthority && !isOCIRegistryAuthority(first)) return false;
+
+  const repositoryComponents = hasRegistryAuthority ? components.slice(1) : components;
+  return repositoryComponents.every((component) =>
+    /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$/.test(component),
+  );
+}
+
+function isOCIRegistryAuthority(value: string): boolean {
+  if (value.startsWith("[")) {
+    try {
+      const parsed = new URL(`https://${value}`);
+      return (
+        parsed.hostname.startsWith("[") &&
+        parsed.pathname === "/" &&
+        !parsed.username &&
+        !parsed.password &&
+        !parsed.search &&
+        !parsed.hash
+      );
+    } catch {
+      return false;
+    }
+  }
+  const domainComponent = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
+  const domain = `(?:${domainComponent})(?:\\.${domainComponent})*`;
+  if (!new RegExp(`^${domain}(?::[0-9]+)?$`, "i").test(value)) return false;
+  try {
+    const parsed = new URL(`https://${value}`);
+    return parsed.pathname === "/" && !parsed.username && !parsed.password && !parsed.search;
+  } catch {
+    return false;
+  }
+}
+
 function orgFilterKey(url: URL): string | null | undefined {
   const value = url.searchParams.get("org");
   const kind = url.searchParams.get("orgKind");
@@ -18293,6 +18663,9 @@ function isAdminRoute(method: string, parts: string[]): boolean {
     return true;
   }
   if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
+    return true;
+  }
+  if (method === "POST" && parts.join("/") === "v1/admin/providers/daytona/snapshot-bootstrap") {
     return true;
   }
   if (method === "POST" && parts.join("/") === "v1/admin/tailscale-preflight") {
@@ -19782,9 +20155,72 @@ function retainProvisioningCleanupClaim(
   lease.cleanupRetryAt = new Date(Date.parse(failedAt) + leaseCleanupRetryDelayMs).toISOString();
 }
 
-function nextLeaseAlarmTime(lease: LeaseRecord): number {
+function interruptedProvisioningRecoveryAt(
+  lease: LeaseRecord,
+  env: Pick<Env, "CF_VERSION_METADATA">,
+  now = Date.now(),
+): number | undefined {
+  if (
+    lease.workspaceID ||
+    lease.state !== "provisioning" ||
+    lease.cloudID ||
+    !managedLeaseProvider(lease)
+  ) {
+    return undefined;
+  }
+  const startedAt = Date.parse(lease.provisioningRequestStartedAt ?? "");
+  if (!Number.isFinite(startedAt)) {
+    return undefined;
+  }
+  if (!interruptedProvisioningVersionMismatch(lease, env)) {
+    // Provider creates have no shared upper bound, so age alone cannot distinguish an
+    // abandoned request from live provisioning. Only a deployment version change proves
+    // this Durable Object no longer owns the in-flight create.
+    return undefined;
+  }
+  const observedAt = Date.parse(lease.provisioningRecoveryObservedAt ?? "");
+  const recoveryAt = Number.isFinite(observedAt)
+    ? observedAt + interruptedProvisioningDeploySettleMs
+    : now;
+  const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
+  return Number.isFinite(retryAt) && retryAt > recoveryAt ? retryAt : recoveryAt;
+}
+
+function interruptedProvisioningVersionMismatch(
+  lease: LeaseRecord,
+  env: Pick<Env, "CF_VERSION_METADATA">,
+): boolean {
+  const currentVersion = env.CF_VERSION_METADATA?.id.trim();
+  return Boolean(
+    currentVersion &&
+    lease.provisioningCoordinatorVersion &&
+    lease.provisioningCoordinatorVersion !== currentVersion,
+  );
+}
+
+function sameProvisioningAttempt(
+  current: LeaseRecord | undefined,
+  expected: LeaseRecord,
+): current is LeaseRecord {
+  return Boolean(
+    current &&
+    current.state === "provisioning" &&
+    !current.cloudID &&
+    current.provisioningRequestStartedAt === expected.provisioningRequestStartedAt &&
+    current.provisioningCoordinatorVersion === expected.provisioningCoordinatorVersion &&
+    current.provisioningRecoveryObservedAt === expected.provisioningRecoveryObservedAt &&
+    current.provisioningRecoveryMissingSince === expected.provisioningRecoveryMissingSince,
+  );
+}
+
+function nextLeaseAlarmTime(lease: LeaseRecord, env: Pick<Env, "CF_VERSION_METADATA">): number {
   const now = Date.now();
   const expiresAt = Date.parse(lease.expiresAt);
+  const interruptedProvisioningAt = interruptedProvisioningRecoveryAt(lease, env);
+  const includeInterruptedProvisioning = (candidate: number): number =>
+    interruptedProvisioningAt === undefined
+      ? candidate
+      : Math.min(candidate, interruptedProvisioningAt);
   const runtimeAdapterDeleteRetryAt = Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "");
   const runtimeAdapterDeleteDispatchUntil = Date.parse(
     lease.runtimeAdapterDeleteDispatchUntil ?? "",
@@ -19799,29 +20235,33 @@ function nextLeaseAlarmTime(lease: LeaseRecord): number {
     ) {
       deleteAlarm = Math.max(deleteAlarm, runtimeAdapterDeleteDispatchUntil);
     }
-    return leaseIsLive(lease) && Number.isFinite(expiresAt)
-      ? Math.min(expiresAt, deleteAlarm)
-      : deleteAlarm;
+    return includeInterruptedProvisioning(
+      leaseIsLive(lease) && Number.isFinite(expiresAt)
+        ? Math.min(expiresAt, deleteAlarm)
+        : deleteAlarm,
+    );
   }
   if (lease.providerKeyCleanupPending && !lease.cleanupStartedAt) {
     const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
-    return Number.isFinite(retryAt) && retryAt > now ? retryAt : now + 1;
+    return includeInterruptedProvisioning(
+      Number.isFinite(retryAt) && retryAt > now ? retryAt : now + 1,
+    );
   }
   const claimDeadline = cleanupClaimDeadline(lease);
   if (lease.cleanupStartedAt && Number.isFinite(claimDeadline)) {
-    return claimDeadline;
+    return includeInterruptedProvisioning(claimDeadline);
   }
   const cleanupRetryAt = Date.parse(lease.cleanupRetryAt ?? "");
   if (Number.isFinite(cleanupRetryAt) && cleanupRetryAt <= now) {
-    return now + 1;
+    return includeInterruptedProvisioning(now + 1);
   }
   if (Number.isFinite(cleanupRetryAt)) {
     if (Number.isFinite(expiresAt) && expiresAt <= now) {
-      return cleanupRetryAt;
+      return includeInterruptedProvisioning(cleanupRetryAt);
     }
-    return Math.min(expiresAt, cleanupRetryAt);
+    return includeInterruptedProvisioning(Math.min(expiresAt, cleanupRetryAt));
   }
-  return expiresAt;
+  return includeInterruptedProvisioning(expiresAt);
 }
 
 function cleanupClaimDeadline(lease: LeaseRecord): number {
@@ -19858,6 +20298,9 @@ function terminalizeManualProviderCleanup(
   delete lease.cleanupClaimExpiresAt;
   delete lease.provisioningResourceMayExist;
   delete lease.provisioningFailureRetryable;
+  delete lease.provisioningCoordinatorVersion;
+  delete lease.provisioningRecoveryObservedAt;
+  delete lease.provisioningRecoveryMissingSince;
 }
 
 function clearRuntimeAdapterDeleteMetadata(lease: LeaseRecord): void {
@@ -19908,6 +20351,9 @@ function finalizedReleasedLease(
   lease.updatedAt = now;
   lease.releasedAt = now;
   lease.endedAt = now;
+  delete lease.provisioningCoordinatorVersion;
+  delete lease.provisioningRecoveryObservedAt;
+  delete lease.provisioningRecoveryMissingSince;
   if (wasUnprovisionedRelease) {
     lease.releaseDeletesServer = deleteServer;
   } else if (
@@ -20445,6 +20891,7 @@ interface CloudProvider {
   ): ProviderWorkspaceCapability | undefined;
   supportsSSHHostKeyInjection(config: ReturnType<typeof leaseConfig>): boolean;
   restrictedLeaseRequestFields?(input: LeaseRequest): string[];
+  ownershipLabelValue?(value: string): string;
   recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   resumeRecoveredServer?(
     config: ReturnType<typeof leaseConfig>,
@@ -20785,6 +21232,25 @@ export class AzureProvider implements CloudProvider {
 
   findServer(id: string): Promise<ProviderMachine | undefined> {
     return this.client.findServer(id);
+  }
+
+  recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope) {
+      return Promise.reject(
+        new Error(
+          `refusing to recover Azure lease ${lease.id}: canonical provider scope was not persisted`,
+        ),
+      );
+    }
+    const recoveryLocation = lease.region?.trim() || this.location?.trim();
+    return new AzureClient(this.env, {
+      ...(recoveryLocation ? { location: recoveryLocation } : {}),
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+      ...(this.deferredCleanup ? { deferredCleanup: this.deferredCleanup } : {}),
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
+    }).recoverServerForLease(lease);
   }
 
   async prepareLeaseConfig(
@@ -21191,6 +21657,10 @@ export class GCPProvider implements CloudProvider {
       input.gcpTags?.length ? "gcpTags" : "",
       input.gcpServiceAccount ? "gcpServiceAccount" : "",
     ].filter(Boolean);
+  }
+
+  ownershipLabelValue(value: string): string {
+    return gcpProviderLabelValue(value);
   }
 
   listCrabboxServers(): Promise<ProviderMachine[]> {

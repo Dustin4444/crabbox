@@ -538,7 +538,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	if err := checkSyncPreflight(manifest, cfg, false, a.Stderr); err != nil {
 		return err
 	}
-	if err := runSSHQuiet(ctx, target, remoteMkdir(workdir)); err != nil {
+	if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteMkdir(workdir), idempotentSSHRetryDelay); err != nil {
 		return exit(7, "create remote workdir: %v", err)
 	}
 	gitSeed, credentialBlocked := syncGitSeedDecision(cfg, repo)
@@ -546,21 +546,25 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		warnCredentialBearingGitSeed(a.Stderr)
 	}
 	if gitSeed {
-		if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head), idempotentSSHRetryDelay); err != nil {
 			fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 		}
 	}
 	manifestData := manifest.NUL()
 	deletedData := manifest.DeletedNUL()
+	finalizeToken, err := randomHex(16)
+	if err != nil {
+		return exit(6, "create sync finalize token: %v", err)
+	}
 	manifestInput := syncManifestInputForTarget(target, manifestData, deletedData)
-	if err := runSSHInput(ctx, target, remoteWriteSyncManifestsNewForTarget(target, workdir), strings.NewReader(manifestInput), io.Discard, a.Stderr); err != nil {
+	if err := runSSHInput(ctx, target, remoteWriteSyncManifestsNewForTarget(target, workdir, finalizeToken), strings.NewReader(manifestInput), io.Discard, a.Stderr); err != nil {
 		return exit(7, "write sync manifests: %v", err)
 	}
 	if shouldPruneRemoteSync(cfg.Sync.Delete, false) {
-		if err := runSSHQuiet(ctx, target, remoteSeedSyncManifestFromGit(workdir)); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
 			return exit(6, "remote sync seed manifest failed: %v", err)
 		}
-		if err := runSSHQuiet(ctx, target, remotePruneSyncManifestForTarget(target, workdir)); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken), idempotentSSHRetryDelay); err != nil {
 			return exit(6, "remote sync prune failed: %v", err)
 		}
 	}
@@ -582,8 +586,9 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		BaseRef:            cfg.Sync.BaseRef,
 		BaseSHA:            gitHydrateBaseSHA(repo, cfg.Sync.BaseRef),
 		Fingerprint:        fingerprint,
+		Token:              finalizeToken,
 	})
-	if out, err := runSSHCombinedOutput(ctx, target, finalizeCommand); err != nil {
+	if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
 		if out != "" {
 			return exit(6, "remote sync finalize failed: %s: %v", out, err)
 		}
@@ -2269,10 +2274,19 @@ func runActionsHydrationQuiet(ctx context.Context, target SSHTarget, remote stri
 }
 
 func clearActionsHydrationState(ctx context.Context, target SSHTarget, leaseID string) error {
-	if err := runSSHQuiet(ctx, target, remoteClearActionsHydrationStateForTarget(target, leaseID)); err != nil {
-		return exit(7, "clear GitHub Actions hydration marker on %s: %v", target.Host, err)
+	remote := remoteClearActionsHydrationStateForTarget(target, leaseID)
+	lastOutput, lastErr := runIdempotentSSHCombinedOutput(ctx, target, remote, idempotentSSHRetryDelay)
+	if lastErr == nil {
+		return nil
 	}
-	return nil
+	details := strings.TrimSpace(lastOutput)
+	if target.AuthSecret {
+		details = RedactDiagnosticSecrets(details, target.User)
+	}
+	if details != "" {
+		return exit(7, "clear GitHub Actions hydration marker on %s: %v: %s", target.Host, lastErr, details)
+	}
+	return exit(7, "clear GitHub Actions hydration marker on %s: %v", target.Host, lastErr)
 }
 
 func writeActionsHydrationStop(ctx context.Context, target SSHTarget, leaseID string) error {

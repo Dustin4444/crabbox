@@ -1,11 +1,29 @@
 # Changelog
 
-## 0.41.0 - 2026-07-31
+## 0.41.0 - 2026-08-03
 
 ### Added
 
-- Added exact brokered lease image identity and provider startup phase timings, plus Azure OS disk snapshot promotion and automatic scoped selection. Thanks @vincentkoc.
-- Added use-case and pricing guides, an accessible workload router with runnable provider recommendations, and a project vision that keeps agent orchestration and model credentials outside Crabbox. Thanks @zozo123.
+- Added an admin-only Daytona snapshot bootstrap route and protected
+  default-branch workflow with bounded resources, immutable base images,
+  applied-capacity and active-snapshot verification, sanitized proof, and
+  completion-verified builder cleanup.
+- Added a protected broker soak workflow that records sanitized AWS/Azure
+  maintenance evidence and runs one bounded, cleanup-verified Daytona canary
+  without direct provider credentials or a warm pool.
+- Added a protected default-branch workflow for rotating the coordinator admin
+  token from a one-time environment secret without exposing it on argv.
+- Added exact brokered lease image identity and provider startup phase timings,
+  plus Azure OS disk snapshot promotion and automatic scoped selection. Thanks
+  @vincentkoc.
+- Added checksum-pinned TruffleHog to Linux, macOS, Windows, Azure, and WSL2
+  developer environments, plus a protected workflow for publishing and proving
+  promoted AWS images.
+- Added use-case and pricing guides, an accessible workload router with
+  runnable provider recommendations, and a project vision that keeps agent
+  orchestration and model credentials outside Crabbox. Thanks @zozo123.
+- Documented Tensorlake's public `tl-crabbox` image and Pi coding-agent skill
+  discovery.
 - Added coordinator-owned ready-pool desired capacity with atomic fill claims, provider-neutral compatibility keys, borrow heartbeats, abandoned-borrow quarantine, stale-record pruning, and pool counters.
 - Added reserved `CRABBOX_LEASE_ID`, `CRABBOX_RUN_ID`, and `CRABBOX_SLUG` metadata to every remote command, with Crabbox-owned values taking precedence over forwarded environment variables.
 - Added browser-initiated, owner-bound coordinator pairing grants and revocable credential-free device tokens for read-only lease status.
@@ -13,9 +31,32 @@
 
 ### Fixed
 
-- Made brokered Daytona usable with Crabbox auth alone, added a read-only fallback readiness probe with truthful control/data-plane diagnostics, and made repeated sandbox cleanup idempotent. Thanks @vincentkoc.
-- Quarantined exact-owned AWS and Azure orphan candidates across consecutive successful inventories before deletion, and added bounded provider reconciliation backoff after inventory failures. Thanks @vincentkoc.
-- Made AWS developer-image publication prove the exact promoted AMI was selected, and skip redundant base-package APT bootstrap on verified prebaked Linux images. Thanks @vincentkoc.
+- Retried idempotent remote workspace setup, Git and manifest sync preparation,
+  sync finalization, and post-sync Actions hydration marker cleanup once after
+  a transient SSH transport failure, while preserving redacted terminal
+  diagnostics.
+- Kept brokered Daytona on its operator-managed snapshot across coordinator
+  deployments while preserving account-default mode and an explicit clear path.
+- Recovered exact-owned Azure public IPs, network interfaces, and tagged OS
+  disks when a coordinator deployment interrupted provisioning before the VM
+  existed, while rejecting ambiguous or mismatched resource sets.
+- Reconciled brokered leases whose provider provisioning was interrupted by a
+  coordinator deployment, recovering any owned cloud resource for cleanup and
+  failing resource-free leases with a durable reason.
+- Made Blacksmith doctor report all-organization inventory scope and a
+  nonterminal active Testbox count for capacity-aware callers.
+- Kept default-derived Azure images out of normal broker lease requests so
+  coordinator-managed image policy no longer requires admin-token auth.
+- Made brokered Daytona usable with Crabbox auth alone, added a read-only
+  fallback readiness probe with truthful control/data-plane diagnostics, and
+  made repeated sandbox cleanup idempotent. Thanks @vincentkoc.
+- Quarantined exact-owned AWS and Azure orphan candidates across consecutive successful inventories before deletion, and added bounded provider reconciliation backoff after inventory failures.
+- Made AWS developer-image publication prove the exact promoted AMI was selected, and skip redundant base-package APT bootstrap on verified prebaked Linux images.
+- Prevented Hyper-V provisioning from hanging while Windows guests boot and
+  made plain templates install a checksum-pinned OpenSSH package without
+  depending on Windows Features on Demand.
+- Forwarded explicit ARM64 and AMD64 guest architecture selections to Apple
+  Container while preserving the implicit native ARM64 path.
 - Bounded device membership revalidation to one GitHub revalidation per token per minute while preserving immediate token revocation, fail-closed errors, and a distinct re-pairing response for expired OAuth grants.
 - Kept ready-pool reconciliation rollout-compatible with older CLIs and coordinators, preserved unexpired in-flight claims across policy changes, and required actual ready capacity for `pool ensure` success.
 - Authorized RunPod SSH access with the configured public key while rejecting missing, empty, or invalid key files before creating a paid pod. Thanks @morluto.
@@ -23,16 +64,6 @@
 - Made Apple VM helper termination polls cancellation-aware while preserving bounded cleanup after a cancelled start. Thanks @SebTardif.
 - Rejected authority-changing Semaphore pagination links before authenticated requests can leave the configured origin. Thanks @SebTardif.
 - Kept provider-backed details out of coordinator WebSocket error logs and removed narrowing conversion from inherited WebVNC listener descriptors. Thanks @vincentkoc.
-
-## 0.40.1 - 2026-07-23
-
-### Added
-
-- Documented Tensorlake's public `tl-crabbox` image, its writable `/workspace`, and its pnpm-ready setup guide.
-
-### Fixed
-
-- Forwarded explicit ARM64 and AMD64 guest architecture selections to Apple Container while preserving the implicit native ARM64 path.
 
 ## 0.40.0 - 2026-07-19
 
@@ -529,6 +560,7 @@
 - Added direct SSH login helpers for kept Islo sandboxes through the official Islo CLI proxy. Thanks @zozo123.
 - Added a portable Node.js and PostgreSQL coordinator runtime with durable pg-boss maintenance jobs, WebSocket bridges, trusted reverse-proxy identity support, container packaging, and the existing Cloudflare Worker/Durable Object runtime preserved as an adapter over the same fleet implementation.
 - Added refreshable coordinator bearer authentication through a shell-free JSON argv token command, including HTTP and reconnecting WebSocket bridges behind expiring upstream identity proxies.
+
 ### Fixed
 
 - Fixed pond ACL bootstrap to preserve Tailscale HuJSON comments, ordering, trailing commas, and unrelated policy sections while failing closed on ambiguous shapes. Thanks @coygeek.

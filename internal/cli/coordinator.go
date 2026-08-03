@@ -99,6 +99,10 @@ type CoordinatorLease struct {
 	ExpiresAt             string                         `json:"expiresAt"`
 	Telemetry             *LeaseTelemetry                `json:"telemetry,omitempty"`
 	TelemetryHistory      []*LeaseTelemetry              `json:"telemetryHistory,omitempty"`
+	CleanupAttempts       int                            `json:"cleanupAttempts,omitempty"`
+	CleanupError          string                         `json:"cleanupError,omitempty"`
+	CleanupRetryAt        string                         `json:"cleanupRetryAt,omitempty"`
+	FailureError          string                         `json:"failureError,omitempty"`
 	ProviderMetadata      map[string]any                 `json:"providerMetadata,omitempty"`
 }
 
@@ -920,7 +924,6 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"awsSSHCIDRsPinned":               cfg.AWSSSHCIDRsPinned,
 		"awsMacHostID":                    cfg.AWSMacHostID,
 		"azureLocation":                   cfg.AzureLocation,
-		"azureImage":                      cfg.AzureImage,
 		"azureSnapshot":                   cfg.AzureSnapshot,
 		"sshUser":                         cfg.SSHUser,
 		"sshPort":                         cfg.SSHPort,
@@ -945,6 +948,9 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 	}
 	if cfg.osImageExplicit {
 		req["os"] = cfg.OSImage
+	}
+	if cfg.azureImageExplicit {
+		req["azureImage"] = cfg.AzureImage
 	}
 	if cfg.AzureOSDiskExplicit {
 		req["azureOSDisk"] = cfg.AzureOSDisk

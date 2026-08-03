@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestNamespaceSSHTargetParsesPrepareResult(t *testing.T) {
@@ -79,8 +81,7 @@ func TestListDevboxesIgnoresSuccessfulCommandStderr(t *testing.T) {
 }
 
 func TestNamespaceSSHTargetFromConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testutil.IsolateUserDirs(t).Home
 	dir := filepath.Join(home, ".namespace", "ssh")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -242,8 +243,7 @@ func TestResolveRestoresRepoClaimWhenNamespacePrepareFails(t *testing.T) {
 }
 
 func TestCleanupNamespaceSSHFilesRemovesOnlyCrabboxNamespaceFiles(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testutil.IsolateUserDirs(t).Home
 	dir := filepath.Join(home, ".namespace", "ssh")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -280,8 +280,7 @@ func TestCleanupNamespaceSSHFilesRemovesOnlyCrabboxNamespaceFiles(t *testing.T) 
 }
 
 func TestReleaseLeaseCleansNamespaceSSHFiles(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testutil.IsolateUserDirs(t).Home
 	dir := filepath.Join(home, ".namespace", "ssh")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -313,8 +312,7 @@ func TestReleaseLeaseCleansNamespaceSSHFiles(t *testing.T) {
 }
 
 func TestReleaseLeaseRetainsStoppedNamespaceClaimAndSSHFiles(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testutil.IsolateUserDirs(t).Home
 	leaseID := "cbx_deadbeef0000"
 	slug := "blue-lobster"
 	name := leaseProviderName(leaseID, slug)
@@ -460,7 +458,7 @@ func TestNamespaceLifecycleCommandFallbacks(t *testing.T) {
 }
 
 func TestNamespacePrepareReportsPrepareFailure(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	runner := &namespaceRecordingRunner{failAll: true}
 	backend := &namespaceLeaseBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 
@@ -474,7 +472,7 @@ func TestNamespacePrepareReportsPrepareFailure(t *testing.T) {
 }
 
 func TestNamespacePrepareIgnoresSuccessfulCommandStderr(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	runner := &namespaceQueuedRunner{
 		results: []LocalCommandResult{
 			{ExitCode: 2, Stderr: "configure unsupported"},
