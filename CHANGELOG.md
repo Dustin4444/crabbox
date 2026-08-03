@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- Retried idempotent post-sync Actions hydration marker cleanup once after a
+  transient SSH transport failure, while preserving redacted terminal diagnostics.
 - Made Blacksmith doctor report all-organization inventory scope and a
   nonterminal active Testbox count for capacity-aware callers.
 - Made brokered Daytona usable with Crabbox auth alone, added a read-only

@@ -1498,3 +1498,88 @@ func TestActionsRunURLIgnoresLocalRunIDs(t *testing.T) {
 		t.Fatalf("actionsRunURL=%q", got)
 	}
 }
+
+func TestClearActionsHydrationStateRetriesTransientSSHTransportFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	callsPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+printf 'call\n' >> "$CRABBOX_FAKE_SSH_CALLS"
+if [ "$(wc -l < "$CRABBOX_FAKE_SSH_CALLS")" -eq 1 ]; then
+  printf 'gateway temporarily unavailable\n' >&2
+  exit 255
+fi
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+	originalDelay := actionsHydrationMarkerRetryDelay
+	actionsHydrationMarkerRetryDelay = 0
+	t.Cleanup(func() { actionsHydrationMarkerRetryDelay = originalDelay })
+
+	err := clearActionsHydrationState(context.Background(), SSHTarget{
+		User: "crabbox",
+		Host: "gateway.example",
+		Port: "22",
+	}, "cbx_123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(calls), "call\n"); got != 2 {
+		t.Fatalf("ssh calls=%d want 2", got)
+	}
+}
+
+func TestClearActionsHydrationStateBoundsRetryAndRedactsDiagnostics(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	callsPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+printf 'call\n' >> "$CRABBOX_FAKE_SSH_CALLS"
+printf 'permission denied for opaque-access-token@gateway.example\n' >&2
+exit 255
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+	originalDelay := actionsHydrationMarkerRetryDelay
+	actionsHydrationMarkerRetryDelay = 0
+	t.Cleanup(func() { actionsHydrationMarkerRetryDelay = originalDelay })
+
+	err := clearActionsHydrationState(context.Background(), SSHTarget{
+		User:       "opaque-access-token",
+		Host:       "gateway.example",
+		Port:       "22",
+		AuthSecret: true,
+	}, "cbx_123")
+	if err == nil {
+		t.Fatal("expected persistent transport failure")
+	}
+	if got := err.Error(); strings.Contains(got, "opaque-access-token") ||
+		!strings.Contains(got, "[redacted]@gateway.example") ||
+		!strings.Contains(got, "exit status 255") {
+		t.Fatalf("error=%q", got)
+	}
+	calls, readErr := os.ReadFile(callsPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := strings.Count(string(calls), "call\n"); got != 2 {
+		t.Fatalf("ssh calls=%d want 2", got)
+	}
+}

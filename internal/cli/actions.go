@@ -2268,11 +2268,34 @@ func runActionsHydrationQuiet(ctx context.Context, target SSHTarget, remote stri
 	return err
 }
 
+var actionsHydrationMarkerRetryDelay = 2 * time.Second
+
 func clearActionsHydrationState(ctx context.Context, target SSHTarget, leaseID string) error {
-	if err := runSSHQuiet(ctx, target, remoteClearActionsHydrationStateForTarget(target, leaseID)); err != nil {
-		return exit(7, "clear GitHub Actions hydration marker on %s: %v", target.Host, err)
+	remote := remoteClearActionsHydrationStateForTarget(target, leaseID)
+	var lastErr error
+	var lastOutput string
+	for attempt := 0; attempt < 2; attempt++ {
+		lastOutput, lastErr = runSSHCombinedOutput(ctx, target, remote)
+		if lastErr == nil {
+			return nil
+		}
+		if !shouldRetrySSHPort(lastErr) || attempt == 1 {
+			break
+		}
+		// Marker removal is idempotent, so a bounded retry can absorb a gateway
+		// transport refusal without risking duplicate user or workflow commands.
+		if err := sleepContext(ctx, actionsHydrationMarkerRetryDelay); err != nil {
+			return exit(7, "clear GitHub Actions hydration marker on %s: %v", target.Host, err)
+		}
 	}
-	return nil
+	details := strings.TrimSpace(lastOutput)
+	if target.AuthSecret {
+		details = RedactDiagnosticSecrets(details, target.User)
+	}
+	if details != "" {
+		return exit(7, "clear GitHub Actions hydration marker on %s: %v: %s", target.Host, lastErr, details)
+	}
+	return exit(7, "clear GitHub Actions hydration marker on %s: %v", target.Host, lastErr)
 }
 
 func writeActionsHydrationStop(ctx context.Context, target SSHTarget, leaseID string) error {
