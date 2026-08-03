@@ -13,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type recordingRunner struct {
@@ -289,10 +290,7 @@ func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
 }
 
 func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
-	configHome := t.TempDir()
-	t.Setenv("HOME", configHome)
-	t.Setenv("XDG_CONFIG_HOME", configHome)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	binDir := t.TempDir()
 	fakeTart := filepath.Join(binDir, "tart")
 	if err := os.WriteFile(fakeTart, []byte("#!/bin/sh\nsleep 0.2\n"), 0o755); err != nil {

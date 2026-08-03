@@ -11,6 +11,7 @@ import (
 
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type fakeAWSClient struct {
@@ -139,8 +140,7 @@ func (c *fakeAWSClient) SpotPlacementScores(context.Context, Config) ([]ec2types
 }
 
 func TestAWSAcquireCleansUpCreatedServerAndKeyOnIPFailure(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	ipErr := errors.New("ip unavailable")
 	fake := &fakeAWSClient{
 		created:   awsTestServer("i-created", "cbx_created", "created", "us-west-2"),
@@ -167,8 +167,7 @@ func TestAWSAcquireCleansUpCreatedServerAndKeyOnIPFailure(t *testing.T) {
 }
 
 func TestAWSAcquireBindsImmutableProviderKeyID(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	fake := &fakeAWSClient{}
 	oldClient := newAWSClient
 	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
@@ -197,8 +196,7 @@ func TestAWSAcquireBindsImmutableProviderKeyID(t *testing.T) {
 }
 
 func TestAWSAcquireRollsBackWhenCleanupIdentityTagsFail(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	tagErr := errors.New("tag write failed")
 	fake := &fakeAWSClient{setTagsErr: tagErr}
 	oldClient := newAWSClient
@@ -221,8 +219,7 @@ func TestAWSAcquireRollsBackWhenCleanupIdentityTagsFail(t *testing.T) {
 }
 
 func TestAWSAcquireDoesNotDeleteProviderKeyByNameOnCreateFailure(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	createErr := errors.New("capacity unavailable")
 	east := &fakeAWSClient{createErr: createErr}
 	west := &fakeAWSClient{}
@@ -426,8 +423,7 @@ func TestAWSReleaseRejectsForgedOrMismatchedOwnership(t *testing.T) {
 }
 
 func TestAWSReleaseRemovesClaimWhenProviderKeyDeletionFails(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	leaseID := "cbx_abcdef123456"
 	keyName := "crabbox-cbx-abcdef123456"
 	if err := core.ClaimLeaseForRepoProvider(leaseID, "partial-release", "aws", t.TempDir(), time.Minute, false); err != nil {
@@ -494,8 +490,7 @@ func TestAWSTouchUsesFallbackRegion(t *testing.T) {
 }
 
 func TestAWSCleanupRequiresExactClaimForFallbackRegionServer(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	tagOnly := awsTestServer("i-tag-only", "cbx_111111111111", "tag-only", "us-west-2")
 	tagOnly.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
 	staleClaim := awsTestServer("i-stale", "cbx_333333333333", "stale", "us-west-2")
@@ -563,8 +558,7 @@ func TestAWSCleanupRequiresExactClaimForFallbackRegionServer(t *testing.T) {
 }
 
 func TestAWSCleanupDryRunRetainsExactClaim(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	server := awsTestServer("i-dry-run", "cbx_555555555555", "dry-run", "us-west-2")
 	server.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
 	fake := &fakeAWSClient{servers: []Server{server}}
@@ -1002,8 +996,7 @@ func TestAWSCleanupTreatsInstanceMissingAtDeleteBoundaryAsRemoved(t *testing.T) 
 
 func isolateAWSClaimState(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 }
 
 func claimAWSCleanupServer(t *testing.T, cfg Config, server Server) {
@@ -1036,8 +1029,7 @@ func assertAWSClaimMissing(t *testing.T, leaseID string) {
 }
 
 func TestAWSAcquireSuffixesSlugCollisionsAcrossRegions(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	stopErr := errors.New("stop after create")
 	east := &fakeAWSClient{waitErr: stopErr}
 	west := &fakeAWSClient{servers: []Server{awsTestServer("i-west", "cbx_west", "taken", "us-west-2")}}
@@ -1126,8 +1118,7 @@ func TestAWSAcquireUsesTailscaleHostnameOnlyForStrictMode(t *testing.T) {
 		{name: "tailscale", network: core.NetworkTailscale, want: "crabbox-bootstrap"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
-			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			testutil.IsolateUserDirs(t)
 			fake := &fakeAWSClient{}
 			oldClient := newAWSClient
 			newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }

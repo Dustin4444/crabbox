@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/testutil"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -775,10 +776,11 @@ func TestMorphServerReportsGatewayAndProviderNetworking(t *testing.T) {
 }
 
 func TestMorphResolveRejectsUnsafeMetadataLeaseID(t *testing.T) {
-	home := t.TempDir()
-	configDir := filepath.Join(home, ".config")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", configDir)
+	testutil.IsolateUserDirs(t)
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	fake := &fakeMorphAPI{
 		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
 			return morphInstance{
@@ -799,7 +801,7 @@ func TestMorphResolveRejectsUnsafeMetadataLeaseID(t *testing.T) {
 		now:    time.Now,
 	}
 
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "inst_unsafe"})
+	_, err = backend.Resolve(context.Background(), ResolveRequest{ID: "inst_unsafe"})
 	if err == nil || !strings.Contains(err.Error(), "invalid lease claim id") {
 		t.Fatalf("Resolve error=%v", err)
 	}
@@ -1302,7 +1304,5 @@ func testMorphConfig() Config {
 
 func configureMorphTestHome(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	testutil.IsolateUserDirs(t)
 }
