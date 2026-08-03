@@ -719,9 +719,10 @@ func (b *blacksmithBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (c
 	return core.DoctorResult{
 		Provider: blacksmithTestboxProvider,
 		Message: fmt.Sprintf(
-			"cli=ready control_plane=ready inventory=ready inventory_scope=all api=list mutation=false leases=%d active_leases=%d runtime=ci_hydrated_by_provider",
-			len(servers),
+			"cli=ready control_plane=ready inventory=ready inventory_scope=all api=list mutation=false leases=%d active_leases=%d inventory_rows=%d runtime=ci_hydrated_by_provider",
 			activeLeases,
+			activeLeases,
+			len(servers),
 		),
 	}, nil
 }

@@ -1323,7 +1323,7 @@ func TestBlacksmithDoctorListsInventoryOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Provider != blacksmithTestboxProvider || !strings.Contains(result.Message, "inventory_scope=all") || !strings.Contains(result.Message, "leases=3 active_leases=2") {
+	if result.Provider != blacksmithTestboxProvider || !strings.Contains(result.Message, "inventory_scope=all") || !strings.Contains(result.Message, "leases=2 active_leases=2 inventory_rows=3") {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(runner.calls) != 1 {
