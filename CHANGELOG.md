@@ -21,6 +21,8 @@
 
 ### Fixed
 
+- Kept brokered Daytona on its operator-managed snapshot across coordinator
+  deployments while preserving account-default mode and an explicit clear path.
 - Recovered exact-owned Azure public IPs, network interfaces, and tagged OS
   disks when a coordinator deployment interrupted provisioning before the VM
   existed, while rejecting ambiguous or mismatched resource sets.
