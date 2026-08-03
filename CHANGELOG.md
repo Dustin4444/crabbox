@@ -17,6 +17,9 @@
 
 ### Fixed
 
+- Reconciled brokered leases whose provider provisioning was interrupted by a
+  coordinator deployment or runtime restart, recovering any owned cloud
+  resource for cleanup and failing resource-free leases with a durable reason.
 - Made Blacksmith doctor report all-organization inventory scope and a
   nonterminal active Testbox count for capacity-aware callers.
 - Made brokered Daytona usable with Crabbox auth alone, added a read-only
@@ -533,6 +536,7 @@
 - Added direct SSH login helpers for kept Islo sandboxes through the official Islo CLI proxy. Thanks @zozo123.
 - Added a portable Node.js and PostgreSQL coordinator runtime with durable pg-boss maintenance jobs, WebSocket bridges, trusted reverse-proxy identity support, container packaging, and the existing Cloudflare Worker/Durable Object runtime preserved as an adapter over the same fleet implementation.
 - Added refreshable coordinator bearer authentication through a shell-free JSON argv token command, including HTTP and reconnecting WebSocket bridges behind expiring upstream identity proxies.
+
 ### Fixed
 
 - Fixed pond ACL bootstrap to preserve Tailscale HuJSON comments, ordering, trailing commas, and unrelated policy sections while failing closed on ambiguous shapes. Thanks @coygeek.
