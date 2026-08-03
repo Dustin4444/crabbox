@@ -1310,7 +1310,12 @@ func TestBlacksmithBackendListJSONCanIncludeAllStates(t *testing.T) {
 func TestBlacksmithDoctorListsInventoryOnly(t *testing.T) {
 	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
 		return LocalCommandResult{
-			Stdout: "tbx_123 ready my-app .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
+			Stdout: strings.Join([]string{
+				"tbx_123 ready my-app .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z",
+				"tbx_456 hydrating my-app .github/workflows/testbox.yml test main 2026-05-06T00:01:00Z",
+				"tbx_789 completed my-app .github/workflows/testbox.yml test main 2026-05-06T00:02:00Z",
+				"",
+			}, "\n"),
 		}, nil
 	}}
 	backend := newTestBlacksmithBackend(baseConfig(), runner)
@@ -1318,13 +1323,13 @@ func TestBlacksmithDoctorListsInventoryOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Provider != blacksmithTestboxProvider || !strings.Contains(result.Message, "cli=ready control_plane=ready inventory=ready api=list mutation=false leases=1 runtime=ci_hydrated_by_provider") {
+	if result.Provider != blacksmithTestboxProvider || !strings.Contains(result.Message, "inventory_scope=all") || !strings.Contains(result.Message, "leases=2 active_leases=2 inventory_rows=3") {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(runner.calls) != 1 {
 		t.Fatalf("calls=%#v, want one list", runner.calls)
 	}
-	want := []string{"testbox", "list"}
+	want := []string{"testbox", "list", "--all"}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("call=%#v, want %#v", runner.calls[0], want)
 	}

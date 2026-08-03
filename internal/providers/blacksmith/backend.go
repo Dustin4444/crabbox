@@ -702,13 +702,28 @@ func (b *blacksmithBackend) ListJSON(ctx context.Context, req ListRequest) (any,
 }
 
 func (b *blacksmithBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+	servers, err := b.List(ctx, ListRequest{All: true})
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
+	activeLeases := 0
+	for _, server := range servers {
+		// Blacksmith's all-org inventory may include terminal rows. Unknown states
+		// count as active so admission fails conservatively when the CLI evolves.
+		switch strings.ToLower(strings.TrimSpace(server.Status)) {
+		case "completed", "cancelled", "canceled", "failed", "released", "stopped":
+		default:
+			activeLeases++
+		}
+	}
 	return core.DoctorResult{
 		Provider: blacksmithTestboxProvider,
-		Message:  fmt.Sprintf("cli=ready control_plane=ready inventory=ready api=list mutation=false leases=%d runtime=ci_hydrated_by_provider", len(servers)),
+		Message: fmt.Sprintf(
+			"cli=ready control_plane=ready inventory=ready inventory_scope=all api=list mutation=false leases=%d active_leases=%d inventory_rows=%d runtime=ci_hydrated_by_provider",
+			activeLeases,
+			activeLeases,
+			len(servers),
+		),
 	}, nil
 }
 
