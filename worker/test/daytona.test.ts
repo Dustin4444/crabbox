@@ -261,7 +261,6 @@ describe("daytona coordinator client", () => {
       },
       autoStopInterval: 30,
       autoDeleteInterval: 60,
-      ttlMinutes: 30,
       cpu: 2,
       memory: 4,
       disk: 10,

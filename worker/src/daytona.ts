@@ -200,11 +200,11 @@ export class DaytonaClient {
         purpose: "snapshot-bootstrap",
         snapshot_name: name,
       },
-      // The normal cleanup path deletes immediately. Provider-side expiry keeps a
-      // lost Worker request from leaving a paid bootstrap sandbox indefinitely.
+      // The normal cleanup path deletes immediately. If that request is lost,
+      // Daytona stops an idle builder after 30 minutes and deletes it after it
+      // remains stopped for another 60 minutes.
       autoStopInterval: 30,
       autoDeleteInterval: 60,
-      ttlMinutes: 30,
       buildInfo: {
         dockerfileContent: `FROM ${baseImage}`,
       },

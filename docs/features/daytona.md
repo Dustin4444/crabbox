@@ -178,8 +178,9 @@ explicit `confirm: true` because it creates paid provider resources.
 CPU is limited to 1-4, memory to 1-8 GiB, and disk to 3-10 GiB. `baseImage`
 must use an immutable SHA-256 digest. The coordinator verifies the resources
 Daytona actually applied before snapshotting, deletes the temporary builder on
-success or failure, and configures an unconditional 30-minute wall-clock TTL
-plus provider-side stop and deletion timers if the Worker request is lost.
+success or failure, and configures Daytona to stop an idle builder after 30
+minutes and delete it after it remains stopped for another 60 minutes if the
+Worker cleanup request is lost.
 
 See [providers.md](../commands/providers.md) for the full provider matrix and
 [capabilities.md](capabilities.md) for opt-in lease features.
