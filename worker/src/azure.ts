@@ -185,6 +185,11 @@ interface AzureOwnedDeleteClaim {
   };
 }
 
+interface AzureResourceList<T> {
+  value?: T[];
+  nextLink?: string;
+}
+
 export interface AzureOwnedDeleteClaimStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
@@ -982,11 +987,54 @@ export class AzureClient {
   }
 
   private async listResources<T>(path: string, apiVersion: string): Promise<T[]> {
-    const response = await this.arm<{ value?: T[] }>("GET", path, apiVersion).catch((error) => {
-      if (isNotFound(error)) return { value: [] as T[] };
-      throw error;
+    let response = await this.arm<AzureResourceList<T>>("GET", path, apiVersion).catch(
+      (error): AzureResourceList<T> => {
+        if (isNotFound(error)) return { value: [] };
+        throw error;
+      },
+    );
+    const resources = [...(response.value ?? [])];
+    const seen = new Set<string>();
+    while (response.nextLink) {
+      const nextLink = this.validatedNextLink(response.nextLink);
+      if (seen.has(nextLink)) {
+        throw new Error(`azure resource listing returned a pagination cycle for ${path}`);
+      }
+      seen.add(nextLink);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- every page is identified by the prior response.
+      response = await this.fetchResourcePage<T>(nextLink);
+      resources.push(...(response.value ?? []));
+    }
+    return resources;
+  }
+
+  private validatedNextLink(value: string): string {
+    const url = new URL(value);
+    const expectedPrefix = `/subscriptions/${this.subscription}/`.toLowerCase();
+    if (
+      url.origin !== "https://management.azure.com" ||
+      url.username ||
+      url.password ||
+      !url.pathname.toLowerCase().startsWith(expectedPrefix)
+    ) {
+      throw new Error("azure resource listing returned an invalid nextLink");
+    }
+    return url.toString();
+  }
+
+  private async fetchResourcePage<T>(url: string): Promise<AzureResourceList<T>> {
+    const response = await this.fetcher(url, {
+      headers: { authorization: `Bearer ${await this.token()}` },
     });
-    return response.value ?? [];
+    if (!response.ok) {
+      throw new AzureHTTPError(
+        "GET",
+        new URL(url).pathname,
+        response.status,
+        await safeBody(response),
+      );
+    }
+    return (await response.json()) as AzureResourceList<T>;
   }
 
   private requireOwnedResource(
