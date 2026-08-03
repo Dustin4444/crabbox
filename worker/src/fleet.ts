@@ -1025,6 +1025,7 @@ export class FleetCoordinator {
   private readonly runtimeAdapterAgents = new Map<string, WebSocket>();
   private readonly runtimeAdapterPending = new Map<string, RuntimeAdapterPendingRequest>();
   private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
+  private readonly daytonaSnapshotBootstrapQueues = new Map<string, Promise<void>>();
   private readonly controlSockets = new Map<string, WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
   private readonly restoredBridgeSockets = new Set<WebSocket>();
@@ -1149,6 +1150,12 @@ export class FleetCoordinator {
       }
       if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
         return await this.adminProviderIdentity(request);
+      }
+      if (
+        method === "POST" &&
+        parts.join("/") === "v1/admin/providers/daytona/snapshot-bootstrap"
+      ) {
+        return await this.adminDaytonaSnapshotBootstrap(request);
       }
       if (method === "POST" && parts.join("/") === "v1/admin/tailscale-preflight") {
         return await this.adminTailscalePreflight();
@@ -11980,6 +11987,87 @@ export class FleetCoordinator {
     return await this.adminAWSIdentity(request);
   }
 
+  private async adminDaytonaSnapshotBootstrap(request: Request): Promise<Response> {
+    const input = await readJson<{
+      name?: unknown;
+      cpu?: unknown;
+      memoryGiB?: unknown;
+      diskGiB?: unknown;
+      baseImage?: unknown;
+      confirm?: unknown;
+    }>(request);
+    if (input.confirm !== true) {
+      return json(
+        {
+          error: "snapshot_bootstrap_confirmation_required",
+          message:
+            "confirm=true is required because this operation creates paid provider resources",
+        },
+        { status: 400 },
+      );
+    }
+    const name = typeof input.name === "string" ? input.name.trim() : "";
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/.test(name)) {
+      return json(
+        {
+          error: "invalid_snapshot_name",
+          message: "name must be 1-63 letters, numbers, dots, underscores, or hyphens",
+        },
+        { status: 400 },
+      );
+    }
+    if (!integerInRange(input.cpu, 1, 4)) {
+      return json(
+        {
+          error: "invalid_snapshot_cpu",
+          message: "cpu must be an integer from 1 through 4",
+        },
+        { status: 400 },
+      );
+    }
+    if (!integerInRange(input.memoryGiB, 1, 8)) {
+      return json(
+        {
+          error: "invalid_snapshot_memory",
+          message: "memoryGiB must be an integer from 1 through 8",
+        },
+        { status: 400 },
+      );
+    }
+    if (!integerInRange(input.diskGiB, 3, 10)) {
+      return json(
+        {
+          error: "invalid_snapshot_disk",
+          message: "diskGiB must be an integer from 3 through 10",
+        },
+        { status: 400 },
+      );
+    }
+    const cpu = input.cpu;
+    const memoryGiB = input.memoryGiB;
+    const diskGiB = input.diskGiB;
+    const baseImage = typeof input.baseImage === "string" ? input.baseImage.trim() : "";
+    if (!isImmutableOCIImageReference(baseImage)) {
+      return json(
+        {
+          error: "invalid_base_image",
+          message: "baseImage must be an OCI image reference pinned by sha256 digest",
+        },
+        { status: 400 },
+      );
+    }
+    return await this.withDaytonaSnapshotBootstrapLock(name, async () => {
+      const result = await new DaytonaClient(this.env).bootstrapSnapshot(
+        name,
+        cpu,
+        memoryGiB,
+        diskGiB,
+        baseImage,
+      );
+      return json({ snapshot: result });
+    });
+  }
+
   private async adminTailscalePreflight(): Promise<Response> {
     return json({ tailscale: await tailscalePreflight(this.env) });
   }
@@ -14569,6 +14657,31 @@ export class FleetCoordinator {
       return await operation();
     } finally {
       release();
+    }
+  }
+
+  private async withDaytonaSnapshotBootstrapLock<T>(
+    name: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    let release!: () => void;
+    const previous =
+      this.daytonaSnapshotBootstrapQueues.get(name)?.catch(() => {}) ?? Promise.resolve();
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => next);
+    this.daytonaSnapshotBootstrapQueues.set(name, tail);
+    await previous;
+    try {
+      // Daytona exposes async snapshot completion by name, so same-name
+      // bootstraps must not overlap and observe another request's active row.
+      return await operation();
+    } finally {
+      release();
+      if (this.daytonaSnapshotBootstrapQueues.get(name) === tail) {
+        this.daytonaSnapshotBootstrapQueues.delete(name);
+      }
     }
   }
 
@@ -18429,6 +18542,64 @@ function clampLimit(value: string | null, fallback: number): number {
   return Math.min(Math.trunc(parsed), 500);
 }
 
+function integerInRange(value: unknown, minimum: number, maximum: number): value is number {
+  return Number.isInteger(value) && Number(value) >= minimum && Number(value) <= maximum;
+}
+
+function isImmutableOCIImageReference(value: string): boolean {
+  const match = /^(.*)@sha256:([a-f0-9]{64})$/.exec(value);
+  if (!match) return false;
+  let name = match[1] ?? "";
+  const lastSlash = name.lastIndexOf("/");
+  const lastColon = name.lastIndexOf(":");
+  if (lastColon > lastSlash) {
+    const tag = name.slice(lastColon + 1);
+    if (!/^[\w][\w.-]{0,127}$/.test(tag)) return false;
+    name = name.slice(0, lastColon);
+  }
+  if (!name || name.length > 255) return false;
+
+  const components = name.split("/");
+  if (components.some((component) => !component)) return false;
+  const first = components[0] ?? "";
+  const hasRegistryAuthority =
+    components.length > 1 &&
+    (first === "localhost" || first.includes(".") || first.includes(":") || first.startsWith("["));
+  if (hasRegistryAuthority && !isOCIRegistryAuthority(first)) return false;
+
+  const repositoryComponents = hasRegistryAuthority ? components.slice(1) : components;
+  return repositoryComponents.every((component) =>
+    /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$/.test(component),
+  );
+}
+
+function isOCIRegistryAuthority(value: string): boolean {
+  if (value.startsWith("[")) {
+    try {
+      const parsed = new URL(`https://${value}`);
+      return (
+        parsed.hostname.startsWith("[") &&
+        parsed.pathname === "/" &&
+        !parsed.username &&
+        !parsed.password &&
+        !parsed.search &&
+        !parsed.hash
+      );
+    } catch {
+      return false;
+    }
+  }
+  const domainComponent = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
+  const domain = `(?:${domainComponent})(?:\\.${domainComponent})*`;
+  if (!new RegExp(`^${domain}(?::[0-9]+)?$`, "i").test(value)) return false;
+  try {
+    const parsed = new URL(`https://${value}`);
+    return parsed.pathname === "/" && !parsed.username && !parsed.password && !parsed.search;
+  } catch {
+    return false;
+  }
+}
+
 function orgFilterKey(url: URL): string | null | undefined {
   const value = url.searchParams.get("org");
   const kind = url.searchParams.get("orgKind");
@@ -18492,6 +18663,9 @@ function isAdminRoute(method: string, parts: string[]): boolean {
     return true;
   }
   if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
+    return true;
+  }
+  if (method === "POST" && parts.join("/") === "v1/admin/providers/daytona/snapshot-bootstrap") {
     return true;
   }
   if (method === "POST" && parts.join("/") === "v1/admin/tailscale-preflight") {
@@ -21058,6 +21232,25 @@ export class AzureProvider implements CloudProvider {
 
   findServer(id: string): Promise<ProviderMachine | undefined> {
     return this.client.findServer(id);
+  }
+
+  recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope) {
+      return Promise.reject(
+        new Error(
+          `refusing to recover Azure lease ${lease.id}: canonical provider scope was not persisted`,
+        ),
+      );
+    }
+    const recoveryLocation = lease.region?.trim() || this.location?.trim();
+    return new AzureClient(this.env, {
+      ...(recoveryLocation ? { location: recoveryLocation } : {}),
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+      ...(this.deferredCleanup ? { deferredCleanup: this.deferredCleanup } : {}),
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
+    }).recoverServerForLease(lease);
   }
 
   async prepareLeaseConfig(

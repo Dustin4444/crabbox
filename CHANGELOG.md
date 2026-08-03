@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added an admin-only Daytona snapshot bootstrap route and protected
+  default-branch workflow with bounded resources, immutable base images,
+  applied-capacity and active-snapshot verification, sanitized proof, and
+  completion-verified builder cleanup.
 - Added a protected broker soak workflow that records sanitized AWS/Azure
   maintenance evidence and runs one bounded, cleanup-verified Daytona canary
   without direct provider credentials or a warm pool.
@@ -20,6 +24,11 @@
 - Retried idempotent sync finalization and post-sync Actions hydration marker
   cleanup once after a transient SSH transport failure, while preserving
   redacted terminal diagnostics.
+- Kept brokered Daytona on its operator-managed snapshot across coordinator
+  deployments while preserving account-default mode and an explicit clear path.
+- Recovered exact-owned Azure public IPs, network interfaces, and tagged OS
+  disks when a coordinator deployment interrupted provisioning before the VM
+  existed, while rejecting ambiguous or mismatched resource sets.
 - Reconciled brokered leases whose provider provisioning was interrupted by a
   coordinator deployment, recovering any owned cloud resource for cleanup and
   failing resource-free leases with a durable reason.
