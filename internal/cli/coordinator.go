@@ -99,6 +99,10 @@ type CoordinatorLease struct {
 	ExpiresAt             string                         `json:"expiresAt"`
 	Telemetry             *LeaseTelemetry                `json:"telemetry,omitempty"`
 	TelemetryHistory      []*LeaseTelemetry              `json:"telemetryHistory,omitempty"`
+	CleanupAttempts       int                            `json:"cleanupAttempts,omitempty"`
+	CleanupError          string                         `json:"cleanupError,omitempty"`
+	CleanupRetryAt        string                         `json:"cleanupRetryAt,omitempty"`
+	FailureError          string                         `json:"failureError,omitempty"`
 	ProviderMetadata      map[string]any                 `json:"providerMetadata,omitempty"`
 }
 
