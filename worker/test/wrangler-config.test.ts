@@ -36,6 +36,11 @@ describe("wrangler config", () => {
     expect(configStringValues("CRABBOX_AWS_SSH_CIDRS")).toEqual([]);
     expect(configStringValues("CRABBOX_PUBLIC_URL")).toEqual(["https://crabbox.openclaw.ai"]);
   });
+
+  it("binds deployment version metadata for interrupted provisioning recovery", () => {
+    expect(wranglerConfig).toContain('"version_metadata"');
+    expect(wranglerConfig).toContain('"binding": "CF_VERSION_METADATA"');
+  });
 });
 
 function configValues(name: string): number[] {
