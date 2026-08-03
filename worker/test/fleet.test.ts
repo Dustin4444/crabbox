@@ -14579,7 +14579,11 @@ describe("fleet lease identity and idle", () => {
 
     const forbidden = await fleet.fetch(
       request("POST", "/v1/admin/providers/daytona/snapshot-bootstrap", {
-        body: { name: "crabbox-ready-10g", diskGiB: 10 },
+        body: {
+          name: "crabbox-ready-10g",
+          diskGiB: 10,
+          baseImage: "daytonaio/sandbox:0.8.0",
+        },
       }),
     );
     expect(forbidden.status).toBe(403);
@@ -14587,7 +14591,11 @@ describe("fleet lease identity and idle", () => {
     const invalid = await fleet.fetch(
       request("POST", "/v1/admin/providers/daytona/snapshot-bootstrap", {
         headers: { "x-crabbox-admin": "true" },
-        body: { name: "crabbox-ready-10g", diskGiB: 8 },
+        body: {
+          name: "crabbox-ready-10g",
+          diskGiB: 8,
+          baseImage: "daytonaio/sandbox:0.8.0",
+        },
       }),
     );
     expect(invalid.status).toBe(400);

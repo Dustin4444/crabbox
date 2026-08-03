@@ -181,7 +181,11 @@ export class DaytonaClient {
     }
   }
 
-  async bootstrapSnapshot(name: string, diskGiB: number): Promise<DaytonaSnapshotBootstrap> {
+  async bootstrapSnapshot(
+    name: string,
+    diskGiB: number,
+    baseImage: string,
+  ): Promise<DaytonaSnapshotBootstrap> {
     const body: Record<string, unknown> = {
       name: `crabbox-snapshot-bootstrap-${crypto.randomUUID().slice(0, 8)}`,
       user: this.user,
@@ -191,8 +195,11 @@ export class DaytonaClient {
       },
       autoStopInterval: 0,
       autoDeleteInterval: -1,
+      buildInfo: {
+        dockerfileContent: `FROM ${baseImage}`,
+      },
+      disk: diskGiB,
     };
-    if (this.snapshot) body["snapshot"] = this.snapshot;
     if (this.target) body["target"] = this.target;
 
     let sandboxID = "";
@@ -202,21 +209,14 @@ export class DaytonaClient {
       const created = await this.request<DaytonaSandbox>("POST", "/sandbox", body);
       sandboxID = created.id;
       await this.waitForState(sandboxID, ["started", "running", "ready", "active"]);
-      const source = await this.getSandbox(sandboxID);
-
-      await this.request<DaytonaSandbox>("POST", `/sandbox/${encodeURIComponent(sandboxID)}/stop`);
-      await this.waitForState(sandboxID, ["stopped"]);
-      await this.request<DaytonaSandbox>(
-        "POST",
-        `/sandbox/${encodeURIComponent(sandboxID)}/resize`,
-        { disk: diskGiB },
-      );
-      const resized = await this.waitForState(sandboxID, ["stopped"]);
-      if (resized.disk !== undefined && resized.disk < diskGiB) {
+      const built = await this.getSandbox(sandboxID);
+      if (built.disk !== undefined && built.disk < diskGiB) {
         throw new Error(
-          `daytona sandbox ${sandboxID} disk remained ${resized.disk} GiB after ${diskGiB} GiB resize`,
+          `daytona sandbox ${sandboxID} disk is ${built.disk} GiB after ${diskGiB} GiB image build`,
         );
       }
+      await this.request<DaytonaSandbox>("POST", `/sandbox/${encodeURIComponent(sandboxID)}/stop`);
+      await this.waitForState(sandboxID, ["stopped"]);
       const snapshotting = await this.request<DaytonaSandbox>(
         "POST",
         `/sandbox/${encodeURIComponent(sandboxID)}/snapshot`,
@@ -226,10 +226,10 @@ export class DaytonaClient {
         await this.waitForState(sandboxID, ["stopped"]);
       }
       result = {
-        sourceSnapshot: source.snapshot?.trim() || "account-default",
-        ...(source.disk === undefined ? {} : { sourceDiskGiB: source.disk }),
+        sourceSnapshot: baseImage,
+        ...(built.disk === undefined ? {} : { sourceDiskGiB: built.disk }),
         snapshot: name,
-        diskGiB: resized.disk ?? diskGiB,
+        diskGiB: built.disk ?? diskGiB,
         sandboxID,
       };
     } catch (error) {
