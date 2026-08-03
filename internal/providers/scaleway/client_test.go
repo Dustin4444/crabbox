@@ -19,6 +19,7 @@ import (
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestScalewayClientRefusesCrossOriginRedirectBeforeTokenReplay(t *testing.T) {
@@ -279,8 +280,6 @@ func TestApplyScalewayLocationDefaultsOnlyFillsMissingSDKValues(t *testing.T) {
 
 func TestNewClientReportsMissingAuthWithoutSecrets(t *testing.T) {
 	clearScalewayEnv(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	_, err := newClient(core.Config{}, core.Runtime{})
 	if err == nil || !strings.Contains(err.Error(), "SCW_ACCESS_KEY and SCW_SECRET_KEY") {
 		t.Fatalf("newClient err=%v", err)
@@ -289,8 +288,6 @@ func TestNewClientReportsMissingAuthWithoutSecrets(t *testing.T) {
 
 func TestNewClientReportsPartialAuthWithoutSecretValue(t *testing.T) {
 	clearScalewayEnv(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("SCW_ACCESS_KEY", "SCW11111111111111111")
 	_, err := newClient(core.Config{}, core.Runtime{})
 	if err == nil || !strings.Contains(err.Error(), "SCW_SECRET_KEY") {
@@ -303,8 +300,6 @@ func TestNewClientReportsPartialAuthWithoutSecretValue(t *testing.T) {
 
 func TestNewClientSanitizesSDKValidationError(t *testing.T) {
 	clearScalewayEnv(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("SCW_ACCESS_KEY", "invalid-access-key")
 	t.Setenv("SCW_SECRET_KEY", "invalid-secret-key")
 	t.Setenv("CRABBOX_SCALEWAY_PROJECT_ID", "project-1")
@@ -345,8 +340,6 @@ func (fn scalewayRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, er
 
 func TestScalewayListPropagatesContextToSDKRequest(t *testing.T) {
 	clearScalewayEnv(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("SCW_ACCESS_KEY", "SCW11111111111111111")
 	t.Setenv("SCW_SECRET_KEY", "11111111-1111-1111-1111-111111111111")
 	t.Setenv("SCW_DEFAULT_PROJECT_ID", "11111111-1111-1111-1111-111111111111")
@@ -372,6 +365,7 @@ func TestScalewayListPropagatesContextToSDKRequest(t *testing.T) {
 
 func clearScalewayEnv(t *testing.T) {
 	t.Helper()
+	testutil.IsolateUserDirs(t)
 	unsetScalewayEnv(t, "SCW_API_URL")
 	unsetScalewayEnv(t, "SCW_INSECURE")
 	for _, key := range []string{
@@ -421,8 +415,6 @@ func newTestScalewaySDKClient(t *testing.T, apiURL string, httpClient *http.Clie
 func newTestScalewaySDKClientWithEnv(t *testing.T, apiURL string, httpClient *http.Client, env map[string]string) Client {
 	t.Helper()
 	clearScalewayEnv(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("SCW_ACCESS_KEY", testScalewayAccessKey)
 	t.Setenv("SCW_SECRET_KEY", testScalewaySecretKey)
 	t.Setenv("SCW_API_URL", apiURL)
