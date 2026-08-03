@@ -218,7 +218,8 @@ git_dir="$(safe_git rev-parse --git-dir)"
 meta_dir="$git_dir/crabbox"
 mkdir -p "$meta_dir"
 rm -f -- "$meta_dir/sync-fingerprint" "$meta_dir/sync-manifest" "$meta_dir/sync-finalize-token" "$meta_dir/sync-finalize-complete-token" "$meta_dir/sync-finalize-lock"
-rm -f -- "$meta_dir"/sync-manifest.*.new "$meta_dir"/sync-deleted.*.new "$meta_dir"/sync-finalize-lock.stale.*
+rm -f -- "$meta_dir"/sync-manifest.*.new "$meta_dir"/sync-deleted.*.new "$meta_dir"/sync-manifest.*.sorted
+rm -f -- "$meta_dir"/sync-finalize-token.tmp.* "$meta_dir"/sync-finalize-complete-token.tmp.* "$meta_dir"/sync-finalize-lock.stale.*
 printf '%s %s\n' "$ref" "$target_commit" > "$meta_dir/git-hydrate-base"
 test "$(safe_git branch --show-current)" = "$ref"
 test "$(safe_git rev-parse HEAD)" = "$target_commit"
@@ -384,7 +385,7 @@ foreach ($name in @('sync-fingerprint', 'sync-manifest', 'sync-finalize-token', 
     if (Test-Path -LiteralPath $metadataPath) { throw "ready-pool stale Git metadata was not removed" }
   }
 }
-foreach ($pattern in @('sync-manifest.*.new', 'sync-deleted.*.new', 'sync-finalize-lock.stale.*')) {
+foreach ($pattern in @('sync-manifest.*.new', 'sync-deleted.*.new', 'sync-manifest.*.sorted', 'sync-finalize-token.tmp.*', 'sync-finalize-complete-token.tmp.*', 'sync-finalize-lock.stale.*')) {
   Get-ChildItem -LiteralPath $metaDir -Filter $pattern -Force -ErrorAction Stop | ForEach-Object {
     Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
   }

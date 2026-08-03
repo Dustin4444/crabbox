@@ -55,7 +55,7 @@ func TestRemoteReadyPoolScrubResetsLatestBranchAndPreservesIgnoredCaches(t *test
 	mustWriteTestFile(t, filepath.Join(workdir, "packages", "app[1]", "node_modules", "cache.txt"), "keep metachar\n")
 	mustWriteTestFile(t, filepath.Join(workdir, ".pnpm-store", "cache.txt"), "remove unless ignored\n")
 	mustWriteTestFile(t, filepath.Join(workdir, "task-state.ignored"), "remove me\n")
-	for _, name := range []string{"sync-fingerprint", "sync-manifest", "sync-finalize-token", "sync-finalize-complete-token", "sync-manifest.0123456789abcdef.new", "sync-deleted.0123456789abcdef.new"} {
+	for _, name := range []string{"sync-fingerprint", "sync-manifest", "sync-finalize-token", "sync-finalize-complete-token", "sync-manifest.0123456789abcdef.new", "sync-deleted.0123456789abcdef.new", "sync-manifest.0123456789abcdef.old.sorted", "sync-manifest.0123456789abcdef.new.sorted", "sync-finalize-token.tmp.123", "sync-finalize-complete-token.tmp.123"} {
 		mustWriteTestFile(t, filepath.Join(workdir, ".git", "crabbox", name), "stale\n")
 	}
 	for _, name := range []string{"env", "scripts", "logs", "captures", "runs"} {
@@ -153,7 +153,7 @@ func TestRemoteReadyPoolScrubResetsLatestBranchAndPreservesIgnoredCaches(t *test
 	if _, err := os.Stat(filepath.Join(workdir, ".pnpm-store")); !os.IsNotExist(err) {
 		t.Fatalf("non-ignored cache remains: %v", err)
 	}
-	for _, name := range []string{"sync-fingerprint", "sync-manifest", "sync-finalize-token", "sync-finalize-complete-token", "sync-manifest.0123456789abcdef.new", "sync-deleted.0123456789abcdef.new"} {
+	for _, name := range []string{"sync-fingerprint", "sync-manifest", "sync-finalize-token", "sync-finalize-complete-token", "sync-manifest.0123456789abcdef.new", "sync-deleted.0123456789abcdef.new", "sync-manifest.0123456789abcdef.old.sorted", "sync-manifest.0123456789abcdef.new.sorted", "sync-finalize-token.tmp.123", "sync-finalize-complete-token.tmp.123"} {
 		if _, err := os.Stat(filepath.Join(workdir, ".git", "crabbox", name)); !os.IsNotExist(err) {
 			t.Fatalf("stale metadata %s remains: %v", name, err)
 		}
