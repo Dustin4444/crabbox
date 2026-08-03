@@ -1637,7 +1637,7 @@ with open(sys.argv[2], "wb") as handle:
 }
 
 func remoteSyncAbandonedMetadataCleanup() string {
-	return `find "$meta_dir" -type f \( -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' \) -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true`
+	return `find "$meta_dir" -type f \( -name 'sync-manifest.new' -o -name 'sync-deleted.new' -o -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' \) -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true`
 }
 
 func remoteSeedSyncManifestFromGit(workdir string) string {
