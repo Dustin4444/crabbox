@@ -182,6 +182,114 @@ describe("daytona coordinator client", () => {
     await expect(client.deleteServer("sandbox-one")).rejects.toThrow("http 503");
   });
 
+  it("creates a larger snapshot from the configured base and deletes its builder", async () => {
+    const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+    let state = "creating";
+    let disk = 3;
+    const client = new DaytonaClient(baseEnv);
+    client.pollDelayMs = 0;
+    client.fetcher = vi.fn<typeof fetch>(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      const body = request.body ? await request.clone().json() : undefined;
+      calls.push({ method: request.method, path: url.pathname, ...(body ? { body } : {}) });
+      if (request.method === "POST" && url.pathname === "/api/sandbox") {
+        state = "started";
+        return Response.json({
+          id: "snapshot-builder",
+          name: "crabbox-snapshot-bootstrap-test",
+          snapshot: "crabbox-ready",
+          state: "creating",
+          disk,
+        });
+      }
+      if (request.method === "GET" && url.pathname === "/api/sandbox/snapshot-builder") {
+        return Response.json({
+          id: "snapshot-builder",
+          name: "crabbox-snapshot-bootstrap-test",
+          snapshot: "crabbox-ready",
+          state,
+          disk,
+        });
+      }
+      if (request.method === "POST" && url.pathname.endsWith("/stop")) {
+        state = "stopped";
+        return Response.json({ id: "snapshot-builder", state });
+      }
+      if (request.method === "POST" && url.pathname.endsWith("/resize")) {
+        disk = (body as { disk: number }).disk;
+        return Response.json({ id: "snapshot-builder", state, disk });
+      }
+      if (request.method === "POST" && url.pathname.endsWith("/snapshot")) {
+        return Response.json({ id: "snapshot-builder", state: "snapshotting", disk });
+      }
+      if (request.method === "DELETE" && url.pathname.endsWith("/snapshot-builder")) {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected request ${request.method} ${request.url}`);
+    });
+
+    await expect(client.bootstrapSnapshot("crabbox-ready-10g", 10)).resolves.toEqual({
+      sourceSnapshot: "crabbox-ready",
+      sourceDiskGiB: 3,
+      snapshot: "crabbox-ready-10g",
+      diskGiB: 10,
+      sandboxID: "snapshot-builder",
+      cleanup: "deleted",
+    });
+    expect(calls.map(({ method, path }) => `${method} ${path}`)).toEqual([
+      "POST /api/sandbox",
+      "GET /api/sandbox/snapshot-builder",
+      "GET /api/sandbox/snapshot-builder",
+      "POST /api/sandbox/snapshot-builder/stop",
+      "GET /api/sandbox/snapshot-builder",
+      "POST /api/sandbox/snapshot-builder/resize",
+      "GET /api/sandbox/snapshot-builder",
+      "POST /api/sandbox/snapshot-builder/snapshot",
+      "GET /api/sandbox/snapshot-builder",
+      "DELETE /api/sandbox/snapshot-builder",
+    ]);
+    expect(calls[0]?.body).toMatchObject({
+      snapshot: "crabbox-ready",
+      labels: {
+        created_by: "crabbox",
+        purpose: "snapshot-bootstrap",
+      },
+    });
+    expect(calls[0]?.body).not.toMatchObject({
+      labels: { crabbox: "true" },
+    });
+    expect(calls[5]?.body).toEqual({ disk: 10 });
+    expect(calls[7]?.body).toEqual({ name: "crabbox-ready-10g" });
+  });
+
+  it("deletes the builder when Daytona snapshot bootstrap fails", async () => {
+    const methods: string[] = [];
+    const client = new DaytonaClient(baseEnv);
+    client.pollDelayMs = 0;
+    client.fetcher = vi.fn<typeof fetch>(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      methods.push(`${request.method} ${url.pathname}`);
+      if (request.method === "POST" && url.pathname === "/api/sandbox") {
+        return Response.json({ id: "snapshot-builder", state: "creating" });
+      }
+      if (request.method === "GET") {
+        return Response.json({ id: "snapshot-builder", state: "started", disk: 3 });
+      }
+      if (request.method === "POST" && url.pathname.endsWith("/stop")) {
+        return new Response("provider unavailable", { status: 503 });
+      }
+      if (request.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected request ${request.method} ${request.url}`);
+    });
+
+    await expect(client.bootstrapSnapshot("crabbox-ready-10g", 10)).rejects.toThrow("http 503");
+    expect(methods.at(-1)).toBe("DELETE /api/sandbox/snapshot-builder");
+  });
+
   it.each(["started", "running", "ready", "active", " Active "])(
     "accepts Daytona ready state %j",
     async (state) => {

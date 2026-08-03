@@ -17,6 +17,9 @@ interface DaytonaSandbox {
   labels?: Record<string, string>;
   target?: string;
   state?: string;
+  cpu?: number;
+  memory?: number;
+  disk?: number;
 }
 
 interface DaytonaSandboxListResponse {
@@ -35,6 +38,15 @@ export interface DaytonaSSHEndpoint {
   host: string;
   port: string;
   expiresAt: string;
+}
+
+export interface DaytonaSnapshotBootstrap {
+  sourceSnapshot: string;
+  sourceDiskGiB?: number;
+  snapshot: string;
+  diskGiB: number;
+  sandboxID: string;
+  cleanup: "deleted";
 }
 
 export class DaytonaHTTPError extends Error {
@@ -113,9 +125,7 @@ export class DaytonaClient {
   }
 
   async getServer(id: string): Promise<ProviderMachine> {
-    return daytonaMachine(
-      await this.request<DaytonaSandbox>("GET", `/sandbox/${encodeURIComponent(id)}?verbose=true`),
-    );
+    return daytonaMachine(await this.getSandbox(id));
   }
 
   async createServer(
@@ -171,6 +181,81 @@ export class DaytonaClient {
     }
   }
 
+  async bootstrapSnapshot(name: string, diskGiB: number): Promise<DaytonaSnapshotBootstrap> {
+    const body: Record<string, unknown> = {
+      name: `crabbox-snapshot-bootstrap-${crypto.randomUUID().slice(0, 8)}`,
+      user: this.user,
+      labels: {
+        created_by: "crabbox",
+        purpose: "snapshot-bootstrap",
+      },
+      autoStopInterval: 0,
+      autoDeleteInterval: -1,
+    };
+    if (this.snapshot) body["snapshot"] = this.snapshot;
+    if (this.target) body["target"] = this.target;
+
+    let sandboxID = "";
+    let result: Omit<DaytonaSnapshotBootstrap, "cleanup"> | undefined;
+    let operationError: unknown;
+    try {
+      const created = await this.request<DaytonaSandbox>("POST", "/sandbox", body);
+      sandboxID = created.id;
+      await this.waitForState(sandboxID, ["started", "running", "ready", "active"]);
+      const source = await this.getSandbox(sandboxID);
+
+      await this.request<DaytonaSandbox>("POST", `/sandbox/${encodeURIComponent(sandboxID)}/stop`);
+      await this.waitForState(sandboxID, ["stopped"]);
+      await this.request<DaytonaSandbox>(
+        "POST",
+        `/sandbox/${encodeURIComponent(sandboxID)}/resize`,
+        { disk: diskGiB },
+      );
+      const resized = await this.waitForState(sandboxID, ["stopped"]);
+      if (resized.disk !== undefined && resized.disk < diskGiB) {
+        throw new Error(
+          `daytona sandbox ${sandboxID} disk remained ${resized.disk} GiB after ${diskGiB} GiB resize`,
+        );
+      }
+      const snapshotting = await this.request<DaytonaSandbox>(
+        "POST",
+        `/sandbox/${encodeURIComponent(sandboxID)}/snapshot`,
+        { name },
+      );
+      if (normalizeDaytonaState(snapshotting.state ?? "") === "snapshotting") {
+        await this.waitForState(sandboxID, ["stopped"]);
+      }
+      result = {
+        sourceSnapshot: source.snapshot?.trim() || "account-default",
+        ...(source.disk === undefined ? {} : { sourceDiskGiB: source.disk }),
+        snapshot: name,
+        diskGiB: resized.disk ?? diskGiB,
+        sandboxID,
+      };
+    } catch (error) {
+      operationError = error;
+    }
+
+    try {
+      if (sandboxID) await this.deleteServer(sandboxID);
+    } catch (cleanupError) {
+      if (operationError) {
+        const operationMessage =
+          operationError instanceof Error ? operationError.message : String(operationError);
+        const cleanupMessage =
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        throw new Error(
+          `daytona snapshot bootstrap failed: ${operationMessage}; sandbox ${sandboxID} cleanup also failed: ${cleanupMessage}`,
+          { cause: cleanupError },
+        );
+      }
+      throw cleanupError;
+    }
+    if (operationError) throw operationError;
+    if (!result) throw new Error("daytona snapshot bootstrap completed without a result");
+    return { ...result, cleanup: "deleted" };
+  }
+
   async createSSHAccess(
     id: string,
     lease?: Pick<LeaseRecord, "expiresAt">,
@@ -212,6 +297,33 @@ export class DaytonaClient {
     }
     const responseBody = await response.text();
     return responseBody.trim() ? (JSON.parse(responseBody) as T) : (undefined as T);
+  }
+
+  private async getSandbox(id: string): Promise<DaytonaSandbox> {
+    return await this.request<DaytonaSandbox>(
+      "GET",
+      `/sandbox/${encodeURIComponent(id)}?verbose=true`,
+    );
+  }
+
+  private async waitForState(id: string, expectedStates: string[]): Promise<DaytonaSandbox> {
+    const expected = new Set(expectedStates.map(normalizeDaytonaState));
+    const deadline = Date.now() + this.maxWaitMs;
+    let lastState = "";
+    while (Date.now() <= deadline) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each poll observes the latest provider state.
+      const sandbox = await this.getSandbox(id);
+      lastState = sandbox.state ?? "";
+      if (expected.has(normalizeDaytonaState(lastState))) return sandbox;
+      if (daytonaTerminalState(lastState)) {
+        throw new Error(`daytona sandbox ${id} entered terminal state=${lastState}`);
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- delay between sequential state probes.
+      await new Promise((resolve) => setTimeout(resolve, this.pollDelayMs));
+    }
+    throw new Error(
+      `timed out waiting for daytona sandbox ${id} state=${expectedStates.join("|")} (state=${lastState || "unknown"})`,
+    );
   }
 }
 
