@@ -1330,7 +1330,7 @@ retrySync:
 			timings.syncSteps.reset = time.Since(stepStart)
 		} else if isWindowsNativeTarget(target) {
 			stepStart = time.Now()
-			if err := runSSHQuiet(ctx, target, windowsRemoteMkdir(workdir)); err != nil {
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, windowsRemoteMkdir(workdir), idempotentSSHRetryDelay); err != nil {
 				return recordFailure(exit(7, "create remote workdir: %v", err))
 			}
 			timings.syncSteps.mkdir = time.Since(stepStart)
@@ -1352,13 +1352,17 @@ retrySync:
 		}
 		if gitSeed {
 			stepStart = time.Now()
-			if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head), idempotentSSHRetryDelay); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 			}
 			timings.syncSteps.gitSeed = time.Since(stepStart)
 		}
 		manifestData := manifest.NUL()
 		deletedData := manifest.DeletedNUL()
+		finalizeToken, err := randomHex(16)
+		if err != nil {
+			return recordFailure(exit(6, "create sync finalize token: %v", err))
+		}
 		stepStart = time.Now()
 		manifestInput := syncManifestInputForTarget(target, manifestData, deletedData)
 		manifestCtx := ctx
@@ -1367,7 +1371,7 @@ retrySync:
 			manifestCtx, cancelManifest = context.WithTimeout(ctx, cfg.Sync.Timeout)
 		}
 		stopManifestHeartbeat := startSyncHeartbeat(a.Stderr, stepStart, 15*time.Second)
-		manifestErr := runSSHInput(manifestCtx, target, remoteWriteSyncManifestsNewForTarget(target, workdir), strings.NewReader(manifestInput), io.Discard, a.Stderr)
+		manifestErr := runSSHInput(manifestCtx, target, remoteWriteSyncManifestsNewForTarget(target, workdir, finalizeToken), strings.NewReader(manifestInput), io.Discard, a.Stderr)
 		stopManifestHeartbeat()
 		if cancelManifest != nil {
 			cancelManifest()
@@ -1383,12 +1387,12 @@ retrySync:
 			// Full resync can git-seed files that are absent from the local manifest.
 			// Seed the old manifest from git so prune removes those resurrected paths.
 			if shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
-				if err := runSSHQuiet(ctx, target, remoteSeedSyncManifestFromGit(workdir)); err != nil {
+				if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
 					return recordFailure(exit(6, "remote sync seed manifest failed: %v", err))
 				}
 			}
 			stepStart = time.Now()
-			if err := runSSHQuiet(ctx, target, remotePruneSyncManifestForTarget(target, workdir)); err != nil {
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken), idempotentSSHRetryDelay); err != nil {
 				return recordFailure(exit(6, "remote sync prune failed: %v", err))
 			}
 			timings.syncSteps.prune = time.Since(stepStart)
@@ -1416,8 +1420,9 @@ retrySync:
 			BaseRef:            cfg.Sync.BaseRef,
 			BaseSHA:            baseSHA,
 			Fingerprint:        fingerprint,
+			Token:              finalizeToken,
 		})
-		if out, err := runSSHCombinedOutput(ctx, target, finalizeCommand); err != nil {
+		if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
 			if out != "" {
 				return recordFailure(exit(6, "remote sync finalize failed: %s: %v", out, err))
 			}
@@ -1493,7 +1498,7 @@ afterSync:
 		if isWindowsNativeTarget(target) {
 			mkdirCommand = windowsRemoteMkdir(workdir)
 		}
-		if err := runSSHQuiet(ctx, target, mkdirCommand); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, mkdirCommand, idempotentSSHRetryDelay); err != nil {
 			return recordFailure(exit(7, "create remote workdir: %v", err))
 		}
 	}

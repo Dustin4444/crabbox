@@ -551,6 +551,25 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 	return strings.TrimSpace(string(lastOut)), lastErr
 }
 
+var idempotentSSHRetryDelay = 2 * time.Second
+
+func runIdempotentSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration) (string, error) {
+	var lastOut string
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		lastOut, lastErr = runSSHCombinedOutput(ctx, target, remote)
+		if lastErr == nil || !shouldRetrySSHPort(lastErr) || attempt == 1 {
+			return lastOut, lastErr
+		}
+		// Only callers whose entire remote command is safe to repeat may use
+		// this helper. Transfer, hydration, and user commands stay outside it.
+		if err := sleepContext(ctx, retryDelay); err != nil {
+			return lastOut, err
+		}
+	}
+	return lastOut, lastErr
+}
+
 func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (string, error) {
 	command := wsl2StdinScriptCommandWithWaitTimeout(waitTimeout)
 	var lastOut []byte
@@ -1517,6 +1536,15 @@ type remoteSyncFinalizeOptions struct {
 	BaseRef            string
 	BaseSHA            string
 	Fingerprint        string
+	Token              string
+}
+
+func remoteSyncPendingManifestName(token string) string {
+	return "sync-manifest." + token + ".new"
+}
+
+func remoteSyncPendingDeletedName(token string) string {
+	return "sync-deleted." + token + ".new"
 }
 
 func remoteWriteSyncManifestNew(workdir string) string {
@@ -1539,8 +1567,11 @@ func remoteSyncInterpreterCommand(python, perl, args string) string {
 		"; else echo " + shellQuote("missing required sync interpreter: need python3, python, or perl") + " >&2; exit 127; fi"
 }
 
-func remoteWriteSyncManifestsNew(workdir string) string {
+func remoteWriteSyncManifestsNew(workdir, finalizeToken string) string {
+	manifestName := remoteSyncPendingManifestName(finalizeToken)
+	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + `mkdir -p "$meta_dir"
+` + remoteSyncAbandonedMetadataCleanup() + `
 IFS= read -r manifest_len
 case "$manifest_len" in
   ''|*[!0-9]*) echo "invalid sync manifest length" >&2; exit 1 ;;
@@ -1548,8 +1579,8 @@ esac
 # Keep this to POSIX dd operands: minimal guests commonly provide BusyBox dd,
 # which rejects GNU's progress-suppression extension. Suppress only the summary;
 # dd's exit status still makes the fail-closed script abort on a short write.
-dd bs=1 count="$manifest_len" of="$meta_dir/sync-manifest.new" 2>/dev/null
-cat > "$meta_dir/sync-deleted.new"
+dd bs=1 count="$manifest_len" of="$meta_dir/` + manifestName + `" 2>/dev/null
+cat > "$meta_dir/` + deletedName + `"
 `
 	return "bash -lc " + shellQuote(script)
 }
@@ -1563,14 +1594,16 @@ func syncManifestInputForTarget(target SSHTarget, manifestData, deletedData []by
 	return fmt.Sprintf("%d\n", len(manifestData)) + string(manifestData) + string(deletedData)
 }
 
-func remoteWriteSyncManifestsNewForTarget(target SSHTarget, workdir string) string {
+func remoteWriteSyncManifestsNewForTarget(target SSHTarget, workdir, finalizeToken string) string {
 	if isWindowsWSL2Target(target) {
-		return remoteWriteSyncManifestsNewPython(workdir)
+		return remoteWriteSyncManifestsNewPython(workdir, finalizeToken)
 	}
-	return remoteWriteSyncManifestsNew(workdir)
+	return remoteWriteSyncManifestsNew(workdir, finalizeToken)
 }
 
-func remoteWriteSyncManifestsNewPython(workdir string) string {
+func remoteWriteSyncManifestsNewPython(workdir, finalizeToken string) string {
+	manifestName := remoteSyncPendingManifestName(finalizeToken)
+	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	python := `import base64
 import sys
 
@@ -1598,8 +1631,13 @@ with open(sys.argv[2], "wb") as handle:
     handle.write(deleted)
 `
 	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\"\n" +
-		"python3 -c " + shellQuote(python) + " \"$meta_dir/sync-manifest.new\" \"$meta_dir/sync-deleted.new\"\n"
+		remoteSyncAbandonedMetadataCleanup() + "\n" +
+		"python3 -c " + shellQuote(python) + " \"$meta_dir/" + manifestName + "\" \"$meta_dir/" + deletedName + "\"\n"
 	return "bash -lc " + shellQuote(script)
+}
+
+func remoteSyncAbandonedMetadataCleanup() string {
+	return `find "$meta_dir" -type f \( -name 'sync-manifest.new' -o -name 'sync-deleted.new' -o -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' \) -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true`
 }
 
 func remoteSeedSyncManifestFromGit(workdir string) string {
@@ -1614,7 +1652,9 @@ fi
 	return "bash -lc " + shellQuote(script)
 }
 
-func remotePruneSyncManifest(workdir string) string {
+func remotePruneSyncManifest(workdir, finalizeToken string) string {
+	manifestName := remoteSyncPendingManifestName(finalizeToken)
+	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	python := `import sys
 
 def read_manifest(path):
@@ -1649,8 +1689,8 @@ print STDOUT map { $_ . "\0" } grep { !$new{$_} } @old;
 	script := "set -e -o pipefail\ncd " + shellQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `
 old="$meta_dir/sync-manifest"
-new="$meta_dir/sync-manifest.new"
-deleted="$meta_dir/sync-deleted.new"
+new="$meta_dir/` + manifestName + `"
+deleted="$meta_dir/` + deletedName + `"
 delete_paths() {
   while IFS= read -r -d '' rel; do
     case "$rel" in ''|/*|../*|*/../*) continue ;; esac
@@ -1671,19 +1711,21 @@ if [ -f "$old" ] && [ -f "$new" ]; then manifest_removed_paths | delete_paths; f
 	return "bash -lc " + shellQuote(script)
 }
 
-func remotePruneSyncManifestForTarget(target SSHTarget, workdir string) string {
+func remotePruneSyncManifestForTarget(target SSHTarget, workdir, finalizeToken string) string {
 	if isWindowsWSL2Target(target) {
-		return remotePruneSyncManifestCoreutils(workdir)
+		return remotePruneSyncManifestCoreutils(workdir, finalizeToken)
 	}
-	return remotePruneSyncManifest(workdir)
+	return remotePruneSyncManifest(workdir, finalizeToken)
 }
 
-func remotePruneSyncManifestCoreutils(workdir string) string {
+func remotePruneSyncManifestCoreutils(workdir, finalizeToken string) string {
+	manifestName := remoteSyncPendingManifestName(finalizeToken)
+	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	script := "set -e -o pipefail\ncd " + shellQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `
 old="$meta_dir/sync-manifest"
-new="$meta_dir/sync-manifest.new"
-deleted="$meta_dir/sync-deleted.new"
+new="$meta_dir/` + manifestName + `"
+deleted="$meta_dir/` + deletedName + `"
 delete_paths() {
   while IFS= read -r -d '' rel; do
     case "$rel" in ''|/*|../*|*/../*) continue ;; esac
@@ -1697,12 +1739,17 @@ delete_paths() {
 }
 if [ -f "$deleted" ]; then delete_paths < "$deleted"; fi
 if [ -f "$old" ] && [ -f "$new" ]; then
-  old_sorted="$meta_dir/sync-manifest.old.sorted"
-  new_sorted="$meta_dir/sync-manifest.new.sorted"
+  old_sorted="$meta_dir/sync-manifest.` + finalizeToken + `.old.sorted"
+  new_sorted="$meta_dir/sync-manifest.` + finalizeToken + `.new.sorted"
+  cleanup_sorted_manifests() {
+    rm -f "$old_sorted" "$new_sorted"
+  }
+  trap cleanup_sorted_manifests EXIT
   LC_ALL=C sort -z "$old" > "$old_sorted"
   LC_ALL=C sort -z "$new" > "$new_sorted"
   comm -z -23 "$old_sorted" "$new_sorted" | delete_paths
-  rm -f "$old_sorted" "$new_sorted"
+  cleanup_sorted_manifests
+  trap - EXIT
 fi
 `
 	return "bash -lc " + shellQuote(script)
@@ -1718,14 +1765,39 @@ func remoteFinalizeSync(workdir string, opts remoteSyncFinalizeOptions) string {
 	if opts.AllowMassDeletions {
 		allowValue = "1"
 	}
+	manifestName := remoteSyncPendingManifestName(opts.Token)
+	deletedName := remoteSyncPendingDeletedName(opts.Token)
 	script := `set -e
 cd ` + shellQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `
 mkdir -p "$meta_dir"
-new="$meta_dir/sync-manifest.new"
-deleted="$meta_dir/sync-deleted.new"
-rm -f "$deleted"
-mv "$new" "$meta_dir/sync-manifest"
+new="$meta_dir/` + manifestName + `"
+deleted="$meta_dir/` + deletedName + `"
+manifest="$meta_dir/sync-manifest"
+committed_token="$meta_dir/sync-finalize-token"
+complete_token="$meta_dir/sync-finalize-complete-token"
+expected_token=` + shellQuote(opts.Token) + `
+case "$expected_token" in
+  ''|*[!0-9a-f]*) echo "remote sync finalize failed: invalid sync token" >&2; exit 67 ;;
+esac
+` + remoteSyncFinalizeLockScript() + `
+if [ -f "$manifest" ] &&
+   [ -f "$committed_token" ] &&
+   [ "$(cat "$committed_token")" = "$expected_token" ] &&
+   [ -f "$complete_token" ] &&
+   [ "$(cat "$complete_token")" = "$expected_token" ]; then
+  exit 0
+fi
+if [ -f "$new" ]; then
+  committed_tmp="$committed_token.tmp.$$"
+  printf %s "$expected_token" > "$committed_tmp"
+  mv "$committed_tmp" "$committed_token"
+  rm -f "$deleted"
+  mv "$new" "$manifest"
+elif [ ! -f "$manifest" ] || [ ! -f "$committed_token" ] || [ "$(cat "$committed_token")" != "$expected_token" ]; then
+  echo "remote sync finalize failed: no committed manifest for this sync" >&2
+  exit 67
+fi
 if test -d .git && git status --short >/tmp/crabbox-git-status 2>/dev/null; then
   deletions=$(awk '/^ D|^D / { n++ } END { print n+0 }' /tmp/crabbox-git-status)
   if [ ` + shellQuote(allowValue) + ` != '1' ] && [ "$deletions" -ge 200 ]; then
@@ -1750,7 +1822,67 @@ fi
 		script += `printf %s ` + shellQuote(opts.Fingerprint) + ` > "$meta_dir/sync-fingerprint" || true
 `
 	}
+	script += `complete_tmp="$complete_token.tmp.$$"
+printf %s "$expected_token" > "$complete_tmp"
+mv "$complete_tmp" "$complete_token"
+`
 	return "bash -lc " + shellQuote(script)
+}
+
+func remoteSyncFinalizeLockScript() string {
+	return `lock_path="$meta_dir/sync-finalize-lock"
+lock_waits=0
+while ! ln -s "$$" "$lock_path" 2>/dev/null; do
+  lock_owner=$(readlink "$lock_path" 2>/dev/null || true)
+  lock_owner_live=
+  case "$lock_owner" in
+    ''|*[!0-9]*) ;;
+    *) if kill -0 "$lock_owner" 2>/dev/null; then lock_owner_live=1; fi ;;
+  esac
+  if [ -n "$lock_owner_live" ]; then
+    sleep 1
+  else
+    sleep 1
+    confirmed_owner=$(readlink "$lock_path" 2>/dev/null || true)
+    if [ "$confirmed_owner" = "$lock_owner" ]; then
+      owner_dead=
+      case "$confirmed_owner" in
+        ''|*[!0-9]*) owner_dead=1 ;;
+        *) if ! kill -0 "$confirmed_owner" 2>/dev/null; then owner_dead=1; fi ;;
+      esac
+      if [ -n "$owner_dead" ]; then
+        stale_lock="$lock_path.stale.$$"
+        if mv "$lock_path" "$stale_lock" 2>/dev/null; then
+          moved_owner=$(readlink "$stale_lock" 2>/dev/null || true)
+          if [ "$moved_owner" != "$confirmed_owner" ]; then
+            if [ ! -e "$lock_path" ] && [ ! -L "$lock_path" ]; then
+              mv "$stale_lock" "$lock_path" 2>/dev/null || true
+            fi
+            echo "remote sync finalize failed: lock ownership changed during recovery" >&2
+            exit 67
+          fi
+          rm -f "$stale_lock"
+          continue
+        fi
+      fi
+    fi
+  fi
+  lock_waits=$((lock_waits + 1))
+  if [ "$lock_waits" -ge 120 ]; then
+    echo "remote sync finalize failed: timed out waiting for active finalize" >&2
+    exit 67
+  fi
+done
+cleanup_finalize_lock() {
+  if [ "$(readlink "$lock_path" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$lock_path"
+  fi
+}
+trap cleanup_finalize_lock EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+`
 }
 
 func remoteSyncMetaDirScript() string {
