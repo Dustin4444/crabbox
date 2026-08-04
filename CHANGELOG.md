@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.41.0 - 2026-08-03
+## 0.41.0 - 2026-08-04
 
 ### Added
 
@@ -31,6 +31,8 @@
 
 ### Fixed
 
+- Expanded protected release-tag signing from one maintainer to the approved
+  release-admin key set.
 - Retried idempotent remote workspace setup, Git and manifest sync preparation,
   sync finalization, and post-sync Actions hydration marker cleanup once after
   a transient SSH transport failure, while preserving redacted terminal
