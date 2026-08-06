@@ -25,6 +25,16 @@ if (!/^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(tag)) {
 
 const repository = JSON.parse(fs.readFileSync(repositoryFile, "utf8"));
 const rulesets = JSON.parse(fs.readFileSync(rulesetsFile, "utf8"));
+const releaseTeamBypass = {
+  actor_id: 16654667,
+  actor_type: "Team",
+  bypass_mode: "pull_request",
+};
+const requiredReleaseWorkflow = {
+  path: ".github/workflows/crabbox-release-check.yml",
+  ref: "refs/heads/main",
+  repository_id: 1304559357,
+};
 if (
   repository?.full_name !== expectedRepository ||
   repository?.default_branch !== defaultBranch ||
@@ -39,7 +49,6 @@ function exactActiveRuleset(value, target) {
     value.target === target &&
     value.enforcement === "active" &&
     Array.isArray(value.bypass_actors) &&
-    value.bypass_actors.length === 0 &&
     Array.isArray(value.rules) &&
     value.conditions?.ref_name &&
     Array.isArray(value.conditions.ref_name.include) &&
@@ -47,12 +56,73 @@ function exactActiveRuleset(value, target) {
   );
 }
 
+function hasExactReleaseTeamBypass(value) {
+  const actors = value.bypass_actors;
+  return (
+    actors.length === 1 &&
+    actors[0]?.actor_id === releaseTeamBypass.actor_id &&
+    actors[0]?.actor_type === releaseTeamBypass.actor_type &&
+    actors[0]?.bypass_mode === releaseTeamBypass.bypass_mode
+  );
+}
+
+function fnmatch(pattern, value) {
+  if (pattern.includes("\\")) {
+    fail("ruleset selector uses unsupported backslash escaping");
+  }
+  let source = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === "*") {
+      if (pattern[index + 1] === "*" && pattern[index + 2] === "/") {
+        source += "(?:[^/]+/)*";
+        index += 2;
+      } else {
+        while (pattern[index + 1] === "*") index += 1;
+        source += "[^/]*";
+      }
+    } else if (char === "?") {
+      source += "[^/]";
+    } else if (char === "[") {
+      const end = pattern.indexOf("]", index + 1);
+      if (end <= index + 1) {
+        fail("ruleset selector has an invalid character class");
+      }
+      const content = pattern.slice(index + 1, end);
+      if (
+        content.startsWith("^") ||
+        content.startsWith("!") ||
+        !/^[A-Za-z0-9._/-]+$/.test(content)
+      ) {
+        fail("ruleset selector uses an unsupported character class");
+      }
+      source += `(?!/)[${content}]`;
+      index = end;
+    } else {
+      source += char.replace(/[\\^$+.()|{}]/g, "\\$&");
+    }
+  }
+  try {
+    return new RegExp(`${source}$`).test(value);
+  } catch {
+    fail("ruleset selector has an invalid pattern");
+  }
+}
+
+function selectorMatchesBranch(selector, branchRef) {
+  if (selector === "~ALL") return true;
+  if (selector === "~DEFAULT_BRANCH") return true;
+  if (selector.startsWith("~")) fail("ruleset selector uses an unsupported special target");
+  return fnmatch(selector, branchRef);
+}
+
 function includesBranch(value) {
   const includes = value.conditions.ref_name.include;
   const excludes = value.conditions.ref_name.exclude;
+  const branchRef = `refs/heads/${defaultBranch}`;
   return (
-    (includes.includes("~DEFAULT_BRANCH") || includes.includes(`refs/heads/${defaultBranch}`)) &&
-    excludes.length === 0
+    includes.some((selector) => selectorMatchesBranch(selector, branchRef)) &&
+    !excludes.some((selector) => selectorMatchesBranch(selector, branchRef))
   );
 }
 
@@ -71,30 +141,95 @@ function rule(value, type) {
   return value.rules.find((entry) => entry?.type === type);
 }
 
-const branchPolicy = rulesets.find((value) => {
-  if (!exactActiveRuleset(value, "branch") || !includesBranch(value)) return false;
-  const pullRequest = rule(value, "pull_request")?.parameters;
-  const statusChecks = rule(value, "required_status_checks")?.parameters;
+const branchApprovalPolicies = rulesets.filter(
+  (value) =>
+    exactActiveRuleset(value, "branch") && includesBranch(value) && rule(value, "pull_request"),
+);
+if (branchApprovalPolicies.length !== 1) {
+  fail(
+    "default branch must have exactly one active pull-request approval ruleset",
+  );
+}
+const branchPolicy = branchApprovalPolicies[0];
+const pullRequest = rule(branchPolicy, "pull_request")?.parameters;
+if (
+  !hasExactReleaseTeamBypass(branchPolicy) ||
+  branchPolicy.rules.length !== 1 ||
+  pullRequest?.dismiss_stale_reviews_on_push !== true ||
+  pullRequest?.require_code_owner_review !== true ||
+  pullRequest?.require_last_push_approval !== true ||
+  !Number.isSafeInteger(pullRequest?.required_approving_review_count) ||
+  pullRequest.required_approving_review_count < 1
+) {
+  fail(
+    "default branch lacks one approval-only release-team PR bypass with CODEOWNER and last-push protection",
+  );
+}
+
+const bypassableHistoryPolicy = rulesets.find(
+  (value) =>
+    exactActiveRuleset(value, "branch") &&
+    includesBranch(value) &&
+    (rule(value, "deletion") || rule(value, "non_fast_forward")) &&
+    value.bypass_actors.length !== 0,
+);
+if (bypassableHistoryPolicy) {
+  fail("default branch has bypassable history protection");
+}
+
+const branchHistoryPolicy = rulesets.find((value) => {
+  if (
+    !exactActiveRuleset(value, "branch") ||
+    value.bypass_actors.length !== 0 ||
+    !includesBranch(value)
+  ) {
+    return false;
+  }
   return (
+    !rule(value, "pull_request") &&
     rule(value, "deletion") &&
-    rule(value, "non_fast_forward") &&
-    pullRequest?.dismiss_stale_reviews_on_push === true &&
-    pullRequest?.require_code_owner_review === true &&
-    pullRequest?.require_last_push_approval === true &&
-    Number.isSafeInteger(pullRequest?.required_approving_review_count) &&
-    pullRequest.required_approving_review_count >= 1 &&
-    statusChecks?.strict_required_status_checks_policy === true &&
-    Array.isArray(statusChecks?.required_status_checks) &&
-    statusChecks.required_status_checks.length >= 1
+    rule(value, "non_fast_forward")
   );
 });
-if (!branchPolicy) {
-  fail("default branch lacks one active no-bypass PR, CODEOWNER, status, deletion, and non-fast-forward ruleset");
+if (!branchHistoryPolicy) {
+  fail(
+    "default branch lacks active no-bypass deletion and non-fast-forward protection",
+  );
+}
+
+const branchWorkflowPolicy = rulesets.find((value) => {
+  if (
+    !exactActiveRuleset(value, "branch") ||
+    value.source_type !== "Organization" ||
+    value.source !== "openclaw" ||
+    value.bypass_actors.length !== 0 ||
+    !includesBranch(value)
+  ) {
+    return false;
+  }
+  const workflows = rule(value, "workflows")?.parameters;
+  return (
+    workflows?.do_not_enforce_on_create === false &&
+    Array.isArray(workflows?.workflows) &&
+    workflows.workflows.some(
+      (entry) =>
+        entry?.path === requiredReleaseWorkflow.path &&
+        entry?.ref === requiredReleaseWorkflow.ref &&
+        entry?.repository_id === requiredReleaseWorkflow.repository_id &&
+        entry?.sha == null,
+    )
+  );
+});
+if (!branchWorkflowPolicy) {
+  fail(
+    "default branch lacks the active no-bypass OpenClaw organization release workflow",
+  );
 }
 
 const tagPolicy = rulesets.find(
   (value) =>
     exactActiveRuleset(value, "tag") &&
+    value.bypass_actors.length === 0 &&
     includesStableTags(value) &&
     rule(value, "deletion") &&
     rule(value, "non_fast_forward"),
@@ -104,5 +239,10 @@ if (!tagPolicy) {
 }
 
 process.stdout.write(
-  `${JSON.stringify({ branchRulesetId: branchPolicy.id, tagRulesetId: tagPolicy.id })}\n`,
+  `${JSON.stringify({
+    branchApprovalRulesetId: branchPolicy.id,
+    branchHistoryRulesetId: branchHistoryPolicy.id,
+    branchWorkflowRulesetId: branchWorkflowPolicy.id,
+    tagRulesetId: tagPolicy.id,
+  })}\n`,
 );

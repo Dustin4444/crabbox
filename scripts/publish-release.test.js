@@ -145,16 +145,25 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
     protected: true,
     commit: { sha: verifierCommit },
   });
-  writeJson(path.join(api, "ruleset-list.json"), [{ id: 701 }, { id: 702 }]);
+  writeJson(path.join(api, "ruleset-list.json"), [
+    { id: 701 },
+    { id: 702 },
+    { id: 703 },
+    { id: 705 },
+  ]);
   const branchRuleset = {
     id: 701,
     target: "branch",
     enforcement: "active",
-    bypass_actors: [],
+    bypass_actors: [
+      {
+        actor_id: 16654667,
+        actor_type: "Team",
+        bypass_mode: "pull_request",
+      },
+    ],
     conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
     rules: [
-      { type: "deletion" },
-      { type: "non_fast_forward" },
       {
         type: "pull_request",
         parameters: {
@@ -164,13 +173,6 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
           required_approving_review_count: 1,
         },
       },
-      {
-        type: "required_status_checks",
-        parameters: {
-          strict_required_status_checks_policy: true,
-          required_status_checks: [{ context: "CI" }],
-        },
-      },
     ],
   };
   writeJson(path.join(api, "ruleset-branch.json"), branchRuleset);
@@ -178,6 +180,224 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
     ...branchRuleset,
     rules: [{ type: "deletion" }, { type: "non_fast_forward" }],
   });
+  writeJson(path.join(api, "ruleset-branch-wrong-team.json"), {
+    ...branchRuleset,
+    bypass_actors: [
+      {
+        actor_id: 42,
+        actor_type: "Team",
+        bypass_mode: "pull_request",
+      },
+    ],
+  });
+  writeJson(path.join(api, "ruleset-branch-always-bypass.json"), {
+    ...branchRuleset,
+    bypass_actors: [
+      {
+        actor_id: 16654667,
+        actor_type: "Team",
+        bypass_mode: "always",
+      },
+    ],
+  });
+  writeJson(path.join(api, "ruleset-branch-with-status.json"), {
+    ...branchRuleset,
+    rules: [
+      ...branchRuleset.rules,
+      {
+        type: "required_status_checks",
+        parameters: {
+          strict_required_status_checks_policy: true,
+          required_status_checks: [{ context: "Release Check", integration_id: 15368 }],
+        },
+      },
+    ],
+  });
+  const branchHistoryRuleset = {
+    id: 703,
+    target: "branch",
+    enforcement: "active",
+    bypass_actors: [],
+    conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
+    rules: [
+      { type: "deletion" },
+      { type: "non_fast_forward" },
+    ],
+  };
+  writeJson(path.join(api, "ruleset-branch-history.json"), branchHistoryRuleset);
+  writeJson(path.join(api, "ruleset-branch-history-missing.json"), {
+    ...branchHistoryRuleset,
+    rules: [{ type: "deletion" }],
+  });
+  writeJson(path.join(api, "ruleset-branch-history-with-approval.json"), {
+    ...branchHistoryRuleset,
+    rules: [
+      ...branchHistoryRuleset.rules,
+      {
+        type: "pull_request",
+        parameters: {
+          dismiss_stale_reviews_on_push: true,
+          require_code_owner_review: true,
+          require_last_push_approval: true,
+          required_approving_review_count: 1,
+        },
+      },
+    ],
+  });
+  writeJson(path.join(api, "ruleset-branch-history-bypassable.json"), {
+    ...branchHistoryRuleset,
+    bypass_actors: [
+      {
+        actor_id: 16654667,
+        actor_type: "Team",
+        bypass_mode: "pull_request",
+      },
+    ],
+  });
+  const branchWorkflowRuleset = {
+    id: 705,
+    source_type: "Organization",
+    source: "openclaw",
+    target: "branch",
+    enforcement: "active",
+    bypass_actors: [],
+    conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
+    rules: [
+      {
+        type: "workflows",
+        parameters: {
+          do_not_enforce_on_create: false,
+          workflows: [
+            {
+              path: ".github/workflows/crabbox-release-check.yml",
+              ref: "refs/heads/main",
+              repository_id: 1304559357,
+            },
+          ],
+        },
+      },
+    ],
+  };
+  writeJson(path.join(api, "ruleset-branch-workflow.json"), branchWorkflowRuleset);
+  writeJson(path.join(api, "ruleset-branch-workflow-missing.json"), {
+    ...branchWorkflowRuleset,
+    rules: [],
+  });
+  writeJson(path.join(api, "ruleset-branch-workflow-bypassable.json"), {
+    ...branchWorkflowRuleset,
+    bypass_actors: [
+      {
+        actor_id: 16654667,
+        actor_type: "Team",
+        bypass_mode: "pull_request",
+      },
+    ],
+  });
+  writeJson(path.join(api, "ruleset-branch-workflow-wrong-source.json"), {
+    ...branchWorkflowRuleset,
+    source_type: "Repository",
+    source: repository,
+  });
+  writeJson(path.join(api, "ruleset-branch-workflow-wrong-file.json"), {
+    ...branchWorkflowRuleset,
+    rules: [
+      {
+        type: "workflows",
+        parameters: {
+          do_not_enforce_on_create: false,
+          workflows: [
+            {
+              path: ".github/workflows/other.yml",
+              ref: "refs/heads/main",
+              repository_id: 1304559357,
+            },
+          ],
+        },
+      },
+    ],
+  });
+  writeJson(path.join(api, "ruleset-branch-workflow-wrong-ref.json"), {
+    ...branchWorkflowRuleset,
+    rules: [
+      {
+        type: "workflows",
+        parameters: {
+          do_not_enforce_on_create: false,
+          workflows: [
+            {
+              path: ".github/workflows/crabbox-release-check.yml",
+              ref: "refs/heads/feature",
+              repository_id: 1304559357,
+            },
+          ],
+        },
+      },
+    ],
+  });
+  writeJson(path.join(api, "ruleset-branch-workflow-wrong-repository.json"), {
+    ...branchWorkflowRuleset,
+    rules: [
+      {
+        type: "workflows",
+        parameters: {
+          do_not_enforce_on_create: false,
+          workflows: [
+            {
+              path: ".github/workflows/crabbox-release-check.yml",
+              ref: "refs/heads/main",
+              repository_id: 42,
+            },
+          ],
+        },
+      },
+    ],
+  });
+  const otherActorApprovalRuleset = {
+    id: 704,
+    target: "branch",
+    enforcement: "active",
+    bypass_actors: [
+      {
+        actor_id: 42,
+        actor_type: "Team",
+        bypass_mode: "pull_request",
+      },
+    ],
+    conditions: { ref_name: { include: ["refs/heads/main"], exclude: [] } },
+    rules: branchRuleset.rules,
+  };
+  writeJson(path.join(api, "ruleset-branch-other-actor-approval.json"), otherActorApprovalRuleset);
+  writeJson(path.join(api, "ruleset-branch-other-actor-approval-all.json"), {
+    ...otherActorApprovalRuleset,
+    conditions: { ref_name: { include: ["~ALL"], exclude: [] } },
+  });
+  writeJson(path.join(api, "ruleset-branch-other-actor-approval-glob.json"), {
+    ...otherActorApprovalRuleset,
+    conditions: { ref_name: { include: ["refs/heads/ma*"], exclude: [] } },
+  });
+  writeJson(path.join(api, "ruleset-branch-other-actor-approval-excluded.json"), {
+    ...otherActorApprovalRuleset,
+    conditions: { ref_name: { include: ["~ALL"], exclude: ["refs/heads/main"] } },
+  });
+  writeJson(path.join(api, "ruleset-branch-other-actor-approval-double-star.json"), {
+    ...otherActorApprovalRuleset,
+    conditions: { ref_name: { include: ["refs/**"], exclude: [] } },
+  });
+  writeJson(path.join(api, "ruleset-branch-other-actor-approval-recursive.json"), {
+    ...otherActorApprovalRuleset,
+    conditions: { ref_name: { include: ["refs/**/main"], exclude: [] } },
+  });
+  writeJson(path.join(api, "ruleset-branch-other-actor-approval-slash-class.json"), {
+    ...otherActorApprovalRuleset,
+    conditions: { ref_name: { include: ["refs[/]heads/main"], exclude: [] } },
+  });
+  writeJson(path.join(api, "ruleset-list-overlap.json"), [
+    { id: 701 },
+    { id: 702 },
+    { id: 703 },
+    { id: 704 },
+    { id: 705 },
+  ]);
   writeJson(path.join(api, "ruleset-tag.json"), {
     id: 702,
     target: "tag",
@@ -405,9 +625,33 @@ if (method === "PATCH") {
 if (method !== "GET") process.exit(93);
 if (endpoint === "repos/${repository}") outputFile("repository.json");
 else if (endpoint === "repos/${repository}/branches/main") outputFile("branch.json");
-else if (endpoint === "repos/${repository}/rulesets?per_page=100") outputFile("ruleset-list.json");
+else if (endpoint === "repos/${repository}/rulesets?per_page=100") {
+  outputFile(
+    [
+      "other-actor-approval-overlap",
+      "other-actor-approval-overlap-all",
+      "other-actor-approval-overlap-glob",
+      "other-actor-approval-excluded",
+      "other-actor-approval-double-star",
+      "other-actor-approval-recursive",
+      "other-actor-approval-slash-class",
+    ].includes(process.env.MOCK_MODE)
+      ? "ruleset-list-overlap.json"
+      : "ruleset-list.json",
+  );
+}
 else if (endpoint === "repos/${repository}/rulesets/701") {
-  outputFile(process.env.MOCK_MODE === "missing-rules" ? "ruleset-branch-missing.json" : "ruleset-branch.json");
+  outputFile(
+    process.env.MOCK_MODE === "missing-rules"
+      ? "ruleset-branch-missing.json"
+      : process.env.MOCK_MODE === "wrong-release-team"
+        ? "ruleset-branch-wrong-team.json"
+        : process.env.MOCK_MODE === "always-release-team-bypass"
+          ? "ruleset-branch-always-bypass.json"
+          : process.env.MOCK_MODE === "approval-with-status"
+            ? "ruleset-branch-with-status.json"
+            : "ruleset-branch.json",
+  );
 }
 else if (endpoint === "repos/${repository}/rulesets/702") {
   outputFile(
@@ -416,6 +660,51 @@ else if (endpoint === "repos/${repository}/rulesets/702") {
       : process.env.MOCK_MODE === "excluded-tag-rules"
         ? "ruleset-tag-excluded.json"
         : "ruleset-tag.json",
+  );
+}
+else if (endpoint === "repos/${repository}/rulesets/703") {
+  outputFile(
+    process.env.MOCK_MODE === "missing-history-rules"
+      ? "ruleset-branch-history-missing.json"
+      : process.env.MOCK_MODE === "history-with-approval"
+        ? "ruleset-branch-history-with-approval.json"
+        : process.env.MOCK_MODE === "history-bypassable"
+          ? "ruleset-branch-history-bypassable.json"
+          : "ruleset-branch-history.json",
+  );
+}
+else if (endpoint === "repos/${repository}/rulesets/704") {
+  outputFile(
+    process.env.MOCK_MODE === "other-actor-approval-overlap-all"
+      ? "ruleset-branch-other-actor-approval-all.json"
+      : process.env.MOCK_MODE === "other-actor-approval-overlap-glob"
+        ? "ruleset-branch-other-actor-approval-glob.json"
+        : process.env.MOCK_MODE === "other-actor-approval-excluded"
+          ? "ruleset-branch-other-actor-approval-excluded.json"
+          : process.env.MOCK_MODE === "other-actor-approval-double-star"
+            ? "ruleset-branch-other-actor-approval-double-star.json"
+            : process.env.MOCK_MODE === "other-actor-approval-recursive"
+              ? "ruleset-branch-other-actor-approval-recursive.json"
+              : process.env.MOCK_MODE === "other-actor-approval-slash-class"
+                ? "ruleset-branch-other-actor-approval-slash-class.json"
+                : "ruleset-branch-other-actor-approval.json",
+  );
+}
+else if (endpoint === "repos/${repository}/rulesets/705") {
+  outputFile(
+    process.env.MOCK_MODE === "missing-workflow-rules"
+      ? "ruleset-branch-workflow-missing.json"
+      : process.env.MOCK_MODE === "workflow-bypassable"
+        ? "ruleset-branch-workflow-bypassable.json"
+        : process.env.MOCK_MODE === "workflow-wrong-source"
+          ? "ruleset-branch-workflow-wrong-source.json"
+          : process.env.MOCK_MODE === "workflow-wrong-file"
+            ? "ruleset-branch-workflow-wrong-file.json"
+            : process.env.MOCK_MODE === "workflow-wrong-ref"
+              ? "ruleset-branch-workflow-wrong-ref.json"
+              : process.env.MOCK_MODE === "workflow-wrong-repository"
+                ? "ruleset-branch-workflow-wrong-repository.json"
+                : "ruleset-branch-workflow.json",
   );
 }
 else if (endpoint === "repos/${repository}/git/ref/tags/${tag}") outputFile("tag-ref.json");
@@ -567,8 +856,164 @@ test("missing protected branch rules fail before any mutation", () => {
   withFixture({}, ({ run, mutations }) => {
     const result = run("missing-rules");
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /default branch lacks one active no-bypass/);
+    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
     assert.deepEqual(mutations(), []);
+  });
+});
+
+test("wrong release-team bypass fails before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("wrong-release-team");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /approval-only release-team PR bypass/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("always-on release-team bypass fails before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("always-release-team-bypass");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /approval-only release-team PR bypass/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("status checks in the release-team approval ruleset fail before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("approval-with-status");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /approval-only release-team PR bypass/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("missing no-bypass history rules fail before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("missing-history-rules");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /no-bypass deletion and non-fast-forward protection/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("overlapping no-bypass approval rules fail before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("history-with-approval");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("overlapping other-actor approval rules fail before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("other-actor-approval-overlap");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("all-branch other-actor approval rules fail before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("other-actor-approval-overlap-all");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("globbed other-actor approval rules fail before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("other-actor-approval-overlap-glob");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("excluded other-actor approval rules do not block publication", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("other-actor-approval-excluded");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(mutations().map((line) => line.split("\t")[0]), ["PATCH"]);
+  });
+});
+
+test("non-recursive double-star approval rules do not match nested refs", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("other-actor-approval-double-star");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(mutations().map((line) => line.split("\t")[0]), ["PATCH"]);
+  });
+});
+
+test("recursive double-star approval rules fail before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("other-actor-approval-recursive");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("slash character classes do not match path separators", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("other-actor-approval-slash-class");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(mutations().map((line) => line.split("\t")[0]), ["PATCH"]);
+  });
+});
+
+test("bypassable history protection fails before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("history-bypassable");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /bypassable history protection/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("missing organization release workflow fails before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("missing-workflow-rules");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /OpenClaw organization release workflow/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("bypassable organization release workflow fails before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("workflow-bypassable");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /OpenClaw organization release workflow/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+for (const mode of [
+  "workflow-wrong-source",
+  "workflow-wrong-file",
+  "workflow-wrong-ref",
+  "workflow-wrong-repository",
+]) {
+  test(`${mode} fails before any mutation`, () => {
+    withFixture({}, ({ run, mutations }) => {
+      const result = run(mode);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /OpenClaw organization release workflow/);
+      assert.deepEqual(mutations(), []);
+    });
+  });
+}
+
+test("exact organization release workflow permits publication", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("workflow-exact");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(mutations().map((line) => line.split("\t")[0]), ["PATCH"]);
   });
 });
 
