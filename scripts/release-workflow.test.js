@@ -268,6 +268,12 @@ test("script CI fetches signed release tags for publication fixtures", () => {
   assert.match(scriptsJob, /uses: actions\/checkout@[^\n]+\n\s+with:\n\s+fetch-depth: 0/);
 });
 
+test("Crabbox CI cannot redefine the organization-required release check", () => {
+  const ci = read(".github/workflows/ci.yml");
+  assert.doesNotMatch(ci, /^\s+name: Release Check$/m);
+  assert.doesNotMatch(ci, /goreleaser\/goreleaser-action/);
+});
+
 test("GoReleaser is credential-free build-only with exact binary archives", () => {
   const config = read(".goreleaser.yaml");
   assert.match(config, /release:\n\s+disable: true/);

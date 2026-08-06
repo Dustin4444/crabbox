@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.41.0 - 2026-08-03
+## 0.41.0 - 2026-08-06
 
 ### Added
 
@@ -31,6 +31,12 @@
 
 ### Fixed
 
+- Expanded protected release-tag signing from one maintainer to the approved
+  release-admin key set.
+- Allowed the release-admin team to bypass approval only through pull requests,
+  while a protected cross-repository ruleset workflow independently enforces the
+  release snapshot build and separate no-bypass rules retain protected history
+  and stable release tag immutability.
 - Retried idempotent remote workspace setup, Git and manifest sync preparation,
   sync finalization, and post-sync Actions hydration marker cleanup once after
   a transient SSH transport failure, while preserving redacted terminal

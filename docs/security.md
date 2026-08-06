@@ -498,8 +498,14 @@ Homebrew tap. The source identity is an annotated `vMAJOR.MINOR.PATCH` tag whose
 signature verifies against the repository-pinned signer policy. Verification
 captures the exact tag-object and peeled commit IDs, confirms the remote tag has
 not moved, and requires the peeled commit to be an ancestor of protected
-`main`. Existing valid tags are preserved when release hardening lands later;
-they are never rewritten to point at verifier code.
+`main`. Protected `main` grants the release-admin team a PR-only approval
+bypass, so release admins can merge their own release PRs without gaining a
+direct-push path. Separate no-bypass rules protect branch history and stable
+release tags. The required release snapshot workflow is loaded from protected
+`openclaw/release-workflows` rather than Crabbox, so a Crabbox pull request
+cannot weaken the check that gates its own merge. Existing valid tags are
+preserved when release hardening lands later; they are never rewritten to point
+at verifier code.
 
 Release orchestration and verification come from the exact protected-default
 workflow commit, not from the tagged candidate. Trusted and candidate trees are
