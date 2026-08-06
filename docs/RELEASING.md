@@ -41,13 +41,22 @@ verifier, publisher, or Homebrew updater.
 The publishing checkout must have `HEAD` exactly equal to the protected verifier
 commit, and every release-policy or executable tooling file must match that
 commit with no staged, unstaged, or untracked replacement. Fetch every detailed
-repository ruleset. One active no-bypass branch ruleset must cover the default
-branch and require deletion/non-fast-forward protection, code-owner pull
-requests with stale-review dismissal, last-push approval and at least one
-approval, plus strict required status checks. A separate active no-bypass tag
-ruleset must cover every `refs/tags/v*` release tag and prevent deletion and
-updates. Before publication, an administrator must also freeze all
-default-branch, tag, and Releases API writers for the non-atomic final gate.
+repository ruleset. One active approval ruleset must cover the default branch,
+require code-owner pull requests with stale-review dismissal, last-push
+approval and at least one approval, and grant exactly one bypass to the
+`openclaw-secops` release team (GitHub team ID `16654667`) in `pull_request`
+mode. That allows a release admin to merge their own PR without granting a
+direct-push path. A separate active no-bypass branch ruleset must enforce
+deletion and non-fast-forward protection. The default branch must also be
+covered by the no-bypass OpenClaw organization workflow
+`.github/workflows/crabbox-release-check.yml` from
+`openclaw/release-workflows` repository ID `1304559357` at
+`refs/heads/main`. That protected external workflow owns the credential-free
+macOS release snapshot check, so a Crabbox pull request cannot redefine the
+check that gates its own merge. A separate active no-bypass tag ruleset must
+cover every `refs/tags/v*` release tag and prevent deletion and updates. Before
+publication, an administrator must also freeze all default-branch, tag, and
+Releases API writers for the non-atomic final gate.
 
 GitHub omits ruleset bypass actors from the ordinary workflow token. Configure
 `CRABBOX_RULESET_READ_TOKEN` as a fine-grained repository secret scoped only to
