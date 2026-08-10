@@ -5,6 +5,7 @@
 ### Fixed
 
 - Redacted configured credentials reflected by provider-controlled Orgo, FastAPI Cloud, and DigitalOcean response diagnostics before they reach terminal or CI output. Thanks @coygeek.
+- Made canceled ordinary coordinator creates durable and token-bound, including concurrent same-token replay, atomic cleanup claims, late provider cleanup evidence, generation-fenced retained AWS Mac reactivation, and bounded cancellation retries while fixed-ID creates remain replay-owned. Thanks @fuller-stack-dev.
 
 ## 0.41.1 - 2026-08-09
 
