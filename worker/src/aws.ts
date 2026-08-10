@@ -947,6 +947,7 @@ export class EC2SpotClient {
       const attempts: ProvisioningAttempt[] = [];
       const quotaCache = new Map<string, number | undefined>();
       const imageCache = new Map<string, string>();
+      const marketFallbackCandidates: string[] = [];
       const pinnedMacOSImageID =
         config.target === "macos" ? config.awsAMI || this.env.CRABBOX_AWS_AMI || "" : "";
       const resolveCandidateImageID = async (candidateConfig: LeaseConfig): Promise<string> => {
@@ -993,6 +994,9 @@ export class EC2SpotClient {
         if (preflight) {
           attempts.push(preflight);
           failures.push(`${serverType}: ${preflight.message}`);
+          if (config.capacityMarket === "spot") {
+            marketFallbackCandidates.push(serverType);
+          }
           continue;
         }
         try {
@@ -1029,12 +1033,17 @@ export class EC2SpotClient {
           });
           failures.push(`${serverType}: ${message}`);
           if (!isRetryableAWSProvisioningError(message)) {
+            marketFallbackCandidates.length = 0;
             break;
+          }
+          if (config.capacityMarket === "spot" && isAWSMarketFallbackError(message)) {
+            marketFallbackCandidates.push(serverType);
           }
         }
       }
-      if (config.capacityMarket === "spot" && config.capacityFallback.startsWith("on-demand")) {
-        for (const serverType of candidates) {
+      // Retry only candidates whose Spot failure can be recovered by On-Demand.
+      if (marketFallbackCandidates.length > 0 && config.capacityFallback.startsWith("on-demand")) {
+        for (const serverType of marketFallbackCandidates) {
           // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
           const preflight = await this.quotaPreflightAttempt(serverType, "on-demand", quotaCache);
           if (preflight) {
@@ -3455,6 +3464,7 @@ export function awsProvisioningErrorCategory(message: string): string {
   }
   if (
     message.includes("InsufficientInstanceCapacity") ||
+    message.includes("UnfulfillableCapacity") ||
     isAWSInsufficientCapacityOnHostError(message)
   ) {
     return "capacity";
@@ -3478,6 +3488,19 @@ export function awsProvisioningErrorCategory(message: string): string {
     return "capacity";
   }
   return "";
+}
+
+export function isAWSMarketFallbackError(message: string): boolean {
+  if (
+    message.includes("InsufficientInstanceCapacity") ||
+    message.includes("UnfulfillableCapacity") ||
+    message.includes("MaxSpotInstanceCountExceeded") ||
+    message.includes("VcpuLimitExceeded")
+  ) {
+    return true;
+  }
+  const category = awsProvisioningErrorCategory(message);
+  return /\bspot\b/i.test(message) && (category === "unsupported" || category === "policy");
 }
 
 function isOpaqueAWSHTTP400XMLOnlyError(message: string): boolean {
