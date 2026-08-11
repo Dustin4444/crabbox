@@ -35,7 +35,12 @@ function git(root, ...args) {
   }).trim();
 }
 
-function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
+function prepareFixture({
+  publishable = true,
+  dynamicRunName = true,
+  splitCommit = false,
+  divergentWorkflow = false,
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-publish-test-"));
   const checkout = path.join(root, "repo");
   const api = path.join(root, "api");
@@ -83,6 +88,34 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
     "test: protected publication fixture",
   );
   const verifierCommit = git(checkout, "rev-parse", "HEAD");
+  let workflowCommit = verifierCommit;
+  if (splitCommit) {
+    fs.writeFileSync(path.join(checkout, "workflow-tooling.txt"), "protected workflow tooling\n");
+    git(checkout, "add", "workflow-tooling.txt");
+    git(
+      checkout,
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-m",
+      "test: advance protected workflow tooling",
+    );
+    workflowCommit = git(checkout, "rev-parse", "HEAD");
+  } else if (divergentWorkflow) {
+    const tree = git(checkout, "write-tree");
+    workflowCommit = git(
+      checkout,
+      "-c",
+      "commit.gpgsign=false",
+      "commit-tree",
+      tree,
+      "-p",
+      sourceCommit,
+      "-m",
+      "test: divergent workflow tooling",
+    );
+    git(checkout, "switch", "--detach", workflowCommit);
+  }
 
   const version = tag.slice(1);
   const assetNames = execFileSync(
@@ -143,7 +176,12 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
   writeJson(path.join(api, "branch.json"), {
     name: "main",
     protected: true,
-    commit: { sha: verifierCommit },
+    commit: { sha: workflowCommit },
+  });
+  writeJson(path.join(api, "branch-wrong.json"), {
+    name: "main",
+    protected: true,
+    commit: { sha: "f".repeat(40) },
   });
   writeJson(path.join(api, "ruleset-list.json"), [
     { id: 701 },
@@ -442,7 +480,7 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
     verification: { verified: true, reason: "valid" },
   });
   const workflowUrl = `https://api.github.com/repos/${repository}/actions/workflows/${workflowId}`;
-  writeJson(path.join(api, "run.json"), {
+  const runRecord = {
     id: runId,
     name: dynamicRunName
       ? `Verify draft ${releaseId} for ${tag} at ${verifierCommit}`
@@ -455,13 +493,19 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
     status: "completed",
     conclusion: "success",
     head_branch: "main",
-    head_sha: verifierCommit,
+    head_sha: workflowCommit,
     repository: { full_name: repository },
     head_repository: { full_name: repository },
-    head_commit: { id: verifierCommit },
+    head_commit: { id: workflowCommit },
     run_attempt: 1,
     created_at: "2026-07-10T10:05:00Z",
     run_started_at: "2026-07-10T10:05:01Z",
+  };
+  writeJson(path.join(api, "run.json"), runRecord);
+  writeJson(path.join(api, "run-wrong-head.json"), {
+    ...runRecord,
+    head_sha: verifierCommit,
+    head_commit: { id: verifierCommit },
   });
   writeJson(path.join(api, "workflow.json"), {
     id: workflowId,
@@ -489,11 +533,12 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
       expired: false,
       created_at: "2026-07-10T10:04:00Z",
       updated_at: "2026-07-10T10:04:00Z",
-      workflow_run: { id: runId, head_branch: "main", head_sha: verifierCommit },
+      workflow_run: { id: runId, head_branch: "main", head_sha: workflowCommit },
     },
   ];
   let driftArmZipSize = 0;
   let metadataDriftArmZipSize = 0;
+  let workflowDriftArmZipSize = 0;
   for (const [arch, artifactId] of [
     ["arm64", 501],
     ["x86_64", 502],
@@ -507,6 +552,7 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
       tagObject,
       sourceCommit,
       verifierCommit,
+      ...(workflowCommit === verifierCommit ? {} : { workflowCommit }),
       verifierArch: arch,
       title: release.name,
       targetCommitish: release.target_commitish,
@@ -556,6 +602,24 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
         path.join(metadataDriftDirectory, "verified-assets.json"),
       ]);
       metadataDriftArmZipSize = fs.statSync(metadataDriftZip).size;
+
+      const workflowDriftProof = structuredClone(proof);
+      workflowDriftProof.workflowCommit = "d".repeat(40);
+      delete workflowDriftProof.manifestSha256;
+      workflowDriftProof.manifestSha256 = sha256(
+        Buffer.from(JSON.stringify(workflowDriftProof), "utf8"),
+      );
+      const workflowDriftDirectory = path.join(root, "proof-arm64-workflow-drift");
+      fs.mkdirSync(workflowDriftDirectory);
+      writeJson(path.join(workflowDriftDirectory, "verified-assets.json"), workflowDriftProof);
+      const workflowDriftZip = path.join(api, "proof-arm64-workflow-drift.zip");
+      execFileSync("zip", [
+        "-q",
+        "-j",
+        workflowDriftZip,
+        path.join(workflowDriftDirectory, "verified-assets.json"),
+      ]);
+      workflowDriftArmZipSize = fs.statSync(workflowDriftZip).size;
     }
     artifactRows.push({
       id: artifactId,
@@ -568,7 +632,7 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
       workflow_run: {
         id: runId,
         head_branch: "main",
-        head_sha: verifierCommit,
+        head_sha: workflowCommit,
       },
     });
   }
@@ -590,6 +654,13 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
   writeJson(path.join(api, "artifacts-proof-metadata-drift.json"), {
     total_count: 3,
     artifacts: proofMetadataDriftArtifacts,
+  });
+  const proofWorkflowDriftArtifacts = structuredClone(artifactRows);
+  proofWorkflowDriftArtifacts[1].size_in_bytes = workflowDriftArmZipSize;
+  proofWorkflowDriftArtifacts[1].digest = `sha256:${sha256(fs.readFileSync(path.join(api, "proof-arm64-workflow-drift.zip")))}`;
+  writeJson(path.join(api, "artifacts-proof-workflow-drift.json"), {
+    total_count: 3,
+    artifacts: proofWorkflowDriftArtifacts,
   });
 
   const gh = path.join(bin, "gh");
@@ -624,7 +695,9 @@ if (method === "PATCH") {
 }
 if (method !== "GET") process.exit(93);
 if (endpoint === "repos/${repository}") outputFile("repository.json");
-else if (endpoint === "repos/${repository}/branches/main") outputFile("branch.json");
+else if (endpoint === "repos/${repository}/branches/main") {
+  outputFile(process.env.MOCK_MODE === "current-main-drift" ? "branch-wrong.json" : "branch.json");
+}
 else if (endpoint === "repos/${repository}/rulesets?per_page=100") {
   outputFile(
     [
@@ -709,7 +782,9 @@ else if (endpoint === "repos/${repository}/rulesets/705") {
 }
 else if (endpoint === "repos/${repository}/git/ref/tags/${tag}") outputFile("tag-ref.json");
 else if (endpoint === "repos/${repository}/git/tags/${tagObject}") outputFile("tag-object.json");
-else if (endpoint === "repos/${repository}/actions/runs/${runId}") outputFile("run.json");
+else if (endpoint === "repos/${repository}/actions/runs/${runId}") {
+  outputFile(process.env.MOCK_MODE === "run-head-drift" ? "run-wrong-head.json" : "run.json");
+}
 else if (endpoint === "repos/${repository}/immutable-releases") {
   outputJson({
     enabled: process.env.MOCK_MODE !== "immutable-disabled",
@@ -724,7 +799,9 @@ else if (endpoint === "repos/${repository}/actions/runs/${runId}/artifacts?per_p
       : process.env.MOCK_MODE === "proof-drift"
         ? "artifacts-proof-drift.json"
         : process.env.MOCK_MODE === "proof-metadata-drift"
-          ? "artifacts-proof-metadata-drift.json"
+        ? "artifacts-proof-metadata-drift.json"
+        : process.env.MOCK_MODE === "proof-workflow-drift"
+          ? "artifacts-proof-workflow-drift.json"
           : "artifacts.json",
   );
 } else if (endpoint === "repos/${repository}/actions/artifacts/501/zip") {
@@ -733,7 +810,9 @@ else if (endpoint === "repos/${repository}/actions/runs/${runId}/artifacts?per_p
       ? "proof-arm64-drift.zip"
       : process.env.MOCK_MODE === "proof-metadata-drift"
         ? "proof-arm64-metadata-drift.zip"
-        : "proof-arm64.zip",
+        : process.env.MOCK_MODE === "proof-workflow-drift"
+          ? "proof-arm64-workflow-drift.zip"
+          : "proof-arm64.zip",
   );
 }
 else if (endpoint === "repos/${repository}/actions/artifacts/502/zip") outputFile("proof-x86_64.zip");
@@ -763,7 +842,14 @@ else if (endpoint === "repos/${repository}/releases/${releaseId}") {
   fs.chmodSync(gh, 0o755);
 
   const log = path.join(root, "gh.log");
-  const run = (mode, { serializationConfirmed = true } = {}) => {
+  const run = (
+    mode,
+    {
+      serializationConfirmed = true,
+      suppliedWorkflowCommit = workflowCommit,
+      explicitWorkflow = splitCommit || divergentWorkflow,
+    } = {},
+  ) => {
     const childEnv = {
       ...process.env,
       PATH: `${bin}:${process.env.PATH}`,
@@ -776,18 +862,19 @@ else if (endpoint === "repos/${repository}/releases/${releaseId}") {
     } else {
       delete childEnv.CRABBOX_RELEASE_SERIALIZATION_CONFIRMED;
     }
+    const args = [
+      path.join(checkout, "scripts", "publish-release.sh"),
+      String(releaseId),
+      tag,
+      tagObject,
+      sourceCommit,
+      verifierCommit,
+    ];
+    if (explicitWorkflow) args.push(suppliedWorkflowCommit);
+    args.push(String(runId), tag);
     return spawnSync(
       "bash",
-      [
-        path.join(checkout, "scripts", "publish-release.sh"),
-        String(releaseId),
-        tag,
-        tagObject,
-        sourceCommit,
-        verifierCommit,
-        String(runId),
-        tag,
-      ],
+      args,
       {
         cwd: checkout,
         env: childEnv,
@@ -804,7 +891,7 @@ else if (endpoint === "repos/${repository}/releases/${releaseId}") {
       .filter(Boolean)
       .filter((line) => !line.startsWith("GET\t"));
   };
-  return { checkout, root, run, mutations };
+  return { checkout, root, run, mutations, verifierCommit, workflowCommit };
 }
 
 function withFixture(options, callback) {
@@ -848,6 +935,15 @@ test("tampered native proof draft metadata fails before any mutation", () => {
     const result = run("proof-metadata-drift");
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /proof draft record differs from current release/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("tampered native proof workflow commit fails before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("proof-workflow-drift");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /proof does not bind/);
     assert.deepEqual(mutations(), []);
   });
 });
@@ -1079,7 +1175,7 @@ test("local HEAD drift fails before any network call", () => {
     git(checkout, "-c", "commit.gpgsign=false", "commit", "-m", "test: move local head");
     const result = run("success");
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /local HEAD must exactly equal protected verifier commit/);
+    assert.match(result.stderr, /local HEAD must exactly equal protected workflow commit/);
     assert.deepEqual(mutations(), []);
   });
 });
@@ -1108,6 +1204,54 @@ test("exact protected proof performs one draft-state PATCH and no other mutation
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.match(result.stdout, /Published exact verified release v0\.37\.0/);
     assert.deepEqual(mutations(), [`PATCH\trepos/${repository}/releases/${releaseId}`]);
+  });
+});
+
+test("split verifier and workflow commits permit publication from exact protected main", () => {
+  withFixture({ splitCommit: true }, ({ run, mutations, verifierCommit, workflowCommit }) => {
+    assert.notEqual(workflowCommit, verifierCommit);
+    const result = run("success");
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.deepEqual(mutations(), [`PATCH\trepos/${repository}/releases/${releaseId}`]);
+  });
+});
+
+test("mismatched supplied workflow commit fails before any network call", () => {
+  withFixture({ splitCommit: true }, ({ run, mutations, verifierCommit }) => {
+    const result = run("success", {
+      explicitWorkflow: true,
+      suppliedWorkflowCommit: verifierCommit,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /local HEAD must exactly equal protected workflow commit/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("selected verifier run with a different workflow head fails before publication", () => {
+  withFixture({ splitCommit: true }, ({ run, mutations }) => {
+    const result = run("run-head-drift");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /protected workflow identity/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("divergent workflow commit fails before any network call", () => {
+  withFixture({ divergentWorkflow: true }, ({ run, mutations }) => {
+    const result = run("success");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /provenance verifier commit is not an ancestor/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("workflow commit that is not current protected main fails before publication", () => {
+  withFixture({ splitCommit: true }, ({ run, mutations }) => {
+    const result = run("current-main-drift");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /protected default-branch head does not match the workflow commit/);
+    assert.deepEqual(mutations(), []);
   });
 });
 
