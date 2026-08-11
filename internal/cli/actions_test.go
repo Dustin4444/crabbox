@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -542,6 +544,50 @@ func TestSelectLocalHydrateJobAllowsSingleJobWorkflow(t *testing.T) {
 	}
 	if name != "setup" || job.Name != "Setup" {
 		t.Fatalf("selected job %q %#v, want setup", name, job)
+	}
+}
+
+func TestSyncLocalActionsWorkspaceUsesGitCoherenceFinalizer(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	tools := t.TempDir()
+	logPath := filepath.Join(tools, "ssh.log")
+	sshScript := `#!/bin/sh
+last=
+for arg do last="$arg"; done
+printf '%s\n' "$last" >> "$CRABBOX_ACTIONS_SSH_LOG"
+cat >/dev/null
+`
+	if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(sshScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "rsync"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_ACTIONS_SSH_LOG", logPath)
+
+	cfg := baseConfig()
+	cfg.Sync.Fingerprint = true
+	cfg.Sync.BaseRef = "main"
+	repo := Repo{Root: f.source, Name: "repo", RemoteURL: f.origin, Head: f.b, BaseRef: "main"}
+	var stderr bytes.Buffer
+	app := App{Stdout: io.Discard, Stderr: &stderr}
+	err := app.syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
+		User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux,
+	}, "/work/repo")
+	if err != nil {
+		t.Fatalf("sync local Actions workspace: %v\n%s", err, stderr.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	plan := f.plan(t, f.b)
+	for _, want := range []string{plan.RemoteURL, plan.Target, plan.Tree, "refs/crabbox/sync-", "read-tree --reset", "update-ref --no-deref HEAD"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("Actions sync missing coherence contract %q:\n%s", want, log)
+		}
 	}
 }
 
@@ -1447,7 +1493,6 @@ func TestLocalActionsRemoteCommandsQuoteLeasePaths(t *testing.T) {
 		want string
 	}{
 		"install":    {remoteInstallLocalActionsHydrateScript(leaseID), "\"$HOME\"/" + shellQuote(actionsHydrationLocalScriptPath(leaseID))},
-		"start":      {remoteStartLocalActionsHydrateScript(leaseID), "\"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID))},
 		"foreground": {remoteRunLocalActionsHydrateScriptForeground(leaseID, time.Minute), "\"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID))},
 		"status":     {remoteLocalActionsHydrateStatus(leaseID, "123"), "\"$HOME\"/" + shellQuote(actionsHydrationLocalExitPath(leaseID))},
 	} {
@@ -1457,6 +1502,63 @@ func TestLocalActionsRemoteCommandsQuoteLeasePaths(t *testing.T) {
 		if !strings.Contains(tc.got, tc.want) {
 			t.Fatalf("%s command missing quoted path %q:\n%s", name, tc.want, tc.got)
 		}
+	}
+	payload := remoteLocalActionsHydrateBackgroundPayload(leaseID)
+	wantLog := "\"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID))
+	if !strings.Contains(payload, wantLog) || !strings.Contains(remoteStartLocalActionsHydrateScript(leaseID), shellQuote(payload)) {
+		t.Fatalf("background hydrate command did not preserve nested path quoting:\npayload=%s\nstart=%s", payload, remoteStartLocalActionsHydrateScript(leaseID))
+	}
+}
+
+func TestActionsHydrationOwnerMonitorGeneration(t *testing.T) {
+	leaseID := "cbx_123"
+	ownerA := &workspaceOwner{key: strings.Repeat("a", 64), token: strings.Repeat("b", 64)}
+	ownerB := &workspaceOwner{key: ownerA.key, token: strings.Repeat("c", 64)}
+	markerA := actionsHydrationOwnerMonitorStopPath(leaseID, ownerA.token)
+	markerB := actionsHydrationOwnerMonitorStopPath(leaseID, ownerB.token)
+	if markerA == markerB {
+		t.Fatal("Actions owner monitor stop markers must be generation-specific")
+	}
+
+	posix := remoteActionsHydrationMonitorForTarget(SSHTarget{TargetOS: targetLinux}, leaseID, 90*time.Second, ownerB)
+	for _, want := range []string{actionsHydrationStatePath(leaseID), markerB, ownerB.key + ".owner", "state_expiry", "systemctl stop crabbox-actions-runner.service", "[R]unner.Worker", "exit 125"} {
+		if !strings.Contains(posix, want) {
+			t.Fatalf("POSIX owner monitor missing %q:\n%s", want, posix)
+		}
+	}
+	if strings.Contains(posix, markerA) {
+		t.Fatalf("POSIX generation B monitor watches generation A cancellation:\n%s", posix)
+	}
+	if cancelA := remoteCancelActionsHydrationMonitorForTarget(SSHTarget{TargetOS: targetLinux}, leaseID, ownerA); !strings.Contains(cancelA, markerA) || strings.Contains(cancelA, markerB) {
+		t.Fatalf("POSIX generation A cancellation is not isolated:\n%s", cancelA)
+	}
+	if prepareB := remotePrepareActionsHydrationMonitorForTarget(SSHTarget{TargetOS: targetLinux}, leaseID, ownerB); !strings.Contains(prepareB, markerB) || strings.Contains(prepareB, markerA) {
+		t.Fatalf("POSIX generation B preparation is not isolated:\n%s", prepareB)
+	}
+
+	windowsTarget := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	windows := decodePowerShellCommand(t, remoteActionsHydrationMonitorForTarget(windowsTarget, leaseID, 90*time.Second, ownerB))
+	for _, want := range []string{windowsActionsHydrationPath(actionsHydrationStatePath(leaseID)), windowsActionsHydrationPath(markerB), ownerB.key + ".owner", "Stop-CrabboxRunner", "Runner.Worker", "ToUnixTimeSeconds()", "exit 125"} {
+		if !strings.Contains(windows, want) {
+			t.Fatalf("Windows owner monitor missing %q:\n%s", want, windows)
+		}
+	}
+	if strings.Contains(windows, windowsActionsHydrationPath(markerA)) {
+		t.Fatalf("Windows generation B monitor watches generation A cancellation:\n%s", windows)
+	}
+	windowsCancelA := decodePowerShellCommand(t, remoteCancelActionsHydrationMonitorForTarget(windowsTarget, leaseID, ownerA))
+	if !strings.Contains(windowsCancelA, windowsActionsHydrationPath(markerA)) || strings.Contains(windowsCancelA, windowsActionsHydrationPath(markerB)) {
+		t.Fatalf("Windows generation A cancellation is not isolated:\n%s", windowsCancelA)
+	}
+	windowsPrepareB := decodePowerShellCommand(t, remotePrepareActionsHydrationMonitorForTarget(windowsTarget, leaseID, ownerB))
+	if !strings.Contains(windowsPrepareB, windowsActionsHydrationPath(markerB)) || strings.Contains(windowsPrepareB, windowsActionsHydrationPath(markerA)) {
+		t.Fatalf("Windows generation B preparation is not isolated:\n%s", windowsPrepareB)
+	}
+	if clear := remoteClearActionsHydrationState(leaseID); strings.Contains(clear, "owner-monitor-stop") {
+		t.Fatalf("broad POSIX hydration cleanup removed generation-specific monitor state:\n%s", clear)
+	}
+	if clear := decodePowerShellCommand(t, remoteClearActionsHydrationStateForTarget(windowsTarget, leaseID)); strings.Contains(clear, "owner-monitor-stop") {
+		t.Fatalf("broad Windows hydration cleanup removed generation-specific monitor state:\n%s", clear)
 	}
 }
 
