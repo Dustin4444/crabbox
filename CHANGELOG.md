@@ -1,21 +1,21 @@
 # Changelog
 
-## 0.41.6 - Unreleased
+## 0.41.6 - 2026-08-13
 
 ### Fixed
 
-- Kept the exact updated lease-claim snapshot through one-shot run registration and replacement retries so task-owned local containers can clean up without weakening concurrent replacement fences. Thanks @coygeek.
-- Made GitHub team authorization fail closed on malformed selectors, enforced same-org team scope, and invalidated membership and device proofs when the normalized policy changes. Thanks @dwin-gharibi.
+- Restricted sensitive generated local files, including managed attestation keys and signed-URL artifact outputs, to the current OS user on POSIX and Windows. Thanks @dwin-gharibi.
+- Made POSIX workspace ownership independent of the remote account's login shell by transporting owner scripts through a private `/bin/sh` launcher, fixing static macOS sync under zsh, Bash, and Fish. Thanks @osouthgate and @hosmelq.
+- Derived implicit Static SSH macOS work roots from the resolved SSH user while preserving explicit roots and EC2 Mac defaults. Thanks @osouthgate.
+- Routed implicit `status` and `inspect` lease identifiers through the provider recorded in local claims before initializing the configured provider, while preserving explicit-provider precedence and missing-claim fallback. Thanks @coygeek.
+- Reported explicit stdout and stderr capture paths and byte counts in emitted run proofs without reading or embedding captured content. Thanks @coygeek.
+- Kept repeated repository sync and finalization idempotent across shallow and complete Git workspaces while preserving command exits and clearing witnessed ownership state. Thanks @osouthgate and @hosmelq.
+- Made `cache stats --json` emit an empty array for empty inventories while live smoke accepts legacy null and object reports but rejects other scalar shapes before workloads. Thanks @excelsier.
 - Rejected invalid or overlong coordinator-requested lease slugs before provisioning while preserving exact fixed-ID replays created under the legacy length behavior. Thanks @dwin-gharibi.
 - Bound valid caller-declared artifact SHA-256 digests into signed broker upload grants, rejected malformed nonblank digests instead of silently disabling integrity checks, and made object storage reject mismatching payloads. Thanks @dwin-gharibi.
+- Made GitHub team authorization fail closed on malformed selectors, enforced same-org team scope, and invalidated membership and device proofs when the normalized policy changes. Thanks @dwin-gharibi.
 - Preserved pinned AWS SSH ingress and dynamic CIDRs from the other IP family when broker heartbeats refresh access, while replacing obsolete same-family dynamic sources. Thanks @jalehman.
-- Made `cache stats --json` emit an empty array for empty inventories while live smoke accepts legacy null and object reports but rejects other scalar shapes before workloads. Thanks @excelsier.
-- Derived implicit Static SSH macOS work roots from the resolved SSH user while preserving explicit roots and EC2 Mac defaults. Thanks @osouthgate.
-- Reported explicit stdout and stderr capture paths and byte counts in emitted run proofs without reading or embedding captured content. Thanks @coygeek.
-- Routed implicit `status` and `inspect` lease identifiers through the provider recorded in local claims before initializing the configured provider, while preserving explicit-provider precedence and missing-claim fallback. Thanks @coygeek.
-- Made POSIX workspace ownership independent of the remote account's login shell by transporting owner scripts through a private `/bin/sh` launcher, fixing static macOS sync under zsh, Bash, and Fish. Thanks @osouthgate and @hosmelq.
-- Restricted sensitive generated local files, including managed attestation keys and signed-URL artifact outputs, to the current OS user on POSIX and Windows. Thanks @dwin-gharibi.
-- Kept repeated repository sync and finalization idempotent across shallow and complete Git workspaces while preserving command exits and clearing witnessed ownership state. Thanks @osouthgate and @hosmelq.
+- Kept the exact updated lease-claim snapshot through one-shot run registration and replacement retries so task-owned local containers can clean up without weakening concurrent replacement fences. Thanks @coygeek.
 
 ## 0.41.5 - 2026-08-12
 
