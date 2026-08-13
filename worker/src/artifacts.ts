@@ -186,7 +186,7 @@ function normalizeArtifactFiles(files: ArtifactUploadFile[]): Required<ArtifactU
       name,
       size,
       contentType: normalizeContentType(file.contentType),
-      sha256: normalizeHash(file.sha256),
+      sha256: normalizeHash(file.sha256, name),
     };
   });
   if (totalSize > maxArtifactBatchBytes) {
@@ -208,9 +208,14 @@ function normalizeContentType(value: string | undefined): string {
   return trimmed(value).slice(0, 200);
 }
 
-function normalizeHash(value: string | undefined): string {
-  const hash = trimmed(value).toLowerCase();
-  return /^[a-f0-9]{64}$/.test(hash) ? hash : "";
+function normalizeHash(value: string | undefined, name: string): string {
+  if (value === undefined || (typeof value === "string" && !value.trim())) {
+    return "";
+  }
+  if (typeof value !== "string" || !/^[a-fA-F0-9]{64}$/.test(value)) {
+    throw new Error(`invalid artifact sha256 for ${name}`);
+  }
+  return value.toLowerCase();
 }
 
 function artifactPrefix(
@@ -263,8 +268,20 @@ function artifactObjectKey(prefix: string, name: string): string {
 function artifactUploadHeaders(file: Required<ArtifactUploadFile>): Record<string, string> {
   return {
     ...(file.contentType ? { "content-type": file.contentType } : {}),
+    // Signed alongside content-length so the store rejects a body that does not match the
+    // declared digest. Without this the caller-supplied sha256 would assure nothing.
+    ...(file.sha256 ? { "x-amz-checksum-sha256": base64FromHex(file.sha256) } : {}),
     "content-length": String(file.size),
   };
+}
+
+/** normalizeHash guarantees 64 lowercase hex characters, so this always yields 32 bytes. */
+function base64FromHex(value: string): string {
+  let binary = "";
+  for (let index = 0; index < value.length; index += 2) {
+    binary += String.fromCharCode(Number.parseInt(value.slice(index, index + 2), 16));
+  }
+  return btoa(binary);
 }
 
 async function artifactReadURL(config: ArtifactConfig, key: string): Promise<string> {
