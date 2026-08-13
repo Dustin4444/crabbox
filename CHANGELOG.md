@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Rejected native Jujutsu workspaces before Git-manifest sync can fall through to an outer checkout, while preserving colocated Git workspaces and `--no-sync`. Thanks @atimmer.
 - Redacted compound environment assignments, cookie and security-token headers, and camel-case API-token fields from client-visible coordinator diagnostics while preserving surrounding operational context. Thanks @dwin-gharibi.
 
 ## 0.41.6 - 2026-08-13

@@ -732,6 +732,36 @@ func TestRunNonGitWorkdirFailsBeforeAcquire(t *testing.T) {
 	}
 }
 
+func TestRunNativeJujutsuFailsBeforeAcquire(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	makeNativeJujutsuWorkspace(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	acquireCalls := 0
+	runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
+	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
+		t.Fatalf("error=%v, want exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if acquireCalls != 0 {
+		t.Fatalf("Acquire called %d time(s) before native Jujutsu failure", acquireCalls)
+	}
+	for _, want := range []string{dir, "native Jujutsu workspace", "Git-manifest-based", "wrong revision", "colocated Git workspace", "jj git init --git-repo=.", "--no-sync"} {
+		if !strings.Contains(exitErr.Message, want) {
+			t.Fatalf("message missing %q: %q", want, exitErr.Message)
+		}
+	}
+}
+
 func TestRunNonGitWorkdirFailsBeforeReadyPoolBorrow(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
@@ -761,6 +791,40 @@ func TestRunNonGitWorkdirFailsBeforeReadyPoolBorrow(t *testing.T) {
 	select {
 	case request := <-requests:
 		t.Fatalf("ready-pool request occurred before local manifest failure: %s", request)
+	default:
+	}
+}
+
+func TestRunNativeJujutsuFailsBeforeReadyPoolBorrow(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	makeNativeJujutsuWorkspace(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	requests := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Method + " " + r.URL.Path
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-ready-pool-preflight-test",
+		"--pool", "shared-linux",
+		"--pool-return", "drain",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 6 || !strings.Contains(exitErr.Message, "native Jujutsu workspace") {
+		t.Fatalf("error=%v, want native Jujutsu exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	select {
+	case request := <-requests:
+		t.Fatalf("ready-pool request occurred before native Jujutsu failure: %s", request)
 	default:
 	}
 }
@@ -985,6 +1049,58 @@ func TestRunNonGitWorkdirFailsBeforeExistingLeaseResolveAndPrepare(t *testing.T)
 	}
 	if len(runPrepareTestResolveRequests) != 0 {
 		t.Fatalf("Resolve/Prepare called before local manifest failure: %#v", runPrepareTestResolveRequests)
+	}
+}
+
+func TestRunNativeJujutsuFailsBeforeExistingLeaseResolveAndPrepare(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	makeNativeJujutsuWorkspace(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	runPrepareTestResolveRequests = nil
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-prepare-test",
+		"--id", "cbx_existing",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 6 || !strings.Contains(exitErr.Message, "native Jujutsu workspace") {
+		t.Fatalf("error=%v, want native Jujutsu exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if len(runPrepareTestResolveRequests) != 0 {
+		t.Fatalf("Resolve/Prepare called before native Jujutsu failure: %#v", runPrepareTestResolveRequests)
+	}
+}
+
+func TestRunNativeJujutsuNoSyncReachesBackend(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	makeNativeJujutsuWorkspace(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	runPrepareTestResolveRequests = nil
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-prepare-test",
+		"--id", "cbx_existing",
+		"--no-sync",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 9 || !strings.Contains(exitErr.Message, "resolve captured") {
+		t.Fatalf("run error=%v, want backend resolve proof\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(exitErr.Message, "native Jujutsu workspace") {
+		t.Fatalf("--no-sync triggered native Jujutsu guard: %q", exitErr.Message)
+	}
+	if len(runPrepareTestResolveRequests) != 1 || !runPrepareTestResolveRequests[0].Prepare {
+		t.Fatalf("--no-sync did not reach backend Resolve/Prepare: %#v", runPrepareTestResolveRequests)
 	}
 }
 

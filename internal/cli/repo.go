@@ -25,6 +25,60 @@ type Repo struct {
 	BaseRef   string
 }
 
+type repositoryBoundaryKind uint8
+
+const (
+	repositoryBoundaryGit repositoryBoundaryKind = iota + 1
+	repositoryBoundaryNativeJujutsu
+)
+
+type repositoryBoundary struct {
+	root string
+	kind repositoryBoundaryKind
+}
+
+// nearestRepositoryBoundary keeps repository ownership tied to the closest
+// workspace marker. In particular, Git must not discover an outer checkout
+// through a native Jujutsu workspace nested inside it.
+func nearestRepositoryBoundary(start string) (repositoryBoundary, bool, error) {
+	current, err := filepath.Abs(start)
+	if err != nil {
+		return repositoryBoundary{}, false, err
+	}
+	for {
+		hasGit, err := repositoryMarkerExists(filepath.Join(current, ".git"))
+		if err != nil {
+			return repositoryBoundary{}, false, err
+		}
+		hasJujutsu, err := repositoryMarkerExists(filepath.Join(current, ".jj"))
+		if err != nil {
+			return repositoryBoundary{}, false, err
+		}
+		if hasGit {
+			return repositoryBoundary{root: current, kind: repositoryBoundaryGit}, true, nil
+		}
+		if hasJujutsu {
+			return repositoryBoundary{root: current, kind: repositoryBoundaryNativeJujutsu}, true, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return repositoryBoundary{}, false, nil
+		}
+		current = parent
+	}
+}
+
+func repositoryMarkerExists(marker string) (bool, error) {
+	_, err := os.Lstat(marker)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspect repository marker %s: %w", marker, err)
+}
+
 // Repository inspection never needs provider or desktop credentials. Keep its
 // environment intentionally small because discovery runs before the complete
 // project configuration (and therefore its secret denylist) is known.
@@ -241,14 +295,21 @@ func nulPathSet(out []byte) map[string]struct{} {
 }
 
 func findRepo() (Repo, error) {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	cmd.Env = repositoryGitEnvironment()
-	out, err := cmd.Output()
+	wd, err := os.Getwd()
 	if err != nil {
-		wd, _ := os.Getwd()
+		return Repo{}, err
+	}
+	boundary, found, err := nearestRepositoryBoundary(wd)
+	if err != nil {
+		return Repo{}, err
+	}
+	if !found {
 		return Repo{Root: wd, Name: filepath.Base(wd)}, nil
 	}
-	root := strings.TrimSpace(string(out))
+	if boundary.kind == repositoryBoundaryNativeJujutsu {
+		return Repo{Root: boundary.root, Name: filepath.Base(boundary.root)}, nil
+	}
+	root := boundary.root
 	remoteURL := gitOutput(root, "remote", "get-url", "origin")
 	return Repo{
 		Root:      root,
@@ -763,6 +824,13 @@ func isNotAGitRepoError(stderr string) bool {
 }
 
 func gitSyncFileList(root string) ([]byte, error) {
+	boundary, found, err := nearestRepositoryBoundary(root)
+	if err != nil {
+		return nil, err
+	}
+	if found && boundary.kind == repositoryBoundaryNativeJujutsu {
+		return nil, fmt.Errorf("%s is a native Jujutsu workspace without colocated Git metadata: Crabbox sync is Git-manifest-based, and native Jujutsu sync is not supported yet because it risks syncing the wrong revision; use a colocated Git workspace instead (for example, from an existing Git checkout, initialize Jujutsu with `jj git init --git-repo=.`; this does not convert the current native workspace in place), or pass --no-sync to run without syncing local files", boundary.root)
+	}
 	cmd := exec.Command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
 	cmd.Dir = root
 	cmd.Env = repositoryGitEnvironment()
