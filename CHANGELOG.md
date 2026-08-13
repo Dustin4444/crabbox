@@ -15,6 +15,7 @@
 - Routed implicit `status` and `inspect` lease identifiers through the provider recorded in local claims before initializing the configured provider, while preserving explicit-provider precedence and missing-claim fallback. Thanks @coygeek.
 - Made POSIX workspace ownership independent of the remote account's login shell by transporting owner scripts through a private `/bin/sh` launcher, fixing static macOS sync under zsh, Bash, and Fish. Thanks @osouthgate and @hosmelq.
 - Restricted sensitive generated local files, including managed attestation keys and signed-URL artifact outputs, to the current OS user on POSIX and Windows. Thanks @dwin-gharibi.
+- Kept repeated repository sync and finalization idempotent across shallow and complete Git workspaces while preserving command exits and clearing witnessed ownership state.
 
 ## 0.41.5 - 2026-08-12
 
