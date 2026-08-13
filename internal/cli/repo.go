@@ -39,39 +39,46 @@ type repositoryBoundary struct {
 }
 
 // nearestRepositoryBoundary keeps repository ownership tied to the closest
-// workspace marker. In particular, Git must not discover an outer checkout
-// through a native Jujutsu workspace nested inside it.
-func nearestRepositoryBoundary(start string) (repositoryBoundary, bool, error) {
+// workspace marker before stop. In particular, Git must not discover an outer
+// checkout through a native Jujutsu workspace nested inside it.
+func nearestRepositoryBoundary(start, stop string) (repositoryBoundary, error) {
 	current, err := filepath.Abs(start)
 	if err != nil {
-		return repositoryBoundary{}, false, err
+		return repositoryBoundary{}, err
 	}
+	current = canonicalRepositoryPath(current)
 	start = current
+	if stop != "" {
+		stop = canonicalRepositoryPath(stop)
+	}
 	ceilings := gitDiscoveryCeilings()
 	for {
-		if current != start && repositoryPathSetContains(ceilings, current) {
-			return repositoryBoundary{}, false, nil
+		if stop != "" && sameCanonicalRepositoryPath(current, stop) {
+			return repositoryBoundary{}, nil
+		}
+		if len(ceilings) > 0 && !sameCanonicalRepositoryPath(current, start) && canonicalRepositoryPathSetContains(ceilings, current) {
+			return repositoryBoundary{}, nil
 		}
 		hasGit, err := repositoryMarkerExists(filepath.Join(current, ".git"))
 		if err != nil {
-			return repositoryBoundary{}, false, err
+			return repositoryBoundary{}, err
 		}
 		hasJujutsu, err := repositoryMarkerExists(filepath.Join(current, ".jj"))
 		if err != nil {
-			return repositoryBoundary{}, false, err
+			return repositoryBoundary{}, err
 		}
 		if hasGit {
 			if hasJujutsu && !gitBoundaryIsValid(current) {
-				return repositoryBoundary{root: current, kind: repositoryBoundaryNativeJujutsu}, true, nil
+				return repositoryBoundary{root: current, kind: repositoryBoundaryNativeJujutsu}, nil
 			}
-			return repositoryBoundary{root: current, kind: repositoryBoundaryGit}, true, nil
+			return repositoryBoundary{root: current, kind: repositoryBoundaryGit}, nil
 		}
 		if hasJujutsu {
-			return repositoryBoundary{root: current, kind: repositoryBoundaryNativeJujutsu}, true, nil
+			return repositoryBoundary{root: current, kind: repositoryBoundaryNativeJujutsu}, nil
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return repositoryBoundary{}, false, nil
+			return repositoryBoundary{}, nil
 		}
 		current = parent
 	}
@@ -86,16 +93,8 @@ func gitBoundaryIsValid(root string) bool {
 }
 
 func repositoryGitEnvironmentWithCeiling(ceiling string) []string {
-	env := repositoryGitEnvironment()
-	result := make([]string, 0, len(env)+1)
-	for _, entry := range env {
-		name, _, _ := strings.Cut(entry, "=")
-		if strings.EqualFold(name, "GIT_CEILING_DIRECTORIES") {
-			continue
-		}
-		result = append(result, entry)
-	}
-	return append(result, "GIT_CEILING_DIRECTORIES="+ceiling)
+	env := childEnvironmentWithout(repositoryGitEnvironment(), "GIT_CEILING_DIRECTORIES")
+	return append(env, "GIT_CEILING_DIRECTORIES="+ceiling)
 }
 
 func explicitGitRepositoryRouting() bool {
@@ -114,10 +113,9 @@ func gitDiscoveryCeilings() []string {
 	return ceilings
 }
 
-func repositoryPathSetContains(paths []string, candidate string) bool {
-	candidate = canonicalRepositoryPath(candidate)
+func canonicalRepositoryPathSetContains(paths []string, candidate string) bool {
 	for _, path := range paths {
-		if sameRepositoryPath(path, candidate) {
+		if sameCanonicalRepositoryPath(path, candidate) {
 			return true
 		}
 	}
@@ -127,6 +125,10 @@ func repositoryPathSetContains(paths []string, candidate string) bool {
 func sameRepositoryPath(left, right string) bool {
 	left = canonicalRepositoryPath(left)
 	right = canonicalRepositoryPath(right)
+	return sameCanonicalRepositoryPath(left, right)
+}
+
+func sameCanonicalRepositoryPath(left, right string) bool {
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(left, right)
 	}
@@ -139,33 +141,6 @@ func canonicalRepositoryPath(value string) string {
 		return filepath.Clean(resolved)
 	}
 	return value
-}
-
-// closerNativeJujutsuRoot returns a native Jujutsu marker encountered before
-// Git's own discovered root. The Git root itself remains authoritative, which
-// preserves colocated Git/Jujutsu and linked-worktree behavior.
-func closerNativeJujutsuRoot(start, gitRoot string) (string, bool, error) {
-	current, err := filepath.Abs(start)
-	if err != nil {
-		return "", false, err
-	}
-	current = canonicalRepositoryPath(current)
-	gitRoot = canonicalRepositoryPath(gitRoot)
-	for !sameRepositoryPath(current, gitRoot) {
-		hasJujutsu, err := repositoryMarkerExists(filepath.Join(current, ".jj"))
-		if err != nil {
-			return "", false, err
-		}
-		if hasJujutsu {
-			return current, true, nil
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", false, nil
-		}
-		current = parent
-	}
-	return "", false, nil
 }
 
 func repositoryMarkerExists(marker string) (bool, error) {
@@ -406,11 +381,11 @@ func findRepo() (Repo, error) {
 	if err != nil {
 		wd, _ := os.Getwd()
 		if !explicitGitRepositoryRouting() {
-			boundary, found, boundaryErr := nearestRepositoryBoundary(wd)
+			boundary, boundaryErr := nearestRepositoryBoundary(wd, "")
 			if boundaryErr != nil {
 				return Repo{}, boundaryErr
 			}
-			if found && boundary.kind == repositoryBoundaryNativeJujutsu {
+			if boundary.kind == repositoryBoundaryNativeJujutsu {
 				return Repo{Root: boundary.root, Name: filepath.Base(boundary.root)}, nil
 			}
 		}
@@ -422,10 +397,10 @@ func findRepo() (Repo, error) {
 		if getwdErr != nil {
 			return Repo{}, getwdErr
 		}
-		if nativeRoot, found, boundaryErr := closerNativeJujutsuRoot(wd, root); boundaryErr != nil {
+		if boundary, boundaryErr := nearestRepositoryBoundary(wd, root); boundaryErr != nil {
 			return Repo{}, boundaryErr
-		} else if found {
-			return Repo{Root: nativeRoot, Name: filepath.Base(nativeRoot)}, nil
+		} else if boundary.kind == repositoryBoundaryNativeJujutsu {
+			return Repo{Root: boundary.root, Name: filepath.Base(boundary.root)}, nil
 		}
 	}
 	remoteURL := gitOutput(root, "remote", "get-url", "origin")
@@ -943,11 +918,11 @@ func isNotAGitRepoError(stderr string) bool {
 
 func gitSyncFileList(root string) ([]byte, error) {
 	if !explicitGitRepositoryRouting() {
-		boundary, found, err := nearestRepositoryBoundary(root)
+		boundary, err := nearestRepositoryBoundary(root, "")
 		if err != nil {
 			return nil, err
 		}
-		if found && boundary.kind == repositoryBoundaryNativeJujutsu {
+		if boundary.kind == repositoryBoundaryNativeJujutsu {
 			return nil, fmt.Errorf("%s is a native Jujutsu workspace without colocated Git metadata: Crabbox sync is Git-manifest-based, and native Jujutsu sync is not supported yet because it risks syncing the wrong revision; use a colocated Git workspace instead (for example, from an existing Git checkout, initialize Jujutsu with `jj git init --git-repo=.`; this does not convert the current native workspace in place), or pass --no-sync to run without syncing local files", boundary.root)
 		}
 	}

@@ -34,11 +34,7 @@ func TestFindRepoUsesOriginNameInsideLinkedWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	runGit(t, root, "init")
-	runGit(t, root, "config", "user.email", "test@example.com")
-	runGit(t, root, "config", "user.name", "Test")
-	writeFile(t, filepath.Join(root, "README.md"), "crabbox\n")
-	runGit(t, root, "add", "README.md")
-	runGit(t, root, "commit", "-m", "init")
+	runGit(t, root, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init")
 	runGit(t, root, "remote", "add", "origin", "https://github.com/openclaw/crabbox.git")
 
 	worktree := filepath.Join(parent, "fix-blacksmith-success-workflow-state")
@@ -89,9 +85,7 @@ func TestFindRepoNearestRepositoryMarkerWins(t *testing.T) {
 	t.Run("colocated Jujutsu and Git", func(t *testing.T) {
 		root := t.TempDir()
 		runGit(t, root, "init")
-		if err := os.Mkdir(filepath.Join(root, ".jj"), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		makeNativeJujutsuWorkspace(t, root)
 		workingDir := filepath.Join(root, "src")
 		if err := os.Mkdir(workingDir, 0o755); err != nil {
 			t.Fatal(err)
@@ -138,22 +132,16 @@ func TestNearestRepositoryBoundaryAcceptsGitFileMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	runGit(t, source, "init")
-	runGit(t, source, "config", "user.email", "test@example.com")
-	runGit(t, source, "config", "user.name", "Test")
-	writeFile(t, filepath.Join(source, "tracked.txt"), "tracked\n")
-	runGit(t, source, "add", "tracked.txt")
-	runGit(t, source, "commit", "-m", "init")
+	runGit(t, source, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init")
 	worktree := filepath.Join(parent, "worktree")
 	runGit(t, source, "worktree", "add", "--detach", worktree)
-	if err := os.Mkdir(filepath.Join(worktree, ".jj"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	boundary, found, err := nearestRepositoryBoundary(worktree)
+	makeNativeJujutsuWorkspace(t, worktree)
+	boundary, err := nearestRepositoryBoundary(worktree, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !found || boundary.kind != repositoryBoundaryGit || !sameRepositoryPath(boundary.root, worktree) {
-		t.Fatalf("boundary=%#v found=%v, want colocated Git root", boundary, found)
+	if boundary.kind != repositoryBoundaryGit || !sameRepositoryPath(boundary.root, worktree) {
+		t.Fatalf("boundary=%#v, want colocated Git root", boundary)
 	}
 }
 
@@ -827,9 +815,7 @@ func TestSyncManifestNativeJujutsuReturnsActionableError(t *testing.T) {
 func TestSyncManifestColocatedJujutsuUsesGitManifest(t *testing.T) {
 	root := t.TempDir()
 	runGit(t, root, "init")
-	if err := os.Mkdir(filepath.Join(root, ".jj"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	makeNativeJujutsuWorkspace(t, root)
 	writeFile(t, filepath.Join(root, "tracked.txt"), "tracked\n")
 	runGit(t, root, "add", "tracked.txt")
 
