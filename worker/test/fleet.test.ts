@@ -17148,16 +17148,145 @@ describe("fleet lease identity and idle", () => {
     });
 
     expect(refreshed?.network?.sshSourceCIDRs).toEqual(["0.0.0.0/0", "203.0.113.7/32"]);
+  });
 
-    const dynamic = testLease({
+  it.each([
+    {
+      name: "replaces dynamic IPv4 with incoming IPv4",
+      existing: ["198.51.100.7/32"],
+      incoming: ["203.0.113.8/32"],
+      expected: ["203.0.113.8/32"],
+    },
+    {
+      name: "retains dynamic IPv4 with incoming IPv6",
+      existing: ["198.51.100.7/32"],
+      incoming: ["2001:db8::8/128"],
+      expected: ["198.51.100.7/32", "2001:db8::8/128"],
+    },
+    {
+      name: "replaces dynamic IPv6 with incoming IPv6",
+      existing: ["2001:db8::7/128"],
+      incoming: ["2001:db8::8/128"],
+      expected: ["2001:db8::8/128"],
+    },
+    {
+      name: "retains dynamic IPv6 with incoming IPv4",
+      existing: ["2001:db8::7/128"],
+      incoming: ["203.0.113.8/32"],
+      expected: ["2001:db8::7/128", "203.0.113.8/32"],
+    },
+    {
+      name: "retains pinned CIDRs from both families",
+      existing: ["192.0.2.0/24", "2001:db8:1::/64", "198.51.100.7/32", "2001:db8::7/128"],
+      pinned: ["192.0.2.0/24", "2001:db8:1::/64"],
+      incoming: ["203.0.113.8/32", "2001:db8::8/128"],
+      expected: ["192.0.2.0/24", "2001:db8:1::/64", "203.0.113.8/32", "2001:db8::8/128"],
+    },
+    {
+      name: "retains multiple incoming CIDRs from one family",
+      existing: ["198.51.100.7/32", "2001:db8::7/128"],
+      incoming: ["203.0.113.8/32", "203.0.113.9/32"],
+      expected: ["2001:db8::7/128", "203.0.113.8/32", "203.0.113.9/32"],
+    },
+    {
+      name: "does not preserve invalid stored CIDRs",
+      existing: ["not-a-cidr", "198.51.100.7/32"],
+      incoming: ["2001:db8::8/128"],
+      expected: ["198.51.100.7/32", "2001:db8::8/128"],
+    },
+  ])("$name", async ({ existing, pinned = [], incoming, expected }) => {
+    const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+    vi.spyOn(provider, "reconcileLeaseAccess").mockResolvedValue();
+    const lease = testLease({
       provider: "aws",
-      network: { sshSourceCIDRs: ["198.51.100.7/32"], sshSourceCIDRsComplete: true },
+      network: {
+        sshSourceCIDRs: existing,
+        sshPinnedSourceCIDRs: pinned,
+        sshSourceCIDRsComplete: true,
+      },
     });
-    const refreshedDynamic = await provider.refreshLeaseAccess(dynamic, {
-      requestSourceCIDRs: ["203.0.113.8/32"],
-      activeLeases: [dynamic],
+
+    const refreshed = await provider.refreshLeaseAccess(lease, {
+      requestSourceCIDRs: incoming,
+      activeLeases: [lease],
     });
-    expect(refreshedDynamic?.network?.sshSourceCIDRs).toEqual(["203.0.113.8/32"]);
+
+    expect(refreshed?.network?.sshSourceCIDRs).toEqual(expected);
+  });
+
+  it("keeps IPv4 SSH ingress when an HTTP heartbeat arrives over IPv6", async () => {
+    const storage = new MemoryStorage();
+    const ingressRequests: Array<{ action: string; ipv4: string; ipv6: string }> = [];
+    // Exercise the EC2 query boundary against a group that already admits the SSH IPv4.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const fetchRequest = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await fetchRequest.clone().text());
+        const action = params.get("Action") ?? "";
+        ingressRequests.push({
+          action,
+          ipv4: params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "",
+          ipv6: params.get("IpPermissions.1.Ipv6Ranges.1.CidrIpv6") ?? "",
+        });
+        if (action === "DescribeSecurityGroups") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.7/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+        }
+        return ec2XMLResponse("<Response />");
+      }),
+    );
+    const env = {
+      AWS_ACCESS_KEY_ID: "test",
+      AWS_SECRET_ACCESS_KEY: "secret",
+    } as Env;
+    const fleet = testFleet(storage, { aws: new AWSProvider(env, "eu-west-1", storage) }, env);
+    // Match the active broker record to the managed group returned by the EC2 fixture.
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      provider: "aws",
+      owner: "alice@example.com",
+      org: "example-org",
+      region: "eu-west-1",
+      sshPort: "22",
+      sshFallbackPorts: [],
+      network: {
+        awsSecurityGroupID: "sg-shared",
+        sshSourceCIDRs: ["198.51.100.7/32"],
+        sshSourceCIDRsComplete: true,
+      },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+
+    // Drive the public heartbeat route so Cloudflare's IPv6 source reaches AWS reconciliation.
+    const heartbeat = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+        headers: {
+          "cf-connecting-ip": "2001:db8::8",
+          "x-crabbox-owner": lease.owner,
+          "x-crabbox-org": "example-org",
+        },
+        body: {},
+      }),
+    );
+
+    expect(heartbeat.status).toBe(200);
+    // The refresh may add IPv6 access, but it must not revoke the working SSH IPv4.
+    expect(
+      ingressRequests.filter(
+        (entry) => entry.action === "RevokeSecurityGroupIngress" && entry.ipv4 !== "0.0.0.0/0",
+      ),
+    ).toEqual([]);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.network?.sshSourceCIDRs).toEqual([
+      "198.51.100.7/32",
+      "2001:db8::8/128",
+    ]);
+    expect(ingressRequests).toContainEqual({
+      action: "AuthorizeSecurityGroupIngress",
+      ipv4: "",
+      ipv6: "2001:db8::8/128",
+    });
   });
 
   it("reports each AWS fallback region before provisioning mutates it", async () => {
