@@ -703,65 +703,92 @@ func (b runEnvProfileTestBackend) ReleaseLeaseConnectionCleanupSafe() bool {
 	return runEnvProfileTestConnectionCleanupSafe
 }
 
-func TestRunNonGitWorkdirFailsBeforeAcquire(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	isolateRunTestUserDirs(t, dir)
-	t.Chdir(dir)
-	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
-	acquireCalls := 0
-	runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
-	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+type runWorkdirCase struct {
+	name       string
+	native     bool
+	diagnostic string
+	guidance   []string
+}
 
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", "run-env-profile-test",
-		"--", "true",
-	})
-	var exitErr ExitError
-	if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
-		t.Fatalf("error=%v, want exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
-	}
-	if acquireCalls != 0 {
-		t.Fatalf("Acquire called %d time(s) before local manifest failure", acquireCalls)
-	}
-	for _, want := range []string{dir, "not a Git repository", "git init", "--no-sync"} {
-		if !strings.Contains(exitErr.Message, want) {
-			t.Fatalf("message missing %q: %q", want, exitErr.Message)
-		}
+func runWorkdirCases() []runWorkdirCase {
+	return []runWorkdirCase{
+		{name: "ordinary non-Git", diagnostic: "not a Git repository", guidance: []string{"git init", "--no-sync"}},
+		{name: "native Jujutsu", native: true, diagnostic: "native Jujutsu workspace", guidance: []string{"Git-manifest-based", "wrong revision", "colocated Git workspace", "jj git init --git-repo=.", "--no-sync"}},
 	}
 }
 
-func TestRunNonGitWorkdirFailsBeforeReadyPoolBorrow(t *testing.T) {
+func setupRunWorkdirCase(t *testing.T, tc runWorkdirCase) string {
+	t.Helper()
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
+	if tc.native {
+		makeNativeJujutsuWorkspace(t, dir)
+	}
 	t.Chdir(dir)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
-	requests := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests <- r.Method + " " + r.URL.Path
-		http.Error(w, "unexpected request", http.StatusInternalServerError)
-	}))
-	t.Cleanup(server.Close)
-	t.Setenv("CRABBOX_COORDINATOR", server.URL)
-	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+	return dir
+}
 
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", "run-ready-pool-preflight-test",
-		"--pool", "shared-linux",
-		"--pool-return", "drain",
-		"--", "true",
-	})
-	var exitErr ExitError
-	if !AsExitError(err, &exitErr) || exitErr.Code != 6 || !strings.Contains(exitErr.Message, "not a Git repository") {
-		t.Fatalf("error=%v, want non-Git exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+func TestRunWorkdirFailsBeforeAcquire(t *testing.T) {
+	for _, tc := range runWorkdirCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupRunWorkdirCase(t, tc)
+			acquireCalls := 0
+			runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+				"--provider", "run-env-profile-test",
+				"--", "true",
+			})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
+				t.Fatalf("error=%v, want exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			if acquireCalls != 0 {
+				t.Fatalf("Acquire called %d time(s) before local manifest failure", acquireCalls)
+			}
+			for _, want := range append([]string{dir, tc.diagnostic}, tc.guidance...) {
+				if !strings.Contains(exitErr.Message, want) {
+					t.Fatalf("message missing %q: %q", want, exitErr.Message)
+				}
+			}
+		})
 	}
-	select {
-	case request := <-requests:
-		t.Fatalf("ready-pool request occurred before local manifest failure: %s", request)
-	default:
+}
+
+func TestRunWorkdirFailsBeforeReadyPoolBorrow(t *testing.T) {
+	for _, tc := range runWorkdirCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			setupRunWorkdirCase(t, tc)
+			requests := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r.Method + " " + r.URL.Path
+				http.Error(w, "unexpected request", http.StatusInternalServerError)
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+				"--provider", "run-ready-pool-preflight-test",
+				"--pool", "shared-linux",
+				"--pool-return", "drain",
+				"--", "true",
+			})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 6 || !strings.Contains(exitErr.Message, tc.diagnostic) {
+				t.Fatalf("error=%v, want %s exit 6\nstdout=%s\nstderr=%s", err, tc.name, stdout.String(), stderr.String())
+			}
+			select {
+			case request := <-requests:
+				t.Fatalf("ready-pool request occurred before local manifest failure: %s", request)
+			default:
+			}
+		})
 	}
 }
 
@@ -938,53 +965,56 @@ func (b runModuleRuntimeTestBackend) Stop(context.Context, StopRequest) error {
 	return nil
 }
 
-func TestRunWithExistingLeaseRequestsProviderPreparation(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	isolateRunTestUserDirs(t, dir)
-	t.Chdir(dir)
-	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
-	runPrepareTestResolveRequests = nil
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", "run-prepare-test",
-		"--id", "cbx_existing",
-		"--no-sync",
-		"--",
-		"true",
-	})
-	var exitErr ExitError
-	if !AsExitError(err, &exitErr) || exitErr.Code != 9 || !strings.Contains(exitErr.Message, "resolve captured") {
-		t.Fatalf("run error=%v, want resolve-captured exit", err)
-	}
-	if len(runPrepareTestResolveRequests) != 1 {
-		t.Fatalf("resolve requests=%#v, want one", runPrepareTestResolveRequests)
-	}
-	if got := runPrepareTestResolveRequests[0]; got.ID != "cbx_existing" || !got.Prepare {
-		t.Fatalf("resolve request=%#v, want existing id with Prepare", got)
+func TestRunNoSyncRequestsExistingLeasePreparation(t *testing.T) {
+	for _, tc := range runWorkdirCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			setupRunWorkdirCase(t, tc)
+			runPrepareTestResolveRequests = nil
+
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+				"--provider", "run-prepare-test",
+				"--id", "cbx_existing",
+				"--no-sync",
+				"--", "true",
+			})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 9 || !strings.Contains(exitErr.Message, "resolve captured") {
+				t.Fatalf("run error=%v, want backend resolve proof\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			if strings.Contains(exitErr.Message, "native Jujutsu workspace") {
+				t.Fatalf("--no-sync triggered native Jujutsu guard: %q", exitErr.Message)
+			}
+			if len(runPrepareTestResolveRequests) != 1 {
+				t.Fatalf("resolve requests=%#v, want one", runPrepareTestResolveRequests)
+			}
+			if got := runPrepareTestResolveRequests[0]; got.ID != "cbx_existing" || !got.Prepare {
+				t.Fatalf("resolve request=%#v, want existing id with Prepare", got)
+			}
+		})
 	}
 }
 
-func TestRunNonGitWorkdirFailsBeforeExistingLeaseResolveAndPrepare(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	isolateRunTestUserDirs(t, dir)
-	t.Chdir(dir)
-	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
-	runPrepareTestResolveRequests = nil
+func TestRunWorkdirFailsBeforeExistingLeaseResolveAndPrepare(t *testing.T) {
+	for _, tc := range runWorkdirCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			setupRunWorkdirCase(t, tc)
+			runPrepareTestResolveRequests = nil
 
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", "run-prepare-test",
-		"--id", "cbx_existing",
-		"--", "true",
-	})
-	var exitErr ExitError
-	if !AsExitError(err, &exitErr) || exitErr.Code != 6 || !strings.Contains(exitErr.Message, "not a Git repository") {
-		t.Fatalf("error=%v, want non-Git exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
-	}
-	if len(runPrepareTestResolveRequests) != 0 {
-		t.Fatalf("Resolve/Prepare called before local manifest failure: %#v", runPrepareTestResolveRequests)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+				"--provider", "run-prepare-test",
+				"--id", "cbx_existing",
+				"--", "true",
+			})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 6 || !strings.Contains(exitErr.Message, tc.diagnostic) {
+				t.Fatalf("error=%v, want %s exit 6\nstdout=%s\nstderr=%s", err, tc.name, stdout.String(), stderr.String())
+			}
+			if len(runPrepareTestResolveRequests) != 0 {
+				t.Fatalf("Resolve/Prepare called before local manifest failure: %#v", runPrepareTestResolveRequests)
+			}
+		})
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,134 @@ type Repo struct {
 	RemoteURL string
 	Head      string
 	BaseRef   string
+}
+
+type repositoryBoundaryKind uint8
+
+const (
+	repositoryBoundaryGit repositoryBoundaryKind = iota + 1
+	repositoryBoundaryNativeJujutsu
+)
+
+type repositoryBoundary struct {
+	root string
+	kind repositoryBoundaryKind
+}
+
+// nearestRepositoryBoundary keeps repository ownership tied to the closest
+// workspace marker before stop. In particular, Git must not discover an outer
+// checkout through a native Jujutsu workspace nested inside it.
+func nearestRepositoryBoundary(start, stop string) (repositoryBoundary, error) {
+	current, err := filepath.Abs(start)
+	if err != nil {
+		return repositoryBoundary{}, err
+	}
+	current = canonicalRepositoryPath(current)
+	start = current
+	if stop != "" {
+		stop = canonicalRepositoryPath(stop)
+	}
+	ceilings := gitDiscoveryCeilings()
+	for {
+		if stop != "" && sameCanonicalRepositoryPath(current, stop) {
+			return repositoryBoundary{}, nil
+		}
+		if len(ceilings) > 0 && !sameCanonicalRepositoryPath(current, start) && canonicalRepositoryPathSetContains(ceilings, current) {
+			return repositoryBoundary{}, nil
+		}
+		hasGit, err := repositoryMarkerExists(filepath.Join(current, ".git"))
+		if err != nil {
+			return repositoryBoundary{}, err
+		}
+		hasJujutsu, err := repositoryMarkerExists(filepath.Join(current, ".jj"))
+		if err != nil {
+			return repositoryBoundary{}, err
+		}
+		if hasGit {
+			if hasJujutsu && !gitBoundaryIsValid(current) {
+				return repositoryBoundary{root: current, kind: repositoryBoundaryNativeJujutsu}, nil
+			}
+			return repositoryBoundary{root: current, kind: repositoryBoundaryGit}, nil
+		}
+		if hasJujutsu {
+			return repositoryBoundary{root: current, kind: repositoryBoundaryNativeJujutsu}, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return repositoryBoundary{}, nil
+		}
+		current = parent
+	}
+}
+
+func gitBoundaryIsValid(root string) bool {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironmentWithCeiling(filepath.Dir(root))
+	out, err := cmd.Output()
+	return err == nil && sameRepositoryPath(strings.TrimSpace(string(out)), root)
+}
+
+func repositoryGitEnvironmentWithCeiling(ceiling string) []string {
+	env := childEnvironmentWithout(repositoryGitEnvironment(), "GIT_CEILING_DIRECTORIES")
+	return append(env, "GIT_CEILING_DIRECTORIES="+ceiling)
+}
+
+func explicitGitRepositoryRouting() bool {
+	return strings.TrimSpace(os.Getenv("GIT_DIR")) != "" || strings.TrimSpace(os.Getenv("GIT_WORK_TREE")) != ""
+}
+
+func gitDiscoveryCeilings() []string {
+	entries := filepath.SplitList(os.Getenv("GIT_CEILING_DIRECTORIES"))
+	ceilings := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry == "" || !filepath.IsAbs(entry) {
+			continue
+		}
+		ceilings = append(ceilings, canonicalRepositoryPath(entry))
+	}
+	return ceilings
+}
+
+func canonicalRepositoryPathSetContains(paths []string, candidate string) bool {
+	for _, path := range paths {
+		if sameCanonicalRepositoryPath(path, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameRepositoryPath(left, right string) bool {
+	left = canonicalRepositoryPath(left)
+	right = canonicalRepositoryPath(right)
+	return sameCanonicalRepositoryPath(left, right)
+}
+
+func sameCanonicalRepositoryPath(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func canonicalRepositoryPath(value string) string {
+	value = filepath.Clean(value)
+	if resolved, err := filepath.EvalSymlinks(value); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return value
+}
+
+func repositoryMarkerExists(marker string) (bool, error) {
+	_, err := os.Lstat(marker)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspect repository marker %s: %w", marker, err)
 }
 
 // Repository inspection never needs provider or desktop credentials. Keep its
@@ -40,9 +169,14 @@ func repositoryGitEnvironment() []string {
 	}
 	result := make([]string, 0, len(allowed)+4)
 	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
+		name, value, _ := strings.Cut(entry, "=")
 		upper := strings.ToUpper(name)
 		if _, ok := allowed[upper]; ok || strings.HasPrefix(upper, "LC_") {
+			if (upper == "GIT_DIR" || upper == "GIT_WORK_TREE") && value != "" && !filepath.IsAbs(value) {
+				if absolute, err := filepath.Abs(value); err == nil {
+					entry = name + "=" + absolute
+				}
+			}
 			result = append(result, entry)
 		}
 	}
@@ -246,9 +380,29 @@ func findRepo() (Repo, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		wd, _ := os.Getwd()
+		if !explicitGitRepositoryRouting() {
+			boundary, boundaryErr := nearestRepositoryBoundary(wd, "")
+			if boundaryErr != nil {
+				return Repo{}, boundaryErr
+			}
+			if boundary.kind == repositoryBoundaryNativeJujutsu {
+				return Repo{Root: boundary.root, Name: filepath.Base(boundary.root)}, nil
+			}
+		}
 		return Repo{Root: wd, Name: filepath.Base(wd)}, nil
 	}
 	root := strings.TrimSpace(string(out))
+	if !explicitGitRepositoryRouting() {
+		wd, getwdErr := os.Getwd()
+		if getwdErr != nil {
+			return Repo{}, getwdErr
+		}
+		if boundary, boundaryErr := nearestRepositoryBoundary(wd, root); boundaryErr != nil {
+			return Repo{}, boundaryErr
+		} else if boundary.kind == repositoryBoundaryNativeJujutsu {
+			return Repo{Root: boundary.root, Name: filepath.Base(boundary.root)}, nil
+		}
+	}
 	remoteURL := gitOutput(root, "remote", "get-url", "origin")
 	return Repo{
 		Root:      root,
@@ -763,6 +917,15 @@ func isNotAGitRepoError(stderr string) bool {
 }
 
 func gitSyncFileList(root string) ([]byte, error) {
+	if !explicitGitRepositoryRouting() {
+		boundary, err := nearestRepositoryBoundary(root, "")
+		if err != nil {
+			return nil, err
+		}
+		if boundary.kind == repositoryBoundaryNativeJujutsu {
+			return nil, fmt.Errorf("%s is a native Jujutsu workspace without colocated Git metadata: Crabbox sync is Git-manifest-based, and native Jujutsu sync is not supported yet because it risks syncing the wrong revision; use a colocated Git workspace instead (for example, from an existing Git checkout, initialize Jujutsu with `jj git init --git-repo=.`; this does not convert the current native workspace in place), or pass --no-sync to run without syncing local files", boundary.root)
+		}
+	}
 	cmd := exec.Command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
 	cmd.Dir = root
 	cmd.Env = repositoryGitEnvironment()

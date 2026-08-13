@@ -42,6 +42,21 @@ Git-ignored output, dependency folders, `.git`, and common local caches stay out
 of the transfer. This keeps a first sync close to what CI would see while still
 letting you test uncommitted local edits.
 
+### Jujutsu workspaces
+
+Crabbox currently supports Jujutsu workspaces only when they are colocated with
+Git metadata: the workspace root must contain both `.jj` and `.git`. Native
+Jujutsu revision mapping is not supported yet. Because the sync manifest is
+Git-owned, Crabbox rejects a native `.jj` workspace before leasing or borrowing
+a runner rather than letting Git discover an outer checkout and sync the wrong
+revision. This also applies when the native workspace is nested inside an outer
+Git repository.
+
+If you are starting from an existing Git checkout and want a colocated Jujutsu
+workspace, `jj git init --git-repo=.` is one initialization example. It does not
+convert an existing native Jujutsu repository in place. Use `--no-sync` when you
+intentionally want to run without transferring local files.
+
 The built-in excludes are intentionally conservative. They cover common churn
 such as `node_modules`, `.git`, `dist`, `coverage`, `playwright-report`,
 `test-results`, `.next`, `.vite`, `.turbo`, `target`, `.venv`, `__pycache__`,

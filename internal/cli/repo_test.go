@@ -34,11 +34,7 @@ func TestFindRepoUsesOriginNameInsideLinkedWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	runGit(t, root, "init")
-	runGit(t, root, "config", "user.email", "test@example.com")
-	runGit(t, root, "config", "user.name", "Test")
-	writeFile(t, filepath.Join(root, "README.md"), "crabbox\n")
-	runGit(t, root, "add", "README.md")
-	runGit(t, root, "commit", "-m", "init")
+	runGit(t, root, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init")
 	runGit(t, root, "remote", "add", "origin", "https://github.com/openclaw/crabbox.git")
 
 	worktree := filepath.Join(parent, "fix-blacksmith-success-workflow-state")
@@ -62,6 +58,203 @@ func TestFindRepoUsesOriginNameInsideLinkedWorktree(t *testing.T) {
 	}
 	if repo.Name != "crabbox" {
 		t.Fatalf("repo name=%q want crabbox", repo.Name)
+	}
+}
+
+func TestFindRepoNearestRepositoryMarkerWins(t *testing.T) {
+	t.Run("native Jujutsu nested in outer Git", func(t *testing.T) {
+		outer := t.TempDir()
+		runGit(t, outer, "init")
+		nativeRoot := filepath.Join(outer, "native")
+		makeNativeJujutsuWorkspace(t, nativeRoot)
+		workingDir := filepath.Join(nativeRoot, "src")
+		if err := os.MkdirAll(workingDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(workingDir)
+
+		repo, err := findRepo()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !sameRepositoryPath(repo.Root, nativeRoot) {
+			t.Fatalf("repo root=%q want native Jujutsu root %q", repo.Root, nativeRoot)
+		}
+	})
+
+	t.Run("colocated Jujutsu and Git", func(t *testing.T) {
+		root := t.TempDir()
+		runGit(t, root, "init")
+		makeNativeJujutsuWorkspace(t, root)
+		workingDir := filepath.Join(root, "src")
+		if err := os.Mkdir(workingDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(workingDir)
+
+		repo, err := findRepo()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !sameRepositoryPath(repo.Root, root) {
+			t.Fatalf("repo root=%q want colocated Git root %q", repo.Root, root)
+		}
+	})
+
+	t.Run("closer Git nested in outer Jujutsu", func(t *testing.T) {
+		outer := t.TempDir()
+		makeNativeJujutsuWorkspace(t, outer)
+		gitRoot := filepath.Join(outer, "git-workspace")
+		if err := os.Mkdir(gitRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, gitRoot, "init")
+		workingDir := filepath.Join(gitRoot, "src")
+		if err := os.Mkdir(workingDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(workingDir)
+
+		repo, err := findRepo()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !sameRepositoryPath(repo.Root, gitRoot) {
+			t.Fatalf("repo root=%q want closer Git root %q", repo.Root, gitRoot)
+		}
+	})
+}
+
+func TestNearestRepositoryBoundaryAcceptsGitFileMarker(t *testing.T) {
+	parent := t.TempDir()
+	source := filepath.Join(parent, "source")
+	if err := os.Mkdir(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "init")
+	runGit(t, source, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init")
+	worktree := filepath.Join(parent, "worktree")
+	runGit(t, source, "worktree", "add", "--detach", worktree)
+	makeNativeJujutsuWorkspace(t, worktree)
+	boundary, err := nearestRepositoryBoundary(worktree, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boundary.kind != repositoryBoundaryGit || !sameRepositoryPath(boundary.root, worktree) {
+		t.Fatalf("boundary=%#v, want colocated Git root", boundary)
+	}
+}
+
+func TestSyncManifestRejectsInvalidColocatedGitMarkerInsideOuterGit(t *testing.T) {
+	outer := t.TempDir()
+	runGit(t, outer, "init")
+	nativeRoot := filepath.Join(outer, "native-workspace")
+	makeNativeJujutsuWorkspace(t, nativeRoot)
+	if err := os.Mkdir(filepath.Join(nativeRoot, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workingDir := filepath.Join(nativeRoot, "src")
+	if err := os.Mkdir(workingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workingDir)
+
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameRepositoryPath(repo.Root, nativeRoot) {
+		t.Fatalf("repo root=%q want native Jujutsu root %q", repo.Root, nativeRoot)
+	}
+	_, err = syncManifest(repo.Root, configuredExcludes(baseConfig()))
+	if err == nil || !strings.Contains(err.Error(), "native Jujutsu workspace") {
+		t.Fatalf("manifest error=%v, want native Jujutsu rejection", err)
+	}
+}
+
+func TestFindRepoPreservesExplicitGitRoutingInsideNativeJujutsu(t *testing.T) {
+	parent := t.TempDir()
+	explicitWorktree := filepath.Join(parent, "explicit-worktree")
+	if err := os.Mkdir(explicitWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, explicitWorktree, "init")
+	writeFile(t, filepath.Join(explicitWorktree, "tracked.txt"), "tracked\n")
+	runGit(t, explicitWorktree, "add", "tracked.txt")
+
+	nativeRoot := filepath.Join(parent, "native-workspace")
+	makeNativeJujutsuWorkspace(t, nativeRoot)
+	workingDir := filepath.Join(nativeRoot, "src")
+	if err := os.Mkdir(workingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workingDir)
+	relativeGitDir, err := filepath.Rel(workingDir, filepath.Join(explicitWorktree, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeWorktree, err := filepath.Rel(workingDir, explicitWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_DIR", relativeGitDir)
+	t.Setenv("GIT_WORK_TREE", relativeWorktree)
+
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameRepositoryPath(repo.Root, explicitWorktree) {
+		t.Fatalf("repo root=%q want explicit Git worktree %q", repo.Root, explicitWorktree)
+	}
+	manifest, err := syncManifest(repo.Root, configuredExcludes(baseConfig()))
+	if err != nil {
+		t.Fatalf("explicit Git manifest failed: %v", err)
+	}
+	if strings.Join(manifest.Files, ",") != "tracked.txt" {
+		t.Fatalf("manifest files=%v, want explicitly routed Git manifest", manifest.Files)
+	}
+}
+
+func TestFindRepoHonorsGitDiscoveryCeilingForJujutsuFallback(t *testing.T) {
+	outerGit := t.TempDir()
+	runGit(t, outerGit, "init")
+	nativeRoot := filepath.Join(outerGit, "native-workspace")
+	makeNativeJujutsuWorkspace(t, nativeRoot)
+	workingDir := filepath.Join(nativeRoot, "work")
+	if err := os.Mkdir(workingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workingDir)
+	t.Setenv("GIT_DIR", "")
+	t.Setenv("GIT_WORK_TREE", "")
+	t.Setenv("GIT_CEILING_DIRECTORIES", nativeRoot)
+
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameRepositoryPath(repo.Root, workingDir) {
+		t.Fatalf("repo root=%q want non-repository fallback %q", repo.Root, workingDir)
+	}
+	_, err = syncManifest(repo.Root, configuredExcludes(baseConfig()))
+	if err == nil {
+		t.Fatal("expected ordinary non-Git manifest error below discovery ceiling")
+	}
+	if strings.Contains(err.Error(), "native Jujutsu workspace") {
+		t.Fatalf("manifest crossed Git discovery ceiling: %v", err)
+	}
+	for _, want := range []string{"not a Git repository", "git init", "--no-sync"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("ordinary non-Git error missing %q: %v", want, err)
+		}
+	}
+}
+
+func makeNativeJujutsuWorkspace(t *testing.T, root string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -586,6 +779,52 @@ func TestSyncManifestNonGitWorkdirReturnsActionableError(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error should suggest %q: %q", want, msg)
 		}
+	}
+}
+
+func TestSyncManifestNativeJujutsuReturnsActionableError(t *testing.T) {
+	outer := t.TempDir()
+	runGit(t, outer, "init")
+	root := filepath.Join(outer, "native-workspace")
+	makeNativeJujutsuWorkspace(t, root)
+	writeFile(t, filepath.Join(root, "main.txt"), "hello\n")
+
+	_, err := syncManifest(root, configuredExcludes(baseConfig()))
+	if err == nil {
+		t.Fatal("expected error for native Jujutsu workspace, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		root,
+		"native Jujutsu workspace",
+		"Git-manifest-based",
+		"native Jujutsu sync is not supported yet",
+		"wrong revision",
+		"colocated Git workspace",
+		"from an existing Git checkout",
+		"jj git init --git-repo=.",
+		"does not convert the current native workspace in place",
+		"--no-sync",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error should include %q: %q", want, msg)
+		}
+	}
+}
+
+func TestSyncManifestColocatedJujutsuUsesGitManifest(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+	makeNativeJujutsuWorkspace(t, root)
+	writeFile(t, filepath.Join(root, "tracked.txt"), "tracked\n")
+	runGit(t, root, "add", "tracked.txt")
+
+	manifest, err := syncManifest(root, configuredExcludes(baseConfig()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(manifest.Files, ",") != "tracked.txt" {
+		t.Fatalf("manifest files=%v, want ordinary Git manifest", manifest.Files)
 	}
 }
 
