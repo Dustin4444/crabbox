@@ -137,8 +137,21 @@ func writeArtifactManifest(root *os.Root, opts artifactPublishOptions, files []a
 		return "", nil, exit(2, "encode artifact manifest: %v", err)
 	}
 	data = append(data, '\n')
-	if err := writeArtifactBundleFile(root, artifactManifestFilename, data, 0o644); err != nil {
-		return "", nil, err
+	private := false
+	for _, file := range manifest.Files {
+		if file.AccessPolicy == "signed-url" {
+			private = true
+			break
+		}
+	}
+	var writeErr error
+	if private {
+		writeErr = writePrivateArtifactBundleFile(root, artifactManifestFilename, data)
+	} else {
+		writeErr = writeArtifactBundleFile(root, artifactManifestFilename, data, 0o644)
+	}
+	if writeErr != nil {
+		return "", nil, writeErr
 	}
 	return path, data, nil
 }
@@ -488,16 +501,37 @@ func rejectSymlinkedArtifactOutputParents(root, name string) error {
 	return nil
 }
 
+// artifactURLIsSigned reports whether a URL carries a presigned bearer capability. It is the
+// single definition of that boundary, shared by the access policy and by output file modes.
+func artifactURLIsSigned(rawURL string) bool {
+	if strings.TrimSpace(rawURL) == "" {
+		return false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	query := parsed.Query()
+	return query.Get("X-Amz-Signature") != "" || query.Get("X-Amz-Credential") != ""
+}
+
+// artifactFilesContainSignedURL reports whether any published file exposes a presigned URL,
+// so generated output that embeds those URLs can be written owner-only.
+func artifactFilesContainSignedURL(files []artifactFile) bool {
+	for _, file := range files {
+		if artifactURLIsSigned(file.URL) {
+			return true
+		}
+	}
+	return false
+}
+
 func artifactAccessPolicy(rawURL, storage string) string {
 	if strings.TrimSpace(rawURL) == "" {
 		return "local"
 	}
-	parsed, err := url.Parse(rawURL)
-	if err == nil {
-		query := parsed.Query()
-		if query.Get("X-Amz-Signature") != "" || query.Get("X-Amz-Credential") != "" {
-			return "signed-url"
-		}
+	if artifactURLIsSigned(rawURL) {
+		return "signed-url"
 	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rawURL)), "http://") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(rawURL)), "https://") {
 		return "public"
