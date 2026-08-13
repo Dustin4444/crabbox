@@ -61,6 +61,9 @@ func nearestRepositoryBoundary(start string) (repositoryBoundary, bool, error) {
 			return repositoryBoundary{}, false, err
 		}
 		if hasGit {
+			if hasJujutsu && !gitBoundaryIsValid(current) {
+				return repositoryBoundary{root: current, kind: repositoryBoundaryNativeJujutsu}, true, nil
+			}
 			return repositoryBoundary{root: current, kind: repositoryBoundaryGit}, true, nil
 		}
 		if hasJujutsu {
@@ -72,6 +75,27 @@ func nearestRepositoryBoundary(start string) (repositoryBoundary, bool, error) {
 		}
 		current = parent
 	}
+}
+
+func gitBoundaryIsValid(root string) bool {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironmentWithCeiling(filepath.Dir(root))
+	out, err := cmd.Output()
+	return err == nil && sameRepositoryPath(strings.TrimSpace(string(out)), root)
+}
+
+func repositoryGitEnvironmentWithCeiling(ceiling string) []string {
+	env := repositoryGitEnvironment()
+	result := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(name, "GIT_CEILING_DIRECTORIES") {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return append(result, "GIT_CEILING_DIRECTORIES="+ceiling)
 }
 
 func explicitGitRepositoryRouting() bool {

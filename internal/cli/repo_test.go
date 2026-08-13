@@ -132,19 +132,55 @@ func TestFindRepoNearestRepositoryMarkerWins(t *testing.T) {
 }
 
 func TestNearestRepositoryBoundaryAcceptsGitFileMarker(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: /tmp/example\n"), 0o644); err != nil {
+	parent := t.TempDir()
+	source := filepath.Join(parent, "source")
+	if err := os.Mkdir(source, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(root, ".jj"), 0o755); err != nil {
+	runGit(t, source, "init")
+	runGit(t, source, "config", "user.email", "test@example.com")
+	runGit(t, source, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(source, "tracked.txt"), "tracked\n")
+	runGit(t, source, "add", "tracked.txt")
+	runGit(t, source, "commit", "-m", "init")
+	worktree := filepath.Join(parent, "worktree")
+	runGit(t, source, "worktree", "add", "--detach", worktree)
+	if err := os.Mkdir(filepath.Join(worktree, ".jj"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	boundary, found, err := nearestRepositoryBoundary(root)
+	boundary, found, err := nearestRepositoryBoundary(worktree)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !found || boundary.kind != repositoryBoundaryGit || boundary.root != root {
+	if !found || boundary.kind != repositoryBoundaryGit || !sameRepositoryPath(boundary.root, worktree) {
 		t.Fatalf("boundary=%#v found=%v, want colocated Git root", boundary, found)
+	}
+}
+
+func TestSyncManifestRejectsInvalidColocatedGitMarkerInsideOuterGit(t *testing.T) {
+	outer := t.TempDir()
+	runGit(t, outer, "init")
+	nativeRoot := filepath.Join(outer, "native-workspace")
+	makeNativeJujutsuWorkspace(t, nativeRoot)
+	if err := os.Mkdir(filepath.Join(nativeRoot, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workingDir := filepath.Join(nativeRoot, "src")
+	if err := os.Mkdir(workingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workingDir)
+
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameRepositoryPath(repo.Root, nativeRoot) {
+		t.Fatalf("repo root=%q want native Jujutsu root %q", repo.Root, nativeRoot)
+	}
+	_, err = syncManifest(repo.Root, configuredExcludes(baseConfig()))
+	if err == nil || !strings.Contains(err.Error(), "native Jujutsu workspace") {
+		t.Fatalf("manifest error=%v, want native Jujutsu rejection", err)
 	}
 }
 
