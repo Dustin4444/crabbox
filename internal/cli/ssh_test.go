@@ -1796,22 +1796,32 @@ func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 }
 
 func TestRemoteFinalizeSyncHydratesForRepositoryDepth(t *testing.T) {
-	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	fixture := newGitCoherenceFixture(t)
-	realGit := filepath.Join(gitOutput("", "--exec-path"), "git")
-	refspec := "+refs/heads/main:refs/remotes/origin/main"
+	// Exceed the fallback depth so accidentally deepening a complete clone is observable.
+	const extraCommits = 1001
+	var history strings.Builder
+	parent := gitOutput(fixture.origin, "rev-parse", "refs/heads/main")
+	for i := 1; i <= extraCommits; i++ {
+		message := fmt.Sprintf("hydrate history %d", i)
+		fmt.Fprintf(&history, "commit refs/heads/main\nmark :%d\ncommitter Test <test@example.com> %d +0000\ndata %d\n%s\nfrom %s\n\n", i, 1700000000+i, len(message), message, parent)
+		parent = fmt.Sprintf(":%d", i)
+	}
+	fastImport := exec.Command("git", "-C", fixture.origin, "fast-import", "--quiet")
+	fastImport.Stdin = strings.NewReader(history.String())
+	if out, err := fastImport.CombinedOutput(); err != nil {
+		t.Fatalf("extend hydration history: %v\n%s", err, out)
+	}
 
 	tests := []struct {
-		name          string
-		shallow       bool
-		wantUnshallow bool
+		name    string
+		shallow bool
 	}{
-		{name: "complete", shallow: false, wantUnshallow: false},
-		{name: "shallow", shallow: true, wantUnshallow: true},
+		{name: "complete", shallow: false},
+		{name: "shallow", shallow: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			workdir := filepath.Join(t.TempDir(), "work")
+			workdir := filepath.Join(t.TempDir(), "work dir's repo")
 			cloneArgs := []string{"clone", "--quiet"}
 			origin := fixture.origin
 			if tt.shallow {
@@ -1825,47 +1835,20 @@ func TestRemoteFinalizeSyncHydratesForRepositoryDepth(t *testing.T) {
 			if got := gitOutput(workdir, "rev-parse", "--is-shallow-repository"); got != strconv.FormatBool(tt.shallow) {
 				t.Fatalf("is-shallow-repository=%q, want %t", got, tt.shallow)
 			}
-			stageCoherenceFinalize(t, workdir, finalizeToken)
-
-			tools := t.TempDir()
-			fetchLog := filepath.Join(tools, "fetch.log")
-			gitScript := `#!/bin/sh
-if [ "$1" = fetch ]; then
-  printf '%s\n' "$*" >> "$CRABBOX_GIT_FETCH_LOG"
-fi
-exec ` + shellQuote(realGit) + ` "$@"
-`
-			if err := os.WriteFile(filepath.Join(tools, "git"), []byte(gitScript), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			envFile := filepath.Join(tools, "env")
-			if err := os.WriteFile(envFile, []byte("export PATH="+shellQuote(tools)+":\"$PATH\"\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-
-			cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
-				HydrateGit: true,
-				BaseRef:    "main",
-				Token:      finalizeToken,
-			}))
-			cmd.Env = append(os.Environ(), "BASH_ENV="+envFile, "CRABBOX_GIT_FETCH_LOG="+fetchLog)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("remote finalize: %v\n%s", err, out)
-			}
-			fetches, err := os.ReadFile(fetchLog)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got := string(fetches)
-			if strings.Contains(got, "--unshallow") != tt.wantUnshallow {
-				t.Fatalf("fetch log unshallow=%t, want %t: %q", strings.Contains(got, "--unshallow"), tt.wantUnshallow, got)
-			}
-			wantFetch := "fetch --quiet origin " + refspec
-			if tt.shallow {
-				wantFetch = "fetch --quiet --unshallow origin " + refspec
-			}
-			if !strings.Contains(got, wantFetch) {
-				t.Fatalf("fetch log missing requested refspec: %q", got)
+			for attempt := 1; attempt <= 2; attempt++ {
+				token := fmt.Sprintf("%032x", attempt)
+				stageCoherenceFinalize(t, workdir, token)
+				cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+					HydrateGit: true,
+					BaseRef:    "main",
+					Token:      token,
+				}))
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("remote finalize attempt %d: %v\n%s", attempt, err, out)
+				}
+				if got := gitOutput(workdir, "rev-parse", "--is-shallow-repository"); got != "false" {
+					t.Fatalf("attempt %d left %s repository shallow: %q", attempt, tt.name, got)
+				}
 			}
 		})
 	}
@@ -2482,12 +2465,73 @@ func requireGitOutput(t *testing.T, workdir, want string, args ...string) {
 	}
 }
 
-func TestRemoteGitCoherenceCleanupAvoidsSuccessfulReexit(t *testing.T) {
-	script := remoteGitCoherenceFinalizeScript(gitCoherencePlan{}, "")
-	want := `cleanup_finalize_lock; trap - EXIT; if [ "$status" -ne 0 ]; then exit "$status"; fi`
-	if !strings.Contains(script, want) {
-		t.Fatalf("coherence cleanup does not avoid re-exiting after successful teardown:\n%s", script)
+func TestRemoteGitCoherenceExitTrapBehavior(t *testing.T) {
+	fixture := newGitCoherenceFixture(t)
+
+	assertCleanup := func(t *testing.T, workdir string, token string) {
+		t.Helper()
+		meta := coherenceMetaDir(t, workdir)
+		if _, err := os.Lstat(filepath.Join(meta, "sync-finalize-lock")); !os.IsNotExist(err) {
+			t.Fatalf("finalization lock survived EXIT cleanup: %v", err)
+		}
+		statusFiles, err := filepath.Glob(filepath.Join(meta, "sync-git-status."+token+".*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(statusFiles) != 0 {
+			t.Fatalf("Git status files survived EXIT cleanup: %v", statusFiles)
+		}
+		ref := "refs/crabbox/sync-" + token
+		if err := exec.Command("git", "-C", workdir, "show-ref", "--verify", "--quiet", ref).Run(); exitCode(err) != 1 {
+			t.Fatalf("temporary coherence ref %s survived EXIT cleanup: %v", ref, err)
+		}
 	}
+
+	t.Run("success", func(t *testing.T) {
+		workdir := fixture.workspace(t, fixture.a, true)
+		plan := fixture.plan(t, fixture.b)
+		mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+		const token = "51515151515151515151515151515151"
+		stageCoherenceFinalize(t, workdir, token)
+		out, err := runCoherenceFinalize(workdir, plan, token, "fp-success")
+		if err != nil {
+			t.Fatalf("successful finalize returned %v\n%s", err, out)
+		}
+		if strings.Contains(string(out), "pop_var_context") {
+			t.Fatalf("successful finalize hit Bash function-context failure:\n%s", out)
+		}
+		if got := readCoherentFingerprint(t, workdir, plan); got != "fp-success" {
+			t.Fatalf("successful finalize fingerprint=%q", got)
+		}
+		assertCleanup(t, workdir, token)
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		workdir := fixture.workspace(t, fixture.a, true)
+		plan := fixture.plan(t, fixture.b)
+		mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+		const token = "52525252525252525252525252525252"
+		stageCoherenceFinalize(t, workdir, token)
+		beforeIndex := coherenceIndexBytes(t, workdir)
+		tools := coherenceFailureTools(t, plan.Target)
+		out, err := runCoherenceFinalize(workdir, plan, token, "fp-failure",
+			"BASH_ENV="+filepath.Join(tools, "env"), "CRABBOX_FAIL_MV=complete")
+		if got := exitCode(err); got != 94 {
+			t.Fatalf("failed finalize exit=%d, want original exit 94: %v\n%s", got, err, out)
+		}
+		if strings.Contains(string(out), "pop_var_context") {
+			t.Fatalf("failed finalize hit Bash function-context failure:\n%s", out)
+		}
+		requireGitOutput(t, workdir, fixture.a, "rev-parse", "HEAD")
+		requireGitOutput(t, workdir, "refs/heads/workspace", "symbolic-ref", "-q", "HEAD")
+		if afterIndex := coherenceIndexBytes(t, workdir); !bytes.Equal(afterIndex, beforeIndex) {
+			t.Fatal("failed finalize did not restore the Git index")
+		}
+		if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+			t.Fatalf("failed finalize certified fingerprint %q", got)
+		}
+		assertCleanup(t, workdir, token)
+	})
 }
 
 func TestRemoteGitCoherenceRepairsReuseBeforeFingerprintSkip(t *testing.T) {
