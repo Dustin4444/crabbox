@@ -226,7 +226,13 @@ import {
   type RuntimeAdapterRelayRequest,
   type RuntimeAdapterRelayResponse,
 } from "./runtime-adapter-relay";
-import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
+import {
+  InvalidLeaseSlugError,
+  leaseSlugFromID,
+  normalizeLeaseSlug,
+  requestedLeaseSlug,
+  slugWithCollisionSuffix,
+} from "./slug";
 import {
   createTailscaleAuthKey,
   renderTailscaleHostname,
@@ -3346,6 +3352,18 @@ export class FleetCoordinator {
         return replay;
       }
     }
+    const requestedSlugInput = input.slug ?? input.requestedSlug;
+    let requestedSlug = normalizeLeaseSlug(requestedSlugInput);
+    let deferredSlugError: InvalidLeaseSlugError | undefined;
+    try {
+      requestedSlug = requestedLeaseSlug(requestedSlugInput);
+    } catch (error) {
+      if (!(error instanceof InvalidLeaseSlugError)) throw error;
+      if (error.reason === "empty" || !fixedLeaseID) {
+        return json({ error: "invalid_slug", message: error.message }, { status: 400 });
+      }
+      deferredSlugError = error;
+    }
     const defaults: LeaseConfigDefaults = { allowAzurePromotedImage: true };
     const azureImage = this.env.CRABBOX_AZURE_IMAGE?.trim();
     if (azureImage) defaults.azureImage = azureImage;
@@ -3410,10 +3428,7 @@ export class FleetCoordinator {
       if (!config.providerKey) {
         config = { ...config, providerKey: providerKeyForLease(fixedLeaseID) };
       }
-      fixedCreateIntentHash = await fixedLeaseCreateIntentHash(
-        config,
-        normalizeLeaseSlug(input.slug ?? input.requestedSlug),
-      );
+      fixedCreateIntentHash = await fixedLeaseCreateIntentHash(config, requestedSlug);
       const replay = await this.state.runExclusive(async () => {
         if (createAttemptBlocksLeaseID(await this.getCreateAttempt(fixedLeaseID))) {
           return createAttemptIDConflictResponse();
@@ -3428,6 +3443,9 @@ export class FleetCoordinator {
       if (replay) {
         return replay;
       }
+    }
+    if (deferredSlugError) {
+      return json({ error: "invalid_slug", message: deferredSlugError.message }, { status: 400 });
     }
     const configProvider = this.provider(
       config.provider,
@@ -3872,7 +3890,7 @@ export class FleetCoordinator {
       const createAttemptGeneration = currentAttempt ? newCreateAttemptGeneration() : undefined;
       const admission = await this.leaseAdmissionState({ owner, org }, now);
       const slug = allocateLeaseSlug(
-        normalizeLeaseSlug(input.slug ?? input.requestedSlug) || leaseSlugFromID(leaseID),
+        requestedSlug || leaseSlugFromID(leaseID),
         leaseID,
         owner,
         org,
@@ -6541,6 +6559,10 @@ export class FleetCoordinator {
     if (!host) {
       return json({ error: "host_required" }, { status: 400 });
     }
+    // No slug bound here on purpose. A registered lease records an already-provisioned
+    // external machine and never derives a provider resource name from the slug — the CLI
+    // sends the machine's existing `slug` label back (serverSlug in coordinator_registration.go).
+    // Rejecting a long one would break re-registering a machine that already exists.
     const runtimeAdapterID = input.runtimeAdapterID;
     const runtimeAdapterWorkspaceID = input.runtimeAdapterWorkspaceID;
     const runtimeAdapterRegistrationID = input.runtimeAdapterRegistrationID;
@@ -20957,7 +20979,7 @@ function boundedTelemetrySamples(samples: LeaseTelemetry[], max: number): LeaseT
 
 const fixedLeaseCreateIntentVersion = 2;
 
-async function fixedLeaseCreateIntentHash(
+export async function fixedLeaseCreateIntentHash(
   config: LeaseConfig,
   requestedSlug: string,
 ): Promise<string> {
