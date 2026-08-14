@@ -22,11 +22,18 @@ Every other adapter runs direct from the CLI. A brokerable provider also runs
 direct unless a broker URL is configured (`CRABBOX_COORDINATOR`, or
 `config set-broker --url`).
 
+Coordinator-backed adapters bind every exact lease response to the provider
+selected by the CLI. Legacy responses may omit provider metadata and inherit
+that selection, but a response naming an unknown or different provider is
+rejected before the CLI converts or acts on the lease.
+
 `broker.mode: registered` is provider-neutral. Provisioning, SSH, touch, and
 cleanup remain in the direct adapter, while the CLI idempotently registers an
 owner-scoped lease record with the coordinator. This enables portal inventory,
 sharing, and outbound WebVNC for external, KubeVirt, static SSH, local, and other
 direct SSH providers without giving the coordinator provider credentials.
+Registered inventory metadata never grants authority to select or invoke a
+different provider adapter.
 By default coordinator release and expiry remove only the registration. A
 registered lease can instead bind an outbound runtime adapter and workspace ID;
 the portal then confirms provider deletion through that adapter before removing
