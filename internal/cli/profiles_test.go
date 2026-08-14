@@ -470,12 +470,35 @@ func TestRenderRunProofUsesTemplateAndLiveOutput(t *testing.T) {
 	for _, want := range []string{
 		"## Real behavior proof",
 		"Behavior addressed: Live QA login-regression",
-		"Evidence after fix: Copied live console output from Crabbox `run_123`",
+		"Exact steps or command run:",
+		"Evidence: Copied live console output from Crabbox `run_123`",
+		"Observed result: The scenario passed.",
 		"scenario pass login-regression 33.8s",
 		"What was not tested: No public service.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("proof missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderRunProofUsesContextNeutralDefaultLabels(t *testing.T) {
+	got, err := renderRunProof(proofRenderInput{Command: "make test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Exact steps or command run:",
+		"Evidence: Copied live console output from Crabbox",
+		"Observed result: The command completed successfully on the remote environment.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("proof missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"after this patch", "after fix"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("proof contains patch-specific claim %q:\n%s", forbidden, got)
 		}
 	}
 }

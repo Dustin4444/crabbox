@@ -409,7 +409,9 @@ Use `--emit-proof <path>` to render a Markdown `## Real behavior proof` block
 after a successful run, derived from run metadata, the expanded command,
 selected live console output, collected artifact paths, and the
 `--proof-template` or preset template. Keep proof templates in repo config so
-parser-sensitive PR wording stays project-owned.
+parser-sensitive PR wording stays project-owned. Default headings are
+context-neutral; put patch- or fix-specific claims in repository-owned template
+fields only when the run actually proves them.
 
 Use `--attest <path>` to write a signed run receipt after a successful run: a
 flat JSON record of the provider, lease, command, exit code, timing, and the

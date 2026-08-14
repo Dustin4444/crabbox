@@ -368,10 +368,10 @@ func renderRunProof(input proofRenderInput) (string, error) {
 	b.WriteString("Behavior addressed: " + behavior + "\n\n")
 	b.WriteString("Real environment tested: " + environment + "\n\n")
 	stepsOpenFence, stepsCloseFence := markdownFence("sh", steps)
-	b.WriteString("Exact steps or command run after this patch:\n\n" + stepsOpenFence + "\n")
+	b.WriteString("Exact steps or command run:\n\n" + stepsOpenFence + "\n")
 	b.WriteString(steps)
 	b.WriteString("\n" + stepsCloseFence + "\n\n")
-	b.WriteString("Evidence after fix: Copied live console output from Crabbox")
+	b.WriteString("Evidence: Copied live console output from Crabbox")
 	if input.RunID != "" {
 		b.WriteString(" `" + input.RunID + "`")
 	}
@@ -380,7 +380,7 @@ func renderRunProof(input proofRenderInput) (string, error) {
 	b.WriteString(":\n\n" + openFence + "\n")
 	b.WriteString(logExcerpt)
 	b.WriteString("\n" + closeFence + "\n\n")
-	b.WriteString("Observed result after fix: " + observed + "\n\n")
+	b.WriteString("Observed result: " + observed + "\n\n")
 	if len(input.Artifacts) > 0 || input.ActionsURL != "" {
 		b.WriteString("Additional evidence: ")
 		parts := make([]string, 0, len(input.Artifacts)+1)
