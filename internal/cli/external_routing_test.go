@@ -891,3 +891,41 @@ func TestLeaseTargetConfigPreservesImplicitExternalClaimRouting(t *testing.T) {
 		t.Fatalf("provider source=%q want %q", cfg.providerSelectionSource, providerSelectionLeaseContext)
 	}
 }
+
+func TestLeaseTargetConfigProviderResourceIDSkipsExternalRouting(t *testing.T) {
+	setupClaimRoutingCommandTest(t, parallelsProvider)
+	root := setExternalRoutingTestHome(t)
+	const leaseID = "cbx_1293ee000002"
+	routing := ExternalConfig{Command: "claimed-provider", WorkRoot: "/claimed/work"}
+	if _, err := PersistExternalRouting(leaseID, routing); err != nil {
+		t.Fatal(err)
+	}
+	if err := claimLeaseForRepoProviderScope(leaseID, "native-vm-name", "external", "claimed-scope", root, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	if defaults.Provider != parallelsProvider || !providerSelectionIsActionable(defaults) {
+		t.Fatalf("configured provider=%q source=%q", defaults.Provider, defaults.providerSelectionSource)
+	}
+	fs := newFlagSet("checkpoint restore", os.Stderr)
+	provider := fs.String("provider", defaults.Provider, "")
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{
+		LeaseID:            "native-vm-name",
+		ProviderResourceID: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != parallelsProvider || cfg.providerSelectionSource != defaults.providerSelectionSource {
+		t.Fatalf("provider=%q source=%q want %q/%q", cfg.Provider, cfg.providerSelectionSource, parallelsProvider, defaults.providerSelectionSource)
+	}
+	if cfg.External.RoutingFile != "" || cfg.External.Command != "" || cfg.External.routingLoaded || cfg.WorkRoot == routing.WorkRoot {
+		t.Fatalf("provider-native id loaded External routing: cfg=%#v external=%#v", cfg, cfg.External)
+	}
+}
