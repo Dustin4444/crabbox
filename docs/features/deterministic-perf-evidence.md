@@ -8,9 +8,13 @@ Read this when:
 
 **Status:** contract only. Crabbox does not yet ship a `--perf-budget`,
 `--fuel-budget`, WASI, or wasmtime-fuel backend. This page records the feature
-boundary for the deterministic evidence work tracked by
-[openclaw/crabbox#280](https://github.com/openclaw/crabbox/issues/280), so the
-runtime can land later in smaller, testable slices.
+boundary for the deterministic evidence work in the
+[tracking issue](https://github.com/openclaw/crabbox/issues/280), so the runtime
+can land later in smaller, testable slices.
+
+The detailed workload, Wasmtime fuel measurement, v1 JSON schema, subprocess
+isolation decision, and phased implementation plan live in the
+[deterministic perf evidence design](../plan/deterministic-perf-evidence.md).
 
 Crabbox already records wall-clock timing, phases, test results, proof blocks,
 and run artifacts. Those are useful operational evidence, but wall-clock timing
@@ -61,31 +65,39 @@ budgets even when the source did not regress.
 ## Evidence Schema
 
 When implemented, deterministic metrics should extend timing JSON with an
-optional object. Existing timing consumers must remain unchanged when the field
-is absent.
+optional `fuel` object projected from a valid, schema-versioned evidence
+artifact. Existing timing consumers must remain unchanged when the field is
+absent. The artifact is the independently validated CI and gate input; this
+compact timing summary is non-authoritative.
 
 ```json
 {
   "fuel": {
-    "instructions": 5821447,
+    "measured": 6239703,
+    "unit": "fuel",
     "mechanism": "wasmtime-fuel",
-    "engine": "wasmtime@1.2.3",
-    "module": "sha256:0123456789abcdef",
+    "engine": "wasmtime@39.0.0+0123456789abcdef0123456789abcdef01234567",
+    "module": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "deterministic": true
   }
 }
 ```
 
-Rules:
+The v1 projection is exact:
 
-- `instructions` is the measured deterministic counter.
-- `mechanism` names the metering method, not the provider.
-- `engine` must include enough version identity to know whether two runs are
-  comparable.
-- `module` identifies the executed artifact by digest or another stable
-  identity.
-- `deterministic=false` means Crabbox may record the result but must not treat
-  it as a hard comparable budget gate.
+- `fuel.measured = results[0].measured`;
+- `fuel.unit = results[0].unit`, and the value must equal `fuel`;
+- `fuel.mechanism = meter.mechanism`;
+- `fuel.engine = meter.engine + "@" + meter.engineVersion + "+" +
+  meter.engineRevision`;
+- `fuel.module = "sha256:" + workload.moduleSha256`;
+- `fuel.deterministic = meter.deterministic`.
+
+The `engine` format is a literal stable serialization with exactly one `@` and
+one `+` separator. No other artifact fields are projected in v1: `budget`,
+`exceeded`, and `comparisonKey` stay in the artifact. The `fuel` field is absent
+when no valid evidence exists. A malformed artifact or one that fails any
+internal-consistency check cannot produce the summary.
 
 If Crabbox later supports multiple metrics in one run, the timing field should
 grow by adding an array or nested results object without changing the meaning of
@@ -93,28 +105,10 @@ the single-metric v1 fields.
 
 ## Budget Evidence
 
-The budget gate needs a separate machine-readable record for orchestrators and
-CI logs. The file should be opt-in and written before Crabbox returns a budget
-failure.
-
-```json
-{
-  "provider": "metered-runtime",
-  "leaseId": "cbx_3f9a1c2d4e5b",
-  "runId": "run_20260704_001",
-  "engine": "wasmtime@1.2.3",
-  "results": [
-    {
-      "metric": "fuel",
-      "measured": 5821447,
-      "budget": 5000000,
-      "exceeded": true,
-      "unit": "fuel"
-    }
-  ],
-  "exceeded": true
-}
-```
+The budget gate needs the separate, full schema-versioned artifact defined by
+the [detailed design](../plan/deterministic-perf-evidence.md#evidence-artifact).
+That artifact is opt-in, independently validated, and written before Crabbox
+returns a budget failure. Timing JSON is never the authoritative budget input.
 
 The exact flag names are still future work. The expected behavior is:
 
