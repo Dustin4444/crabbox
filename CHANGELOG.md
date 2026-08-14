@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Coordinator lease metadata can no longer switch an explicit or configured provider selection or authorize a different local adapter.
 - Provider-native checkpoint identifiers no longer reroute through coincidentally matching Static or External lease identities.
 - Required explicit provider intent before lifecycle commands initialize a backend, while preserving claim and recorded-run routing and keeping bare doctor provider-neutral. Thanks @coygeek.
 - Prevented Azure orphan-sweep release failures from writing secret-bearing diagnostics to Worker console logs while retaining redacted details in sweep records.

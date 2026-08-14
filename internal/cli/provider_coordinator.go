@@ -42,6 +42,52 @@ func (b *coordinatorLeaseBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *coordinatorLeaseBackend) SupportsRequestedLeaseID() bool { return true }
 
+func (b *coordinatorLeaseBackend) validateCoordinatorLeaseProviderIdentity(lease CoordinatorLease) error {
+	return b.validateCoordinatorProviderIdentity(lease.ID, lease.Provider)
+}
+
+func (b *coordinatorLeaseBackend) validateCoordinatorLeaseTargetProviderIdentity(lease LeaseTarget) error {
+	return b.validateCoordinatorProviderIdentity(lease.LeaseID, lease.Server.Provider)
+}
+
+func (b *coordinatorLeaseBackend) validateCoordinatorProviderIdentity(leaseID, returnedProvider string) error {
+	selectedProvider := strings.TrimSpace(b.spec.Name)
+	if selectedProvider == "" {
+		selectedProvider = strings.TrimSpace(b.cfg.Provider)
+	}
+	returnedProvider = strings.TrimSpace(returnedProvider)
+	identityError := func() error {
+		return exit(
+			4,
+			"coordinator lease provider identity mismatch: selected_provider=%s returned_provider=%s lease_id=%s",
+			blank(selectedProvider, "<empty>"),
+			blank(returnedProvider, "<empty>"),
+			blank(strings.TrimSpace(leaseID), "<empty>"),
+		)
+	}
+	selected, err := ProviderFor(selectedProvider)
+	if err != nil {
+		return identityError()
+	}
+	selectedProvider = selected.Name()
+	if returnedProvider == "" {
+		return nil
+	}
+	provider, err := ProviderFor(returnedProvider)
+	if err == nil && provider.Name() == selectedProvider {
+		return nil
+	}
+	return identityError()
+}
+
+func (b *coordinatorLeaseBackend) coordinatorLeaseTarget(lease CoordinatorLease, coord *CoordinatorClient) (LeaseTarget, error) {
+	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
+		return LeaseTarget{}, err
+	}
+	server, target, leaseID := leaseToServerTarget(lease, b.cfg)
+	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}, nil
+}
+
 func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
 	if rebinder, ok := b.direct.(ResolvedLeaseTargetRebinder); ok {
 		return rebinder.RebindResolvedLeaseTarget(target, leaseID)
@@ -126,6 +172,14 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	}
 	if requestedLeaseID != "" && lease.ID != leaseID {
 		return LeaseTarget{}, exit(4, "lease_id_conflict: coordinator fixed create returned lease %s for operation %s", blank(lease.ID, "<empty>"), leaseID)
+	}
+	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
+		if requestedLeaseID == "" {
+			if releaseErr := releaseCoordinatorLease(context.Background(), b.coord, blank(lease.ID, leaseID)); releaseErr != nil {
+				fmt.Fprintf(b.rt.Stderr, "warning: release failed after provider identity mismatch for %s: %v\n", blank(lease.ID, leaseID), releaseErr)
+			}
+		}
+		return LeaseTarget{}, err
 	}
 	if lease.ID != "" && lease.ID != leaseID {
 		if err := moveStoredTestboxKey(leaseID, lease.ID); err != nil {
@@ -568,14 +622,12 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 			}
 			lease, adminErr = adminCoord.GetLease(ctx, req.ID)
 			if adminErr == nil {
-				server, target, leaseID := leaseToServerTarget(lease, b.cfg)
-				return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: adminCoord}, nil
+				return b.coordinatorLeaseTarget(lease, adminCoord)
 			}
 		}
 		return LeaseTarget{}, err
 	}
-	server, target, leaseID := leaseToServerTarget(lease, b.cfg)
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: b.coord}, nil
+	return b.coordinatorLeaseTarget(lease, b.coord)
 }
 
 func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
@@ -587,6 +639,9 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		lease, err = b.coord.GetLease(ctx, req.ID)
 	}
 	if err != nil {
+		return statusView{}, err
+	}
+	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
 		return statusView{}, err
 	}
 	server, target, _ := leaseToServerTarget(lease, b.cfg)
@@ -749,6 +804,9 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 	if req.Lease.LeaseID == "" {
 		return exit(2, "missing coordinator lease id")
 	}
+	if err := b.validateCoordinatorLeaseTargetProviderIdentity(req.Lease); err != nil {
+		return err
+	}
 	if err := releaseCoordinatorLease(ctx, b.coord, req.Lease.LeaseID); err != nil {
 		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
 			adminCoord, adminErr := b.adminCoordinatorClient()
@@ -775,8 +833,14 @@ func (b *coordinatorLeaseBackend) adminCoordinatorClient() (*CoordinatorClient, 
 }
 
 func (b *coordinatorLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+	if err := b.validateCoordinatorLeaseTargetProviderIdentity(req.Lease); err != nil {
+		return req.Lease.Server, err
+	}
 	lease, err := b.coord.TouchLease(ctx, req.Lease.LeaseID)
 	if err != nil {
+		return req.Lease.Server, err
+	}
+	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
 		return req.Lease.Server, err
 	}
 	server, _, _ := leaseToServerTarget(lease, b.cfg)

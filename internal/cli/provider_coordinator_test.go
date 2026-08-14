@@ -266,7 +266,7 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 		wantKey        bool
 	}{
 		{id: "cbx_with_key", configuredWith: "aws", wantKey: true},
-		{id: "cbx_without_key", configuredWith: "daytona", wantKey: false},
+		{id: "cbx_without_key", configuredWith: "aws", wantKey: false},
 	} {
 		t.Run(test.id, func(t *testing.T) {
 			var stdout bytes.Buffer
@@ -1611,6 +1611,299 @@ func TestCoordinatorResolveFallsBackToAdminToken(t *testing.T) {
 	}
 	if lease.Coordinator.Token != "admin-token" {
 		t.Fatalf("coordinator token=%q, want admin token", lease.Coordinator.Token)
+	}
+}
+
+func TestCoordinatorProviderIdentityValidationCanonicalizesAliases(t *testing.T) {
+	backend := &coordinatorLeaseBackend{
+		spec: ProviderSpec{Name: "gcp"},
+		cfg:  Config{Provider: "gcp"},
+	}
+	if err := backend.validateCoordinatorLeaseProviderIdentity(CoordinatorLease{
+		ID:       "cbx_alias",
+		Provider: " google-cloud ",
+	}); err != nil {
+		t.Fatalf("canonical alias rejected: %v", err)
+	}
+}
+
+func TestCoordinatorResolveEnforcesSelectedProviderIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		returnedProvider string
+		wantErr          bool
+	}{
+		{name: "same provider with changed capacity", returnedProvider: "aws"},
+		{name: "legacy omission", returnedProvider: ""},
+		{name: "different provider", returnedProvider: "external", wantErr: true},
+		{name: "unknown provider", returnedProvider: "future-cloud", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_identity" {
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+					ID:                  "cbx_identity",
+					Provider:            test.returnedProvider,
+					TargetOS:            targetLinux,
+					ServerType:          "c7a.48xlarge",
+					RequestedServerType: "t3.small",
+					Market:              "on-demand",
+					CapacityHints: []CapacityHint{{
+						Code: "fallback", ServerType: "c7a.48xlarge",
+					}},
+					CloudID: "i-identity",
+					Host:    "203.0.113.10",
+					State:   "active",
+				}})
+			}))
+			defer server.Close()
+
+			backend := newCoordinatorIdentityTestBackend(t, server.URL, "")
+			lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_identity"})
+			if test.wantErr {
+				assertCoordinatorProviderIdentityError(t, err, test.returnedProvider, "cbx_identity")
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.Server.Provider != "aws" {
+				t.Fatalf("provider=%q want selected aws", lease.Server.Provider)
+			}
+			if lease.Server.ServerType.Name != "c7a.48xlarge" {
+				t.Fatalf("server type=%q, want coordinator capacity fallback", lease.Server.ServerType.Name)
+			}
+		})
+	}
+}
+
+func TestCoordinatorAdminResolveEnforcesSelectedProviderIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_admin_identity" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Header.Get("Authorization") {
+		case "Bearer user-token":
+			http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		case "Bearer admin-token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: "cbx_admin_identity", Provider: "external", State: "active",
+			}})
+		default:
+			t.Fatalf("unexpected auth %q", r.Header.Get("Authorization"))
+		}
+	}))
+	defer server.Close()
+
+	backend := newCoordinatorIdentityTestBackend(t, server.URL, "admin-token")
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_admin_identity"})
+	assertCoordinatorProviderIdentityError(t, err, "external", "cbx_admin_identity")
+}
+
+func TestCoordinatorStatusEnforcesSelectedProviderIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: "cbx_status_identity", Provider: "external", State: "active",
+		}})
+	}))
+	defer server.Close()
+
+	backend := newCoordinatorIdentityTestBackend(t, server.URL, "")
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "cbx_status_identity"})
+	assertCoordinatorProviderIdentityError(t, err, "external", "cbx_status_identity")
+}
+
+func TestCoordinatorTouchEnforcesInputAndResponseProviderIdentity(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: "cbx_touch_identity", Provider: "external", State: "active",
+		}})
+	}))
+	defer server.Close()
+
+	backend := newCoordinatorIdentityTestBackend(t, server.URL, "")
+	input := LeaseTarget{LeaseID: "cbx_touch_identity", Server: Server{Provider: "external"}}
+	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: input}); err == nil {
+		t.Fatal("touch accepted mismatching input provider")
+	} else {
+		assertCoordinatorProviderIdentityError(t, err, "external", "cbx_touch_identity")
+	}
+	if requests != 0 {
+		t.Fatalf("input mismatch sent %d coordinator request(s), want zero", requests)
+	}
+
+	input.Server.Provider = "aws"
+	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: input}); err == nil {
+		t.Fatal("touch accepted mismatching response provider")
+	} else {
+		assertCoordinatorProviderIdentityError(t, err, "external", "cbx_touch_identity")
+	}
+	if requests != 1 {
+		t.Fatalf("response mismatch sent %d coordinator request(s), want one", requests)
+	}
+}
+
+func TestCoordinatorReleaseRejectsInputProviderMismatchBeforeRequest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests++
+	}))
+	defer server.Close()
+
+	backend := newCoordinatorIdentityTestBackend(t, server.URL, "admin-token")
+	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+		LeaseID: "cbx_release_identity",
+		Server:  Server{Provider: "external"},
+	}})
+	assertCoordinatorProviderIdentityError(t, err, "external", "cbx_release_identity")
+	if requests != 0 {
+		t.Fatalf("release mismatch sent %d coordinator request(s), want zero", requests)
+	}
+}
+
+func TestCoordinatorAcquireProviderMismatchCleanupPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		fixed     bool
+		wantLease string
+		wantPath  string
+		wantPut   bool
+		wantDrops int
+	}{
+		{name: "new non-fixed lease rolls back", wantLease: "cbx_created_identity", wantPath: "/v1/leases", wantDrops: 1},
+		{name: "fixed lease is retained", fixed: true, wantLease: "cbx_fixed_identity", wantPath: "/v1/leases/cbx_fixed_identity", wantPut: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			isolateTestUserDirs(t)
+			releases := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == test.wantPath && ((!test.wantPut && r.Method == http.MethodPost) || (test.wantPut && r.Method == http.MethodPut)):
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+						ID: test.wantLease, Provider: "external", TargetOS: targetLinux, State: "active",
+					}})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+test.wantLease+"/release":
+					releases++
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: test.wantLease, State: "released"}})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			backend := newCoordinatorIdentityTestBackend(t, server.URL, "")
+			backend.cfg.AWSSSHCIDRs = []string{"0.0.0.0/0"}
+			requestedID := ""
+			if test.fixed {
+				requestedID = test.wantLease
+			}
+			_, err := backend.acquireOnceWithLeaseID(context.Background(), false, requestedID, "identity-fence")
+			assertCoordinatorProviderIdentityError(t, err, "external", test.wantLease)
+			if releases != test.wantDrops {
+				t.Fatalf("release requests=%d want %d", releases, test.wantDrops)
+			}
+		})
+	}
+}
+
+type coordinatorIdentityRecordingBackend struct {
+	testSSHBackend
+	resolveCalls atomic.Int32
+}
+
+func (b *coordinatorIdentityRecordingBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+	b.resolveCalls.Add(1)
+	return LeaseTarget{}, errors.New("direct provider resolve must not run")
+}
+
+func TestActionsResolveRejectsCoordinatorProviderMismatchBeforeClaimOrLocalAdapter(t *testing.T) {
+	isolateTestUserDirs(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_actions_identity" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID:       "cbx_actions_identity",
+			Slug:     "actions-identity",
+			Provider: "external",
+			State:    "active",
+			CloudID:  "external-workspace",
+			Host:     "203.0.113.20",
+		}})
+	}))
+	defer server.Close()
+
+	direct := &coordinatorIdentityRecordingBackend{
+		testSSHBackend: testSSHBackend{spec: ProviderSpec{Name: "aws"}},
+	}
+	testAWSBackendOverride = direct
+	t.Cleanup(func() { testAWSBackendOverride = nil })
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.providerSelectionSource = providerSelectionFlag
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+
+	_, _, _, _, err := (App{Stderr: io.Discard}).resolveLeaseTargetForActions(
+		context.Background(),
+		cfg,
+		"cbx_actions_identity",
+		Repo{Root: t.TempDir(), Name: "identity-test"},
+		false,
+	)
+	assertCoordinatorProviderIdentityError(t, err, "external", "cbx_actions_identity")
+	if direct.resolveCalls.Load() != 0 {
+		t.Fatalf("local provider resolve calls=%d want zero", direct.resolveCalls.Load())
+	}
+	if _, exists, readErr := readLeaseClaimWithPresence("cbx_actions_identity"); readErr != nil {
+		t.Fatal(readErr)
+	} else if exists {
+		t.Fatal("provider mismatch wrote a local lease claim")
+	}
+}
+
+func newCoordinatorIdentityTestBackend(t *testing.T, serverURL, adminToken string) *coordinatorLeaseBackend {
+	t.Helper()
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = serverURL
+	cfg.CoordToken = "user-token"
+	cfg.CoordAdminToken = adminToken
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &coordinatorLeaseBackend{
+		spec:  ProviderSpec{Name: "aws"},
+		cfg:   cfg,
+		coord: coord,
+		rt:    Runtime{Stderr: io.Discard},
+	}
+}
+
+func assertCoordinatorProviderIdentityError(t *testing.T, err error, returnedProvider, leaseID string) {
+	t.Helper()
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 4 {
+		t.Fatalf("error=%v, want exit 4 provider identity mismatch", err)
+	}
+	for _, want := range []string{
+		"selected_provider=aws",
+		"returned_provider=" + returnedProvider,
+		"lease_id=" + leaseID,
+	} {
+		if !strings.Contains(exitErr.Message, want) {
+			t.Fatalf("diagnostic=%q missing %q", exitErr.Message, want)
+		}
 	}
 }
 
