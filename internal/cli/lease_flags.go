@@ -413,7 +413,8 @@ type leaseTargetConfigOptions struct {
 	LeaseID string
 	// ProviderResourceID marks LeaseID as a provider-native resource identifier,
 	// not a Crabbox lease identifier. Native snapshot operations use this to
-	// avoid routing an unrelated local claim whose slug happens to match.
+	// avoid routing unrelated claim, Static, or External lease identities that
+	// happen to match.
 	ProviderResourceID bool
 }
 
@@ -438,12 +439,12 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 		if err := autoRouteClaimLeaseProvider(&cfg, fs, opts.LeaseID); err != nil {
 			return Config{}, err
 		}
-	}
-	if err := autoRouteStaticLease(&cfg, fs, opts.LeaseID); err != nil {
-		return Config{}, err
-	}
-	if err := autoRouteExternalLease(&cfg, fs, opts.LeaseID); err != nil {
-		return Config{}, err
+		if err := autoRouteStaticLease(&cfg, fs, opts.LeaseID); err != nil {
+			return Config{}, err
+		}
+		if err := autoRouteExternalLease(&cfg, fs, opts.LeaseID); err != nil {
+			return Config{}, err
+		}
 	}
 	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
 		return Config{}, err

@@ -151,6 +151,44 @@ func TestLeaseTargetConfigPreservesImplicitStaticClaimRouting(t *testing.T) {
 	}
 }
 
+func TestLeaseTargetConfigProviderResourceIDSkipsStaticRouting(t *testing.T) {
+	setupClaimRoutingCommandTest(t, parallelsProvider)
+	claimed := baseConfig()
+	claimed.Provider = staticProvider
+	claimed.Static.Host = "builder.example.com"
+	claimed.Static.User = "builder"
+	claimed.Static.Port = "2202"
+	claimed.Static.WorkRoot = "/work/static-builder"
+	if err := claimLeaseForRepoConfig("static_builder", "builder", claimed, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	if defaults.Provider != parallelsProvider || !providerSelectionIsActionable(defaults) {
+		t.Fatalf("configured provider=%q source=%q", defaults.Provider, defaults.providerSelectionSource)
+	}
+	fs := newFlagSet("checkpoint list", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{
+		LeaseID:            "static_builder",
+		ProviderResourceID: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != parallelsProvider || cfg.providerSelectionSource != defaults.providerSelectionSource {
+		t.Fatalf("provider=%q source=%q want %q/%q", cfg.Provider, cfg.providerSelectionSource, parallelsProvider, defaults.providerSelectionSource)
+	}
+	if cfg.Static.ID != "" || cfg.Static.Name != "" || cfg.Static.Host != "" || cfg.Static.User != "" || cfg.Static.Port != "" || cfg.Static.WorkRoot != "" {
+		t.Fatalf("provider-native id loaded Static config: %#v", cfg.Static)
+	}
+}
+
 func TestAutoRouteStaticLeaseDoesNotGuessHostWithoutClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	defaults := baseConfig()
