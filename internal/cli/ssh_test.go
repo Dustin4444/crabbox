@@ -1383,6 +1383,20 @@ func TestWindowsHostPathConvertsMSYSDrivePath(t *testing.T) {
 	}
 }
 
+func TestWindowsWSLNativeToolProbeUsesDirectCommandOutput(t *testing.T) {
+	t.Parallel()
+	cmd := windowsWSLNativeToolProbeCommand(context.Background(), "wsl.exe")
+	want := []string{
+		"wsl.exe",
+		"sh",
+		"-c",
+		"command -v rsync || exit 1; command -v ssh || exit 1",
+	}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("WSL native-tool probe args = %q, want %q", cmd.Args, want)
+	}
+}
+
 func TestWindowsWSLNativeToolPathsRejectsWindowsShims(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

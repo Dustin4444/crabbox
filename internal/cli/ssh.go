@@ -1213,10 +1213,15 @@ func windowsWSLHasNativeRsyncSSH(ctx context.Context, target SSHTarget, wslExe s
 	if strings.TrimSpace(wslExe) == "" {
 		return false
 	}
-	cmd := exec.CommandContext(ctx, wslExe, "sh", "-c", "rsync_path=$(command -v rsync) || exit 1; ssh_path=$(command -v ssh) || exit 1; printf '%s\\n%s\\n' \"$rsync_path\" \"$ssh_path\"")
+	cmd := windowsWSLNativeToolProbeCommand(ctx, wslExe)
 	applyTargetChildEnvironment(cmd, target)
 	out, err := cmd.Output()
 	return err == nil && windowsWSLNativeToolPaths(string(out))
+}
+
+func windowsWSLNativeToolProbeCommand(ctx context.Context, wslExe string) *exec.Cmd {
+	// Direct command output is intentional: assignment plus printf produced blank lines on real Windows/WSL systems.
+	return exec.CommandContext(ctx, wslExe, "sh", "-c", "command -v rsync || exit 1; command -v ssh || exit 1")
 }
 
 func windowsWSLNativeToolPaths(output string) bool {

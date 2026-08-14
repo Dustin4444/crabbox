@@ -145,6 +145,10 @@ crabbox --version
 No Homebrew? Grab a [GoReleaser archive](https://github.com/openclaw/crabbox/releases)
 for macOS, Linux, or Windows.
 
+Automatic WSL transport selection on Windows requires a build from current
+`main` or Crabbox v0.42.1 and newer. Follow the
+[Windows installation guide](docs/windows-install.md) for the supported setup.
+
 The Apple Silicon Homebrew install uses the release archive that also contains
 the native `crabbox-apple-vm-helper` for the local Apple VZ provider.
 

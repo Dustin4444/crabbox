@@ -36,6 +36,9 @@ configured; run `crabbox providers recommend` to compare options.
 If you do not use Homebrew, GitHub Releases ship signed archives for macOS,
 Linux, and Windows. Download the matching archive from
 <https://github.com/openclaw/crabbox/releases>.
+Automatic WSL transport selection on Windows requires a build from current
+`main` or Crabbox v0.42.1 and newer. See the
+[supported Windows installation](windows-install.md) for the complete setup.
 
 ## Step 2. Log In
 
