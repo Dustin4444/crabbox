@@ -85,6 +85,9 @@ func loadPortsConfig(fs *flag.FlagSet, provider string, providerFlags providerFl
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return Config{}, err
 	}
+	if err := autoRouteClaimLeaseProvider(&cfg, fs, id); err != nil {
+		return Config{}, err
+	}
 	if err := autoRouteStaticLease(&cfg, fs, id); err != nil {
 		return Config{}, err
 	}

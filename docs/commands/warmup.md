@@ -45,6 +45,11 @@ stderr.
 Warmup records a local claim binding the lease to the current repo checkout. Use
 `--reclaim` to overwrite an existing claim for that lease.
 
+Warmup requires an explicit provider selection from `--provider`,
+`CRABBOX_PROVIDER`, user or repository config, broker config, or an applicable
+recorded lease route. With no selection it exits before provider initialization
+and points to `crabbox providers recommend`.
+
 For `local-container`, the default `--keep=true` also covers SSH readiness
 failure: once Docker has returned an exact container identity, Crabbox persists
 a scoped `provisioning` claim before inspecting the container or waiting for
@@ -284,7 +289,7 @@ warmup, because it also dispatches the workflow and waits for the ready marker.
 ## Flags
 
 ```text
---provider <name>                  provider (see crabbox providers); default hetzner
+--provider <name>                  provider (see crabbox providers); defaults to configured selection
 --profile <name>                   configuration profile
 --class <name>                     machine class; default beast
 --arch amd64|arm64                 CPU architecture; arm64 supports Linux on AWS/Azure/Apple Container and native Windows on Azure

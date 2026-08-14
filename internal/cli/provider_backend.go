@@ -1106,7 +1106,7 @@ func normalizeProviderName(name string) string {
 }
 
 func providerHelpAll() string {
-	return "provider: " + strings.Join(providerNamesForHelp(nil), ", ")
+	return "provider: " + strings.Join(providerNamesForHelp(nil), ", ") + " (defaults to configured selection)"
 }
 
 func providerHelpEnvValues() string {
@@ -1127,13 +1127,13 @@ func joinProviderNames(names []string) string {
 func providerHelpSSH() string {
 	return "provider: " + strings.Join(providerNamesForHelp(func(spec ProviderSpec) bool {
 		return spec.Features.Has(FeatureSSH)
-	}), ", ")
+	}), ", ") + " (defaults to configured selection)"
 }
 
 func providerHelpCleanup() string {
 	return "provider: " + joinProviderNames(providerNamesForHelp(func(spec ProviderSpec) bool {
 		return spec.Features.Has(FeatureCleanup)
-	}))
+	})) + " (defaults to configured selection)"
 }
 
 func isBlacksmithProvider(provider string) bool {
@@ -1292,6 +1292,9 @@ func routeConfiguredProvider(cfg *Config) error {
 		return err
 	}
 	cfg.Provider = provider.Name()
+	if providerSelectionIsAuthoritativeRoute(*cfg) {
+		return nil
+	}
 	if router, ok := provider.(ProviderRouter); ok {
 		if err := router.RouteConfig(cfg, nil, nil); err != nil {
 			return err
@@ -1369,6 +1372,9 @@ func validateControllerCoordinatorRegistrationBinding(cfg Config) error {
 }
 
 func loadBackend(cfg Config, rt Runtime) (Backend, error) {
+	if !providerSelectionIsActionable(cfg) {
+		return nil, exit(2, "%s", providerSelectionRequiredDiagnostic)
+	}
 	if rt.Stdout == nil {
 		rt.Stdout = io.Discard
 	}

@@ -16,8 +16,10 @@ The command is fast (under a second on a healthy machine), non-destructive, and
 never calls billable provider create APIs. When a coordinator is configured it
 performs cheap broker checks such as health, identity, and provider secret
 readiness. The provider readiness probe is bounded to a 10s timeout. Bare doctor
-skips that probe when the resolved provider is only the compiled default; all
-explicit or configured provider selections remain strict.
+is provider-neutral: it reports no selected provider, preserves
+`source=compiled_default selected=false` as compatibility metadata, and skips
+provider-specific tool and credential probes. All explicit or configured
+provider selections remain strict.
 
 ## Output Model
 
@@ -101,15 +103,16 @@ coordinator, doctor falls through to the direct provider check below.
 
 Provider readiness validates the selected provider without creating a lease.
 
-Before local tool checks, `provider-selection` reports the canonical provider
-and the winning source: `compiled_default`, `user_config`, `repo_config`,
+Before local tool checks, `provider-selection` reports whether a provider is
+selected and the winning source: `compiled_default`, `user_config`, `repo_config`,
 `environment`, `flag`, `recorded_run`, or `lease_context`. This provenance is
 resolved while configuration and command context are applied; doctor does not
 infer it from the provider name.
 
-When the source is `compiled_default`, doctor skips both brokered and direct
-provider credential readiness and emits an advisory provider warning with
-`readiness=skipped`. Other checks still run and can fail the command. A provider
+When the source is `compiled_default`, doctor reports `no provider selected`,
+sets selected=false, and skips provider-specific tools plus brokered and direct
+provider credential readiness. JSON keeps its top-level provider empty. Other
+provider-neutral checks still run and can fail the command. A provider
 selected from any higher-precedence source remains strict, including an
 explicit flag that happens to select the same provider as the compiled default.
 

@@ -145,7 +145,8 @@ func TestDoctorProviderSelectionProvenanceAndStrictness(t *testing.T) {
 				if err != nil {
 					t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 				}
-				if !strings.Contains(stdout.String(), "warning provider provider=hetzner source=compiled_default readiness=skipped") {
+				if !strings.Contains(stdout.String(), "provider-selection no provider selected source=compiled_default selected=false") ||
+					!strings.Contains(stdout.String(), "warning provider no provider selected source=compiled_default selected=false readiness=skipped") {
 					t.Fatalf("doctor did not skip compiled-default readiness:\n%s", stdout.String())
 				}
 			} else {
@@ -157,7 +158,10 @@ func TestDoctorProviderSelectionProvenanceAndStrictness(t *testing.T) {
 					t.Fatalf("doctor did not preserve strict provider readiness:\n%s", stdout.String())
 				}
 			}
-			wantSelection := "provider-selection provider=hetzner source=" + string(tt.wantSource)
+			wantSelection := "provider-selection provider=hetzner source=" + string(tt.wantSource) + " selected=true"
+			if tt.wantSource == providerSelectionCompiledDefault {
+				wantSelection = "provider-selection no provider selected source=compiled_default selected=false"
+			}
 			if !strings.Contains(stdout.String(), wantSelection) {
 				t.Fatalf("doctor selection provenance missing %q:\n%s", wantSelection, stdout.String())
 			}
@@ -192,7 +196,7 @@ func TestDoctorCompiledDefaultSkipsCoordinatorProviderReadiness(t *testing.T) {
 	if readinessCalled {
 		t.Fatal("doctor called coordinator readiness for the compiled default")
 	}
-	for _, want := range []string{"ok      coord", "ok      broker", "warning provider provider=hetzner source=compiled_default readiness=skipped"} {
+	for _, want := range []string{"ok      coord", "ok      broker", "warning provider no provider selected source=compiled_default selected=false readiness=skipped"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
 		}
@@ -209,17 +213,38 @@ func TestDoctorCompiledDefaultJSONReportsSkippedReadiness(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
 		t.Fatalf("doctor JSON invalid: %v\n%s", err, stdout.String())
 	}
-	if !view.OK || view.Provider != "hetzner" {
+	if !view.OK || view.Provider != "" {
 		t.Fatalf("doctor view=%#v", view)
 	}
 	var selection, readiness bool
 	for _, check := range view.Checks {
-		selection = selection || (check.Check == "provider-selection" && check.Details["source"] == "compiled_default")
-		readiness = readiness || (check.Check == "provider" && check.Status == "warning" && check.Details["readiness"] == "skipped")
+		selection = selection || (check.Check == "provider-selection" && check.Details["provider"] == "" && check.Details["source"] == "compiled_default" && check.Details["selected"] == "false")
+		readiness = readiness || (check.Check == "provider" && check.Status == "warning" && check.Details["provider"] == "" && check.Details["selected"] == "false" && check.Details["readiness"] == "skipped")
 	}
 	if !selection || !readiness {
 		t.Fatalf("doctor JSON missing provenance or skip: %#v", view.Checks)
 	}
+}
+
+func TestDoctorExplicitProviderJSONReportsSelected(t *testing.T) {
+	isolateDoctorProviderSelectionTest(t)
+	var stdout, stderr bytes.Buffer
+	if err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "ssh", "--json"}); err != nil {
+		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	var view doctorJSONOutput
+	if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+		t.Fatalf("doctor JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if !view.OK || view.Provider != "ssh" {
+		t.Fatalf("doctor view=%#v", view)
+	}
+	for _, check := range view.Checks {
+		if check.Check == "provider-selection" && check.Details["provider"] == "ssh" && check.Details["source"] == "flag" && check.Details["selected"] == "true" {
+			return
+		}
+	}
+	t.Fatalf("doctor JSON missing selected provider provenance: %#v", view.Checks)
 }
 
 func TestDoctorConfiguredProviderKeepsCoordinatorReadinessStrict(t *testing.T) {
@@ -259,9 +284,9 @@ func TestDoctorConfiguredProviderKeepsCoordinatorReadinessStrict(t *testing.T) {
 	}
 }
 
-func TestDoctorCompiledDefaultStillFailsOtherReadinessChecks(t *testing.T) {
+func TestDoctorCompiledDefaultStillFailsProviderNeutralReadinessChecks(t *testing.T) {
 	isolateDoctorProviderSelectionTest(t)
-	t.Setenv("PATH", doctorTestToolPath(t, []string{"git"}))
+	t.Setenv("PATH", doctorTestToolPath(t, nil))
 
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), nil)
@@ -269,7 +294,7 @@ func TestDoctorCompiledDefaultStillFailsOtherReadinessChecks(t *testing.T) {
 	if !AsExitError(err, &exitErr) || exitErr.Code != 1 {
 		t.Fatalf("doctor error=%v, want exit 1; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "missing ssh") || !strings.Contains(stdout.String(), "readiness=skipped") {
+	if !strings.Contains(stdout.String(), "missing git") || !strings.Contains(stdout.String(), "readiness=skipped") || strings.Contains(stdout.String(), "missing ssh") {
 		t.Fatalf("doctor did not preserve non-provider failures:\n%s", stdout.String())
 	}
 }

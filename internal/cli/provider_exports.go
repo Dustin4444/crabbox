@@ -17,6 +17,12 @@ func LoadConfig() (Config, error) {
 	return loadConfig()
 }
 
+// ProviderSelectionIsAuthoritativeRoute reports whether cfg names an exact
+// provider restored from lease or recorded-run context.
+func ProviderSelectionIsAuthoritativeRoute(cfg Config) bool {
+	return providerSelectionIsAuthoritativeRoute(cfg)
+}
+
 func NormalizeTargetConfig(cfg *Config) {
 	normalizeTargetConfig(cfg)
 }

@@ -2,8 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseCacheStats(t *testing.T) {
@@ -16,6 +19,30 @@ func TestParseCacheStats(t *testing.T) {
 	}
 	if entries[1].Kind != "docker" || entries[1].Note == "" {
 		t.Fatalf("docker entry=%#v", entries[1])
+	}
+}
+
+func TestCacheTargetRoutesOrdinaryLeaseClaim(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := claimLeaseForRepoProvider("cbx_1335_cache01", "Cache Claimed", "run-prepare-test", repo.Root, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	runPrepareTestResolveRequests = nil
+	_, cfg, _, err := (App{}).cacheTarget(context.Background(), "cache-claimed", false)
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 9 || !strings.Contains(exitErr.Message, "resolve captured") {
+		t.Fatalf("cacheTarget error=%v", err)
+	}
+	if cfg.Provider != "run-prepare-test" || cfg.providerSelectionSource != providerSelectionLeaseContext || !providerSelectionIsActionable(cfg) {
+		t.Fatalf("provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
+	}
+	if len(runPrepareTestResolveRequests) != 1 || runPrepareTestResolveRequests[0].ID != "cache-claimed" {
+		t.Fatalf("resolve requests=%#v", runPrepareTestResolveRequests)
 	}
 }
 

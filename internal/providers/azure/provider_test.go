@@ -173,6 +173,23 @@ func TestProviderAppliesAzureSnapshotStorageFlags(t *testing.T) {
 	}
 }
 
+func TestProviderExplicitBackendRoutesToDynamicSessions(t *testing.T) {
+	t.Parallel()
+	provider := Provider{}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := provider.RegisterFlags(fs, core.Config{AzureBackend: core.AzureBackendVM})
+	if err := fs.Parse([]string{"--azure-backend", "dynamic-sessions"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.Config{Provider: "azure", AzureBackend: core.AzureBackendVM}
+	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "azure-dynamic-sessions" || cfg.AzureBackend != core.AzureBackendDynamicSessions {
+		t.Fatalf("provider=%q backend=%q", cfg.Provider, cfg.AzureBackend)
+	}
+}
+
 func TestProviderValidatesConfiguredAzureOSDisk(t *testing.T) {
 	t.Parallel()
 	provider := Provider{}

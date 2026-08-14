@@ -56,7 +56,11 @@ func (a App) configShow(args []string) error {
 			return err
 		}
 		view := configShowView(cfg)
-		view["provider"] = provider
+		if providerSelectionIsActionable(cfg) {
+			view["provider"] = provider
+		} else {
+			view["provider"] = ""
+		}
 		view["providerScope"] = providerScope
 		view["idempotentLeaseId"] = fixedLeaseID
 		view["coordinatorRegistrationUrl"] = redactedConfigURL(coordinatorRegistrationURL)
@@ -142,16 +146,24 @@ func effectiveConfigForShow(cfg Config) Config {
 }
 
 func configShowView(cfg Config) map[string]any {
+	provider := cfg.Provider
+	serverType := cfg.ServerType
+	providerSelected := providerSelectionIsActionable(cfg)
+	if !providerSelected {
+		provider = ""
+		serverType = ""
+	}
 	return map[string]any{
 		"profile":                    cfg.Profile,
-		"provider":                   cfg.Provider,
+		"provider":                   provider,
+		"providerSelected":           providerSelected,
 		"providerSource":             cfg.providerSelectionSource,
 		"target":                     cfg.TargetOS,
 		"architecture":               effectiveArchitectureForConfig(cfg),
 		"os":                         cfg.OSImage,
 		"windowsMode":                cfg.WindowsMode,
 		"class":                      cfg.Class,
-		"serverType":                 cfg.ServerType,
+		"serverType":                 serverType,
 		"serverTypeExplicit":         cfg.ServerTypeExplicit,
 		"coordinator":                redactedConfigURL(cfg.Coordinator),
 		"brokerMode":                 cfg.BrokerMode,
@@ -754,7 +766,14 @@ func redactedParallelsHostConfigs(hosts []ParallelsHostConfig) []ParallelsHostCo
 
 func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "config=%s\n", userConfigPath())
-	fmt.Fprintf(w, "provider=%s provider_source=%s target=%s arch=%s os=%s windows_mode=%s class=%s type=%s profile=%s\n", cfg.Provider, cfg.providerSelectionSource, cfg.TargetOS, effectiveArchitectureForConfig(cfg), cfg.OSImage, cfg.WindowsMode, cfg.Class, cfg.ServerType, cfg.Profile)
+	provider := cfg.Provider
+	serverType := cfg.ServerType
+	providerSelected := providerSelectionIsActionable(cfg)
+	if !providerSelected {
+		provider = ""
+		serverType = ""
+	}
+	fmt.Fprintf(w, "provider=%s provider_selected=%t provider_source=%s target=%s arch=%s os=%s windows_mode=%s class=%s type=%s profile=%s\n", provider, providerSelected, cfg.providerSelectionSource, cfg.TargetOS, effectiveArchitectureForConfig(cfg), cfg.OSImage, cfg.WindowsMode, cfg.Class, serverType, cfg.Profile)
 	fmt.Fprintf(w, "broker=%s mode=%s auto_webvnc=%t login_redirect_origins=%s auth=%s admin_auth=%s\n", blank(redactedConfigURL(cfg.Coordinator), "-"), cfg.BrokerMode, cfg.BrokerAutoWebVNC, blank(strings.Join(cfg.BrokerLoginRedirectOrigins, ","), "-"), coordinatorTokenState(cfg), tokenState(cfg.CoordAdminToken))
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)

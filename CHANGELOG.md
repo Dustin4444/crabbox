@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Required explicit provider intent before lifecycle commands initialize a backend, while preserving claim and recorded-run routing and keeping bare doctor provider-neutral. Thanks @coygeek.
 - Prevented Azure orphan-sweep release failures from writing secret-bearing diagnostics to Worker console logs while retaining redacted details in sweep records.
 - Rejected native Jujutsu workspaces before Git-manifest sync can fall through to an outer checkout, while preserving colocated Git workspaces and `--no-sync`. Thanks @atimmer.
 - Redacted compound environment assignments, cookie and security-token headers, and camel-case API-token fields from client-visible coordinator diagnostics while preserving surrounding operational context. Thanks @dwin-gharibi.

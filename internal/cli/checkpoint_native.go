@@ -552,7 +552,7 @@ func directAWSCheckpointConfig(record checkpointRecord) (Config, bool) {
 	if err != nil {
 		return Config{}, false
 	}
-	cfg.Provider = "aws"
+	setProviderSelection(&cfg, "aws", providerSelectionRecordedRun)
 	if record.Native.Region != "" {
 		cfg.AWSRegion = record.Native.Region
 	}
@@ -567,7 +567,7 @@ func directAzureCheckpointConfig(record checkpointRecord) (Config, bool) {
 	if err != nil {
 		return Config{}, false
 	}
-	cfg.Provider = "azure"
+	setProviderSelection(&cfg, "azure", providerSelectionRecordedRun)
 	if record.Native.Region != "" {
 		cfg.AzureLocation = record.Native.Region
 	}
@@ -689,7 +689,11 @@ func coordinatorStatusCode(err error) int {
 }
 
 func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord) error {
-	cfg.Provider = record.nativeProvider()
+	providerSource := providerSelectionRecordedRun
+	if flagWasSet(fs, "provider") {
+		providerSource = providerSelectionFlag
+	}
+	setProviderSelection(cfg, record.nativeProvider(), providerSource)
 	if record.Native.Direct {
 		cfg.Coordinator = ""
 		cfg.CoordToken = ""

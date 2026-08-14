@@ -107,7 +107,7 @@ func loadControllerRunnerConfigState(configPath, provider, workDir string) (Conf
 	}
 	applyCloudflareDynamicWorkersRepositoryCaps(&cfg)
 	if provider = strings.TrimSpace(provider); provider != "" {
-		cfg.Provider = provider
+		setProviderSelection(&cfg, provider, providerSelectionFlag)
 		cfg.brokerProvider = ""
 	}
 	if err := normalizeBrokerConfig(&cfg); err != nil {

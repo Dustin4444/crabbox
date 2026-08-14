@@ -3,9 +3,10 @@
 `crabbox doctor` runs a preflight before you commit to a long workflow. It is
 fast on a healthy machine, non-destructive, and never creates, mutates, or
 deletes provider resources. Bare `crabbox doctor` is also the pre-configuration
-local-readiness check: when the provider comes only from Crabbox's compiled
-default, doctor reports that provenance and skips provider credential readiness
-with a warning. Run it before your first `crabbox run`, after rotating tokens or
+local-readiness check: with no selected provider, doctor reports
+`source=compiled_default selected=false`, leaves the top-level JSON provider
+empty, and skips provider credential readiness with a warning. Run it before
+your first `crabbox run`, after rotating tokens or
 editing config, and as a sanity check in agent boot sequences or CI smoke jobs.
 
 ```sh
@@ -53,11 +54,11 @@ A missing tool prints `missing` and fails the run.
 
 Provider readiness validates the selected provider without creating a lease.
 
-Doctor first prints `provider-selection` with the resolved provider and source:
+Doctor first prints `provider-selection` with the selected state and source:
 `compiled_default`, `user_config`, `repo_config`, `environment`, `flag`,
-`recorded_run`, or `lease_context`. If the only source is `compiled_default`, doctor prints
-`warning provider ... readiness=skipped` and does not run either direct or
-coordinator provider credential readiness. This warning does not hide other
+`recorded_run`, or `lease_context`. If the only source is `compiled_default`,
+doctor explicitly says `no provider selected`, reports `selected=false`, and
+does not run provider-specific tool or credential readiness. This warning does not hide other
 failures: missing local tools, invalid coordinator authentication, unsafe config
 permissions, and other applicable checks still determine the exit status.
 Selecting the same provider explicitly is strict; for example,
@@ -223,7 +224,7 @@ Exit codes:
 ## Flags
 
 ```text
---provider <name>             provider to validate strictly (defaults to resolved provider)
+--provider <name>             provider to validate strictly (defaults to configured selection)
 --profile <name>              configured profile for remote prerequisite checks
 --id <lease-id-or-slug>       resolve a lease and run a remote SSH/tool probe
 --from-run <run-id>           load provider/target/lease/phase context from a recorded run

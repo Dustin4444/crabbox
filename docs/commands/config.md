@@ -40,9 +40,15 @@ skipped). This changes selection only: an explicit path inside the active
 repository, or a symlink that resolves into it, still has repository trust.
 `config show` reflects the resulting effective values, including
 provider defaults applied at load time; per-command flags are not part of what
-it reports. The provider line also includes `provider_source` (and JSON includes
-`providerSource`) so diagnostics distinguish a `compiled_default` from a
-selection in `user_config`, `repo_config`, or the `environment`. Passing
+it reports. The provider line includes `provider_selected` and `provider_source`
+(JSON: `providerSelected` and `providerSource`). With only compatibility
+metadata, the public `provider` value is the empty string and the state is
+`provider_selected=false provider_source=compiled_default`; it is not an
+actionable provider selection. The public top-level `serverType` / text `type`
+is also empty in that state so provider-specific compatibility defaults are not
+presented as effective; provider-specific configuration sections remain visible.
+Selections in `user_config`, `repo_config`, or
+the `environment` retain the canonical provider name and report selected=true. Passing
 `config show --provider <name>` reports `flag` because that command-scoped
 override wins the merge.
 

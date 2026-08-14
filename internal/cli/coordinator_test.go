@@ -2009,11 +2009,13 @@ func TestLeaseStatusRequiresSSHReadiness(t *testing.T) {
 	}))
 	defer server.Close()
 
-	state, err := (App{}).leaseStatus(context.Background(), Config{
+	cfg := Config{
 		Coordinator: server.URL,
 		Provider:    "aws",
 		SSHKey:      filepath.Join(t.TempDir(), "missing-key"),
-	}, "cbx_123")
+	}
+	setProviderSelection(&cfg, "aws", providerSelectionFlag)
+	state, err := (App{}).leaseStatus(context.Background(), cfg, "cbx_123")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,12 +24,14 @@ crabbox --version
 crabbox doctor
 ```
 
-`crabbox doctor` prints one line per check. Local tool checks (`git`, `ssh`,
-`ssh-keygen`, `rsync`) should report `ok`. On a fresh install, doctor reports the
-compiled provider default as `source=compiled_default` and warns that provider
-credential readiness was skipped; the warning does not fail the command. Once
-you select a provider through config, `CRABBOX_PROVIDER`, or `--provider`, its
-broker or direct credential check is strict and can fail until you configure it.
+`crabbox doctor` prints one line per check. On a fresh install, its
+provider-neutral `git` check should report `ok`; provider-specific tool checks
+begin after you select a provider. Doctor reports `no provider selected`, keeps
+the compatibility metadata as `source=compiled_default selected=false`, and
+skips provider credential readiness without failing the command. Select a
+provider through config, `CRABBOX_PROVIDER`, or `--provider` before a lifecycle
+command. That selection is strict and can fail until its credentials are
+configured; run `crabbox providers recommend` to compare options.
 
 If you do not use Homebrew, GitHub Releases ship signed archives for macOS,
 Linux, and Windows. Download the matching archive from

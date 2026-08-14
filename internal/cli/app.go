@@ -366,6 +366,9 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 func parseFlags(fs *flag.FlagSet, args []string) error {
+	if provider := fs.Lookup("provider"); provider != nil {
+		provider.DefValue = ""
+	}
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return ExitError{Code: 0}

@@ -173,6 +173,9 @@ func (a App) cacheTarget(ctx context.Context, id string, reclaim bool) (SSHTarge
 	if err != nil {
 		return SSHTarget{}, Config{}, "", err
 	}
+	if err := autoRouteClaimLeaseProviderForIdentifier(&cfg, id); err != nil {
+		return SSHTarget{}, Config{}, "", err
+	}
 	repo, err := findRepo()
 	if err != nil {
 		return SSHTarget{}, Config{}, "", err

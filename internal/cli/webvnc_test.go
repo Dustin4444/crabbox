@@ -2860,7 +2860,7 @@ func TestControllerWebVNCResolveIsIdentityBoundAndReadOnly(t *testing.T) {
 	t.Cleanup(func() { testExternalResolveHook = nil })
 
 	cfg := BaseConfig()
-	cfg.Provider = "external"
+	setProviderSelection(&cfg, "external", providerSelectionFlag)
 	cfg.External.Command = "provider-command"
 	cfg.External.Capabilities.IdempotentLeaseID = true
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
