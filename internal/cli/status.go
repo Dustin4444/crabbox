@@ -13,7 +13,7 @@ import (
 func (a App) status(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("status", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
 	wait := fs.Bool("wait", false, "wait until ready")
 	waitTimeout := fs.Duration("wait-timeout", 5*time.Minute, "maximum wait duration")

@@ -400,6 +400,39 @@ func TestRouteConfiguredProviderPreservesAuthoritativeProviderFamilyRoute(t *tes
 	})
 }
 
+func TestApplyProviderRoutingFlagsPreservesAuthoritativeAzureRoute(t *testing.T) {
+	defaults := baseConfig()
+	defaults.Provider = "azure"
+	defaults.AzureBackend = AzureBackendDynamicSessions
+
+	fs := newFlagSet("authoritative Azure route", io.Discard)
+	values := registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	setProviderSelection(&cfg, "azure", providerSelectionRecordedRun)
+	if err := applyProviderRoutingFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "azure" || cfg.providerSelectionSource != providerSelectionRecordedRun {
+		t.Fatalf("provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
+	}
+
+	overrideFS := newFlagSet("authoritative Azure route override", io.Discard)
+	overrideValues := registerProviderFlags(overrideFS, defaults)
+	if err := parseFlags(overrideFS, []string{"--azure-backend", "dynamic-sessions"}); err != nil {
+		t.Fatal(err)
+	}
+	setProviderSelection(&cfg, "azure", providerSelectionRecordedRun)
+	if err := applyProviderRoutingFlags(&cfg, overrideFS, overrideValues); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "azure-dynamic-sessions" || cfg.providerSelectionSource != providerSelectionFlag {
+		t.Fatalf("provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
+	}
+}
+
 func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	t.Setenv(controllerProviderScopeEnv, "")
 	cfg := baseConfig()
@@ -1079,7 +1112,7 @@ func TestLeaseCreateFlagsReapplyDigitalOceanTargetAfterProviderOverride(t *testi
 	}
 }
 
-func TestLeaseCreateFlagsDeriveGCPTypeForAlias(t *testing.T) {
+func TestLeaseCreateFlagsCanonicalizeGCPAliasAndDeriveType(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)
 	values := registerLeaseCreateFlags(fs, defaults)
@@ -1090,8 +1123,8 @@ func TestLeaseCreateFlagsDeriveGCPTypeForAlias(t *testing.T) {
 	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "google" {
-		t.Fatalf("provider should remain raw until backend load, got %q", cfg.Provider)
+	if cfg.Provider != "gcp" {
+		t.Fatalf("provider=%q want canonical gcp", cfg.Provider)
 	}
 	if cfg.ServerType != "c4-standard-32" {
 		t.Fatalf("server type=%q want gcp default", cfg.ServerType)

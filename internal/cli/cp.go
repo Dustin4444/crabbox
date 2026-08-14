@@ -15,7 +15,7 @@ import (
 func (a App) copyCommand(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("cp", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
 	followLink := fs.Bool("L", false, "follow symbolic links when copying from host to sandbox")
 	providerFlags := registerProviderFlags(fs, defaults)

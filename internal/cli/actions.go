@@ -38,7 +38,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	started := time.Now()
 	defaults := defaultConfig()
 	fs := newFlagSet("actions hydrate", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
@@ -314,7 +314,7 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 func (a App) actionsRegister(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("actions register", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)

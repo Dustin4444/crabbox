@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Preserved authoritative recorded-run and lease-claim provider routes while keeping unselected inspection and archive dry-run output provider-neutral.
 - Bound coordinator release, heartbeat, and Tailscale mutations to the CLI-selected provider, preventing cross-provider lease deletion or metadata changes.
 
 ## 0.42.0 - 2026-08-14

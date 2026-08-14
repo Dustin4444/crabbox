@@ -31,7 +31,7 @@ type doctorJSONCheck struct {
 func (a App) doctor(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("doctor", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	profile := fs.String("profile", defaults.Profile, "configured profile for remote prerequisite checks")
 	id := fs.String("id", "", "remote lease id to inspect")
 	fromRun := fs.String("from-run", "", "recorded run id to use for provider, target, lease, and phase context")
@@ -187,7 +187,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
-	if err := autoRouteExternalLease(&cfg, fs, resolvedDoctorID); err != nil {
+	if err := autoRouteLeaseProviderForIdentifier(&cfg, fs, resolvedDoctorID); err != nil {
 		return err
 	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
@@ -318,11 +318,16 @@ func (a App) doctor(ctx context.Context, args []string) error {
 					ok = false
 					brokerOK = false
 				} else {
-					details := map[string]string{"auth": whoami.Auth, "owner": whoami.Owner, "org": whoami.Org, "default_type": cfg.ServerType}
+					details := map[string]string{"auth": whoami.Auth, "owner": whoami.Owner, "org": whoami.Org}
+					defaultType := ""
+					if providerSelected {
+						defaultType = cfg.ServerType
+						details["default_type"] = defaultType
+					}
 					if whoami.TokenExpiresAt != "" {
 						details["token_expires"] = whoami.TokenExpiresAt
 					}
-					record("ok", "broker", doctorBrokerOKMessage(whoami, cfg.ServerType), details)
+					record("ok", "broker", doctorBrokerOKMessage(whoami, defaultType), details)
 				}
 				if brokerOK && providerSelected && coordinatorProviderReadinessSupported(cfg.Provider) {
 					readiness, err := coord.ProviderReadiness(ctx, cfg)
@@ -614,7 +619,9 @@ func doctorBrokerOKMessage(whoami CoordinatorWhoami, serverType string) string {
 		"auth=" + whoami.Auth,
 		"owner=" + whoami.Owner,
 		"org=" + whoami.Org,
-		"default_type=" + serverType,
+	}
+	if strings.TrimSpace(serverType) != "" {
+		parts = append(parts, "default_type="+serverType)
 	}
 	if whoami.TokenExpiresAt != "" {
 		parts = append(parts, "token_expires="+whoami.TokenExpiresAt)

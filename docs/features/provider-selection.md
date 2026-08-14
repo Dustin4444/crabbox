@@ -53,9 +53,12 @@ Lifecycle commands require actionable provider intent: pass `--provider
 or broker config. The compiled provider value is retained only for compatible
 default derivation and is never enough to initialize a backend. Existing lease
 commands may instead route from an exact local claim, an unambiguous claimed
-slug, or recorded run context. With no actionable selection, commands stop with
-shared guidance before provider credential validation. Run `crabbox providers
-recommend` when choosing a provider.
+slug, or recorded run context. Exact claim and recorded routes are authoritative:
+only an explicit routing flag may replace them. Archive checkpoint-fork and
+shard dry-runs still require provider intent because the archive does not record
+a destination provider. With no actionable selection, commands stop with shared
+guidance before provider credential validation. Run `crabbox providers recommend`
+when choosing a provider.
 
 ## Selection rules
 

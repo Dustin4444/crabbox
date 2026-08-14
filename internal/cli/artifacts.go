@@ -94,7 +94,7 @@ type artifactPublishOptions struct {
 func (a App) artifactsCollect(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("artifacts collect", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or ssh")
+	provider := registerProviderSelectionFlag(fs, defaults, "provider: hetzner, aws, or ssh")
 	id := fs.String("id", "", "lease id or slug")
 	output := fs.String("output", "", "artifact bundle directory")
 	runID := fs.String("run", "", "optional run id whose retained logs should be copied")

@@ -19,7 +19,7 @@ func (a App) desktopLaunch(ctx context.Context, args []string) error {
 func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, commandOverride []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("desktop launch", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	browser := fs.Bool("browser", false, "launch the target browser")
 	url := fs.String("url", "", "URL to pass to the launched browser")
@@ -203,7 +203,7 @@ func parseWindowsDesktopWindow(output string) (windowsDesktopWindow, error) {
 func (a App) desktopTerminal(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("desktop terminal", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	fontSize := fs.Int("font-size", 14, "terminal font size")
 	cols := fs.Int("cols", 100, "terminal columns")
@@ -401,7 +401,7 @@ func (a App) desktopRecord(ctx context.Context, args []string) error {
 func (a App) desktopProof(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("desktop proof", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	output := fs.String("output", "", "proof artifact directory")
 	fontSize := fs.Int("font-size", 14, "terminal font size")

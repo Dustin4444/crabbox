@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -201,10 +202,26 @@ func TestDoctorCompiledDefaultSkipsCoordinatorProviderReadiness(t *testing.T) {
 			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
 		}
 	}
+	if strings.Contains(stdout.String(), "default_type") || strings.Contains(stdout.String(), "ccx63") {
+		t.Fatalf("provider-neutral doctor exposed a provider default type:\n%s", stdout.String())
+	}
 }
 
 func TestDoctorCompiledDefaultJSONReportsSkippedReadiness(t *testing.T) {
 	isolateDoctorProviderSelectionTest(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{Auth: "token", Owner: "alice@example.test", Org: "example-org"})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "token")
 	var stdout, stderr bytes.Buffer
 	if err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--json"}); err != nil {
 		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
@@ -216,13 +233,19 @@ func TestDoctorCompiledDefaultJSONReportsSkippedReadiness(t *testing.T) {
 	if !view.OK || view.Provider != "" {
 		t.Fatalf("doctor view=%#v", view)
 	}
-	var selection, readiness bool
+	var selection, readiness, broker bool
 	for _, check := range view.Checks {
 		selection = selection || (check.Check == "provider-selection" && check.Details["provider"] == "" && check.Details["source"] == "compiled_default" && check.Details["selected"] == "false")
 		readiness = readiness || (check.Check == "provider" && check.Status == "warning" && check.Details["provider"] == "" && check.Details["selected"] == "false" && check.Details["readiness"] == "skipped")
+		broker = broker || check.Check == "broker"
 	}
-	if !selection || !readiness {
+	if !selection || !readiness || !broker {
 		t.Fatalf("doctor JSON missing provenance or skip: %#v", view.Checks)
+	}
+	for _, check := range view.Checks {
+		if _, ok := check.Details["default_type"]; ok || strings.Contains(check.Message, "default_type") || strings.Contains(check.Message, "ccx63") {
+			t.Fatalf("provider-neutral doctor JSON exposed a provider default type: %#v", check)
+		}
 	}
 }
 
@@ -392,6 +415,72 @@ printf 'jq=jq-1.7\n'
 	}
 }
 
+func TestDoctorIDUsesSharedLeaseIdentifierRouting(t *testing.T) {
+	t.Run("ordinary claim", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		setupClaimRoutingCommandTest(t, claimRoutingUnusableProvider)
+		t.Setenv("PATH", doctorTestToolPath(t, []string{"git", "ssh", "ssh-keygen", "rsync"}))
+		mustWriteClaimRoutingTestClaim(t, "cbx_doctor_claim", "doctor-claim", claimRoutingUsableProvider)
+
+		var stdout bytes.Buffer
+		err := (App{Stdout: &stdout, Stderr: io.Discard}).doctor(context.Background(), []string{"--id", "doctor-claim"})
+		if err != nil {
+			t.Fatalf("doctor error=%v\n%s", err, stdout.String())
+		}
+		if !strings.Contains(stdout.String(), "provider-selection provider="+claimRoutingUsableProvider+" source=lease_context") {
+			t.Fatalf("doctor did not route ordinary claim:\n%s", stdout.String())
+		}
+	})
+
+	t.Run("static claim", func(t *testing.T) {
+		isolateDoctorProviderSelectionTest(t)
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		claimed := baseConfig()
+		claimed.Provider = staticProvider
+		claimed.Static.Host = "doctor-static.example.test"
+		claimed.Static.User = "runner"
+		if err := claimLeaseForRepoConfig("static_doctor", "doctor-static", claimed, "/repo", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout bytes.Buffer
+		err := (App{Stdout: &stdout, Stderr: io.Discard}).doctor(context.Background(), []string{"--id", "doctor-static"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(stdout.String(), "provider-selection provider=ssh source=lease_context") {
+			t.Fatalf("doctor did not route Static claim:\n%s", stdout.String())
+		}
+	})
+
+	t.Run("external claim", func(t *testing.T) {
+		clearConfigEnv(t)
+		root := setExternalRoutingTestHome(t)
+		t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+		t.Setenv("PATH", doctorTestToolPath(t, []string{"git", "ssh", "ssh-keygen", "rsync"}))
+		const leaseID = "cbx_doctor_external"
+		if _, err := PersistExternalRouting(leaseID, ExternalConfig{Command: "doctor-external", WorkRoot: "/work/doctor"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := claimLeaseForRepoProviderScope(leaseID, "doctor-external", "external", "doctor-scope", root, time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		testExternalResolveHook = func(req ResolveRequest) (LeaseTarget, error) {
+			return LeaseTarget{LeaseID: leaseID, Server: Server{Provider: "external", CloudID: leaseID}, SSH: SSHTarget{Host: "doctor-external.example.test", User: "runner", Port: "22", TargetOS: targetLinux}}, nil
+		}
+		t.Cleanup(func() { testExternalResolveHook = nil })
+
+		var stdout bytes.Buffer
+		err := (App{Stdout: &stdout, Stderr: io.Discard}).doctor(context.Background(), []string{"--id", "doctor-external"})
+		if err != nil {
+			t.Fatalf("doctor error=%v\n%s", err, stdout.String())
+		}
+		if !strings.Contains(stdout.String(), "provider-selection provider=external source=lease_context") {
+			t.Fatalf("doctor did not route External claim:\n%s", stdout.String())
+		}
+	})
+}
+
 func TestDoctorDoesNotPrepareExistingLease(t *testing.T) {
 	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -511,6 +600,36 @@ func TestDoctorFromRunAppliesRecordedContext(t *testing.T) {
 	}
 }
 
+func TestDoctorFromRunProviderSurvivesUnrelatedIdentifierClaim(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("PATH", doctorTestToolPath(t, []string{"git", "ssh", "ssh-keygen", "rsync"}))
+	if err := claimLeaseForRepoProvider("cbx_recorded_doctor", "recorded-doctor", "external", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/runs/run_recorded_claim" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+			ID: "run_recorded_claim", Provider: claimRoutingUsableProvider, TargetOS: targetLinux,
+			Class: "standard", ServerType: "test", LeaseID: "recorded-doctor", Phase: "test",
+		}})
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+
+	var stdout bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: io.Discard}).doctor(context.Background(), []string{"--from-run", "run_recorded_claim"})
+	if err != nil {
+		t.Fatalf("doctor error=%v\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "provider-selection provider="+claimRoutingUsableProvider+" source=recorded_run") {
+		t.Fatalf("recorded provider was replaced by identifier claim:\n%s", stdout.String())
+	}
+}
+
 func TestDoctorDirectProviderCheckIncludesTimeoutWhenMessageHasProvider(t *testing.T) {
 	for _, tool := range doctorLocalTools(testCloudflareProvider{}.Spec()) {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -586,6 +705,7 @@ func TestDoctorJSONCoordinatorOutput(t *testing.T) {
 	}
 	found := false
 	foundCoordinator := false
+	foundBrokerDefault := false
 	for _, check := range view.Checks {
 		if check.Check == "coord" {
 			foundCoordinator = true
@@ -601,12 +721,18 @@ func TestDoctorJSONCoordinatorOutput(t *testing.T) {
 		if check.Check == "provider" && check.Details["provider"] == "aws" && check.Details["coordinator_secrets"] == "ready" {
 			found = true
 		}
+		if check.Check == "broker" && check.Details["default_type"] != "" && strings.Contains(check.Message, "default_type="+check.Details["default_type"]) {
+			foundBrokerDefault = true
+		}
 	}
 	if !foundCoordinator {
 		t.Fatalf("coordinator check missing from JSON: %#v", view.Checks)
 	}
 	if !found {
 		t.Fatalf("provider readiness missing from JSON: %#v", view.Checks)
+	}
+	if !foundBrokerDefault {
+		t.Fatalf("selected provider default type missing from broker JSON: %#v", view.Checks)
 	}
 }
 

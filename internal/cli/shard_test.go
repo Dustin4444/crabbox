@@ -595,7 +595,7 @@ func TestShardDryRunPrintsPlan(t *testing.T) {
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: io.Discard}
 	err = app.shard(context.Background(), []string{
-		"--count", "2", "--from", record.ID, "--dry-run", "--slug", "Suite",
+		"--count", "2", "--from", record.ID, "--provider", "local-container", "--dry-run", "--slug", "Suite",
 		"--", "pnpm", "test", "--", "--shard", "{{index}}/{{total}}",
 	})
 	if err != nil {
@@ -610,6 +610,26 @@ func TestShardDryRunPrintsPlan(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestShardArchiveDryRunRequiresProviderIntent(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{ID: "chk_shard_no_provider", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = (App{Stdout: io.Discard, Stderr: io.Discard}).shard(context.Background(), []string{
+		"--count", "2", "--from", record.ID, "--dry-run", "--", "go", "test", "./...",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || exitErr.Message != providerSelectionRequiredDiagnostic {
+		t.Fatalf("error=%v, want exit 2 %q", err, providerSelectionRequiredDiagnostic)
 	}
 }
 

@@ -1171,8 +1171,11 @@ func applyProviderRoutingFlags(cfg *Config, fs *flag.FlagSet, values providerFla
 	if err != nil {
 		return err
 	}
+	cfg.Provider = provider.Name()
+	if providerSelectionIsAuthoritativeRoute(*cfg) {
+		return nil
+	}
 	if router, ok := provider.(ProviderRouter); ok {
-		cfg.Provider = provider.Name()
 		if err := router.RouteConfig(cfg, fs, values[provider.Name()]); err != nil {
 			return err
 		}

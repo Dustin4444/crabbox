@@ -114,6 +114,40 @@ func TestAutoRouteStaticLeaseRestoresFriendlySlugClaim(t *testing.T) {
 	}
 }
 
+func TestAutoRouteStaticLeasePreservesAuthoritativeProvider(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	claimed := baseConfig()
+	claimed.Provider = staticProvider
+	claimed.Static.Host = "authoritative.example.com"
+	claimed.Static.User = "builder"
+	if err := claimLeaseForRepoConfig("static_authoritative", "authoritative-static", claimed, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFlagSet("authoritative static route", io.Discard)
+	registerTargetFlags(fs, baseConfig())
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	nonStatic := baseConfig()
+	setProviderSelection(&nonStatic, "azure", providerSelectionRecordedRun)
+	if err := autoRouteStaticLease(&nonStatic, fs, "authoritative-static"); err != nil {
+		t.Fatal(err)
+	}
+	if nonStatic.Provider != "azure" || nonStatic.providerSelectionSource != providerSelectionRecordedRun || nonStatic.Static.Host != "" {
+		t.Fatalf("non-static authoritative route changed: provider=%q source=%q static=%#v", nonStatic.Provider, nonStatic.providerSelectionSource, nonStatic.Static)
+	}
+
+	static := baseConfig()
+	setProviderSelection(&static, staticProvider, providerSelectionRecordedRun)
+	if err := autoRouteStaticLease(&static, fs, "authoritative-static"); err != nil {
+		t.Fatal(err)
+	}
+	if static.Provider != staticProvider || static.providerSelectionSource != providerSelectionRecordedRun || static.Static.Host != claimed.Static.Host {
+		t.Fatalf("static authoritative route=%q source=%q static=%#v", static.Provider, static.providerSelectionSource, static.Static)
+	}
+}
+
 func TestLeaseTargetConfigPreservesImplicitStaticClaimRouting(t *testing.T) {
 	isolateTestUserDirs(t)
 	claimed := baseConfig()

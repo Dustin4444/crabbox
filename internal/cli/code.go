@@ -53,7 +53,7 @@ const (
 func (a App) webCode(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("code", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or azure")
+	provider := registerProviderSelectionFlag(fs, defaults, "provider: hetzner, aws, or azure")
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	localPort := fs.String("local-port", "", "local code-server tunnel port")

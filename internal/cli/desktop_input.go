@@ -202,7 +202,7 @@ func (a App) printDesktopInputRescue(problem, output string, cfg Config, target 
 func (a App) desktopCommandTarget(ctx context.Context, name string, args []string, requireLinux bool) (SSHTarget, Config, string, error) {
 	defaults := defaultConfig()
 	fs := newFlagSet(name, a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
@@ -262,7 +262,7 @@ func (a App) desktopCommandTarget(ctx context.Context, name string, args []strin
 func desktopKeySequenceArg(args []string) (string, error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("desktop key", io.Discard)
-	fs.String("provider", defaults.Provider, providerHelpSSH())
+	registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	registerProviderFlags(fs, defaults)
 	registerTargetFlags(fs, defaults)

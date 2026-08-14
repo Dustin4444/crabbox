@@ -302,10 +302,51 @@ func TestCheckpointForkDryRunDoesNotAcquireLease(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: io.Discard}
-	if err := app.checkpointFork(context.Background(), []string{record.ID, "--dry-run", "--slug", "fork-dryrun"}); err != nil {
+	if err := app.checkpointFork(context.Background(), []string{record.ID, "--provider", "local-container", "--dry-run", "--slug", "fork-dryrun"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stdout.String(), "would fork checkpoint") || !strings.Contains(stdout.String(), "fork-dryrun") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestCheckpointForkArchiveDryRunRequiresProviderIntent(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{ID: "chk_fork_no_provider", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointFork(context.Background(), []string{record.ID, "--dry-run"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || exitErr.Message != providerSelectionRequiredDiagnostic {
+		t.Fatalf("error=%v, want exit 2 %q", err, providerSelectionRequiredDiagnostic)
+	}
+}
+
+func TestCheckpointForkNativeDryRunUsesRecordedProvider(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := checkpointRecord{ID: "chk_native_recorded_provider", Kind: checkpointKindDockerCommit, CreatedAt: time.Now().UTC().Format(time.RFC3339), TargetOS: targetLinux}
+	record.Native.ImageID = "sha256:checkpoint"
+	record.Native.Direct = true
+	if _, err := store.Create(record); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: io.Discard}).checkpointFork(context.Background(), []string{record.ID, "--dry-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "provider=local-container") {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
 }
@@ -344,7 +385,7 @@ func TestCheckpointForkDryRunFansOutRequestedSlug(t *testing.T) {
 
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: io.Discard}
-	if err := app.checkpointFork(context.Background(), []string{record.ID, "--dry-run", "--count", "3", "--slug", "Fork Smoke"}); err != nil {
+	if err := app.checkpointFork(context.Background(), []string{record.ID, "--provider", "local-container", "--dry-run", "--count", "3", "--slug", "Fork Smoke"}); err != nil {
 		t.Fatal(err)
 	}
 	out := stdout.String()
@@ -377,7 +418,7 @@ func TestCheckpointForkDryRunFansOutCommand(t *testing.T) {
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: io.Discard}
 	err = app.checkpointFork(context.Background(), []string{
-		record.ID, "--dry-run", "--count", "2", "--slug", "Fanout",
+		record.ID, "--provider", "local-container", "--dry-run", "--count", "2", "--slug", "Fanout",
 		"--", "pnpm", "test", "--", "--shard", "{{index}}/{{total}}", "--lease", "{{lease}}", "--slug", "{{slug}}",
 	})
 	if err != nil {

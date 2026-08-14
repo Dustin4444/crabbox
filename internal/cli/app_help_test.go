@@ -61,6 +61,30 @@ func TestWarmupHelpDescribesConfiguredProviderWithoutCompiledDefault(t *testing.
 	}
 }
 
+func TestLiteralProviderDefaultsRemainVisibleInHelp(t *testing.T) {
+	for _, command := range []struct {
+		name string
+		run  func(App) error
+		want string
+	}{
+		{name: "marketplace quote", run: func(app App) error { return app.marketplaceQuote(context.Background(), []string{"--help"}) }, want: `default "auto"`},
+		{name: "image promote", run: func(app App) error { return app.imagePromote(context.Background(), []string{"--help"}) }, want: `default "aws"`},
+	} {
+		t.Run(command.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := command.run(App{Stdout: &stdout, Stderr: &stderr})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 0 {
+				t.Fatalf("help error=%v stderr=%q", err, stderr.String())
+			}
+			help := stderr.String()
+			if helpLineContaining(help, "-provider string") == "" || !strings.Contains(help, command.want) {
+				t.Fatalf("provider help missing %q\n%s", command.want, help)
+			}
+		})
+	}
+}
+
 func TestRunHelpDescribesStandaloneScriptUpload(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{"run", "--help"})

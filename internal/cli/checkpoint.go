@@ -82,7 +82,7 @@ type checkpointRecord struct {
 func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("checkpoint create", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	name := fs.String("name", "", "checkpoint name")
 	mode := fs.String("mode", "auto", "checkpoint mode: auto, native, or archive")
@@ -235,7 +235,7 @@ func (a App) checkpointList(ctx context.Context, args []string) error {
 	fs := newFlagSet("checkpoint list", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
 	verify := fs.Bool("verify", false, "verify local artifacts and provider resources")
-	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "provider source VM id/name for provider-native snapshots")
 	tree := fs.Bool("tree", true, "show provider-native snapshots as a tree")
 	forkableOnly := fs.Bool("forkable-only", false, "show only forkable provider-native snapshots")
@@ -522,7 +522,7 @@ func printCheckpointInspect(stdout io.Writer, record checkpointRecord) {
 func (a App) checkpointRestore(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("checkpoint restore", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	snapshot := fs.String("snapshot", "", "provider-native snapshot name or id")
 	dryRun := fs.Bool("dry-run", false, "show provider-native restore target without switching snapshots")
@@ -728,6 +728,9 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 		}
 	}
 	if *dryRun {
+		if !providerSelectionIsActionable(cfg) {
+			return exit(2, "%s", providerSelectionRequiredDiagnostic)
+		}
 		for i := 1; i <= *count; i++ {
 			slug := checkpointForkFanoutSlug(requestedSlug, i, *count)
 			expandedCommand := checkpointForkRunCommand(runArgs, checkpointForkRunContext{Index: i, Total: *count, Slug: slug})
@@ -1052,7 +1055,7 @@ func (a App) checkpointForkParallelsSnapshotOnce(ctx context.Context, cfg Config
 func (a App) checkpointDelete(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("checkpoint delete", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	sourceID := fs.String("id", "", "provider source VM id/name for provider-native snapshot")
 	snapshot := fs.String("snapshot", "", "provider-native snapshot name or id")
 	localOnly := fs.Bool("local-only", false, "delete only the local checkpoint record")
