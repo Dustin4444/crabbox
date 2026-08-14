@@ -234,7 +234,7 @@ func (a App) pondRelease(ctx context.Context, args []string) error {
 		if rerr != nil {
 			if backendCoordinator(backend) != nil {
 				fmt.Fprintf(a.Stderr, "warning: could not inspect %s/%s before release: %v\n", claim.Provider, claim.LeaseID, rerr)
-				lease = LeaseTarget{LeaseID: claim.LeaseID}
+				lease = LeaseTarget{LeaseID: claim.LeaseID, Server: Server{Provider: sshBackend.Spec().Name}}
 			} else {
 				if firstErr == nil {
 					firstErr = rerr

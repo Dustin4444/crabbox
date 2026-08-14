@@ -389,6 +389,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	return serveWebVNCBridgePool(bridgeCtx, webVNCBridgePoolConfig{
 		Coord:              coord,
 		LeaseID:            leaseID,
+		ExpectedProvider:   cfg.Provider,
 		Host:               connHost,
 		Port:               connPort,
 		Credentials:        credentials,
@@ -493,6 +494,7 @@ func requireMacOSScreenSharingCredentials(credentials rfbCredentials) error {
 type webVNCBridgePoolConfig struct {
 	Coord              *CoordinatorClient
 	LeaseID            string
+	ExpectedProvider   string
 	Host               string
 	Port               string
 	Credentials        rfbCredentials
@@ -522,7 +524,10 @@ func serveWebVNCBridgePool(ctx context.Context, cfg webVNCBridgePoolConfig) erro
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if !cfg.DisableHeartbeat && cfg.Coord != nil && strings.TrimSpace(cfg.LeaseID) != "" {
-		stopHeartbeat := startCoordinatorHeartbeat(ctx, cfg.Coord, cfg.LeaseID, cfg.IdleTimeout, nil, cfg.Telemetry, cfg.Log)
+		stopHeartbeat, err := startCoordinatorHeartbeat(ctx, cfg.Coord, cfg.LeaseID, cfg.ExpectedProvider, cfg.IdleTimeout, nil, cfg.Telemetry, cfg.Log)
+		if err != nil {
+			return err
+		}
 		defer stopHeartbeat()
 	}
 	events := make(chan webVNCBridgePoolEvent, cfg.PoolSize)

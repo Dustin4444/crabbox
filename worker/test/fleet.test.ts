@@ -108,11 +108,14 @@ class MemoryStorage {
   private readonly values = new Map<string, unknown>();
   private alarmTime: number | undefined;
   beforeGet?: (key: string) => Promise<void>;
+  afterGet?: (key: string, value: unknown) => Promise<void> | void;
   beforePut?: (key: string, value: unknown) => Promise<void>;
 
   async get<T>(key: string, _options?: { noCache?: boolean }): Promise<T | undefined> {
     await this.beforeGet?.(key);
-    return this.values.get(key) as T | undefined;
+    const value = this.values.get(key) as T | undefined;
+    await this.afterGet?.(key, value);
+    return value;
   }
 
   async put<T>(key: string, value: T, _options?: { noCache?: boolean }): Promise<void> {
@@ -14638,6 +14641,297 @@ describe("fleet lease identity and idle", () => {
     const tailscaleBody = (await manageTailscale.json()) as { lease: LeaseRecord };
     expect(tailscaleBody.lease.tailscale?.ipv4).toBe("100.64.0.10");
     expect(tailscaleBody.lease.tailscale?.state).toBe("ready");
+  });
+
+  it("atomically binds release mutations to an optional expected provider", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws" }, async (id) => deleted.push(id)),
+    });
+    const headers = {
+      "x-crabbox-owner": "peter@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const managed = testLease({
+      id: "cbx_provider_bound_release",
+      provider: "aws",
+      cloudID: "i-provider-bound",
+      expiresAt,
+    });
+    storage.seed(`lease:${managed.id}`, managed);
+
+    const mismatched = await fleet.fetch(
+      request("POST", `/v1/leases/${managed.id}/release`, {
+        headers,
+        body: { delete: true, expectedProvider: "external" },
+      }),
+    );
+    expect(mismatched.status).toBe(409);
+    await expect(mismatched.json()).resolves.toMatchObject({
+      error: "provider_identity_mismatch",
+    });
+    expect(storage.value<LeaseRecord>(`lease:${managed.id}`)).toEqual(managed);
+    expect(deleted).toEqual([]);
+
+    const invalid = await fleet.fetch(
+      request("POST", `/v1/leases/${managed.id}/release`, {
+        headers,
+        body: { delete: true, expectedProvider: " AWS " },
+      }),
+    );
+    expect(invalid.status).toBe(400);
+    expect(storage.value<LeaseRecord>(`lease:${managed.id}`)).toEqual(managed);
+
+    const matching = await fleet.fetch(
+      request("POST", `/v1/leases/${managed.id}/release`, {
+        headers,
+        body: { delete: false, expectedProvider: "aws" },
+      }),
+    );
+    expect(matching.status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${managed.id}`)?.state).toBe("released");
+
+    const legacy = testLease({
+      id: "cbx_provider_bound_release_legacy",
+      provider: "aws",
+      cloudID: "i-provider-bound-legacy",
+      expiresAt,
+    });
+    storage.seed(`lease:${legacy.id}`, legacy);
+    const omitted = await fleet.fetch(
+      request("POST", `/v1/leases/${legacy.id}/release`, {
+        headers,
+        body: { delete: false },
+      }),
+    );
+    expect(omitted.status).toBe(200);
+
+    const registered = testLease({
+      id: "cbx_provider_bound_registered",
+      provider: "external",
+      lifecycle: "registered",
+      runtimeAdapterID: "adapter_provider_bound",
+      runtimeAdapterWorkspaceID: "workspace_provider_bound",
+      runtimeAdapterRegistrationID: "registration_provider_bound",
+      expiresAt,
+    });
+    storage.seed(`lease:${registered.id}`, registered);
+    const registeredMismatch = await fleet.fetch(
+      request("POST", `/v1/leases/${registered.id}/release`, {
+        headers,
+        body: {
+          expectedProvider: "aws",
+          runtimeAdapterDeleteCompletion: {
+            adapterID: registered.runtimeAdapterID,
+            workspaceID: registered.runtimeAdapterWorkspaceID,
+            registrationID: registered.runtimeAdapterRegistrationID,
+            status: "absent",
+          },
+        },
+      }),
+    );
+    expect(registeredMismatch.status).toBe(409);
+    expect(storage.value<LeaseRecord>(`lease:${registered.id}`)).toEqual(registered);
+
+    const releaseAlias = async (provider: string): Promise<void> => {
+      const aliasLease = testLease({
+        id: `cbx_provider_bound_release_${provider}`,
+        provider,
+        expiresAt,
+      });
+      storage.seed(`lease:${aliasLease.id}`, aliasLease);
+      const aliasResponse = await fleet.fetch(
+        request("POST", `/v1/leases/${aliasLease.id}/release`, {
+          headers,
+          body: { delete: false, expectedProvider: "gcp" },
+        }),
+      );
+      expect(aliasResponse.status).toBe(200);
+    };
+    await releaseAlias("google-cloud");
+    await releaseAlias("google");
+
+    const azureLease = testLease({
+      id: "cbx_provider_bound_release_azure",
+      provider: "azure",
+      expiresAt,
+    });
+    storage.seed(`lease:${azureLease.id}`, azureLease);
+    const distinctRoute = await fleet.fetch(
+      request("POST", `/v1/leases/${azureLease.id}/release`, {
+        headers,
+        body: { delete: false, expectedProvider: "azure-dynamic-sessions" },
+      }),
+    );
+    expect(distinctRoute.status).toBe(409);
+
+    const nonNormalizedLease = testLease({
+      id: "cbx_provider_bound_release_non_normalized",
+      provider: "google-cloud",
+      expiresAt,
+    });
+    storage.seed(`lease:${nonNormalizedLease.id}`, nonNormalizedLease);
+    const nonNormalized = await fleet.fetch(
+      request("POST", `/v1/leases/${nonNormalizedLease.id}/release`, {
+        headers,
+        body: { delete: false, expectedProvider: " Google-Cloud " },
+      }),
+    );
+    expect(nonNormalized.status).toBe(400);
+    expect(storage.value<LeaseRecord>(`lease:${nonNormalizedLease.id}`)).toEqual(
+      nonNormalizedLease,
+    );
+  });
+
+  it("atomically binds heartbeat mutations to an optional expected provider", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const lease = testLease({
+      id: "cbx_provider_bound_heartbeat",
+      provider: "aws",
+      idleTimeoutSeconds: 1800,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastTouchedAt: new Date().toISOString(),
+      telemetry: { capturedAt: "2026-05-01T00:00:00.000Z", load1: 0.1 },
+      providerAccessExpiresAt: "2026-05-01T00:30:00.000Z",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const headers = {
+      "x-crabbox-owner": lease.owner,
+      "x-crabbox-org": "openclaw",
+    };
+
+    const mismatched = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+        headers,
+        body: {
+          expectedProvider: "external",
+          idleTimeoutSeconds: 3600,
+          telemetry: { capturedAt: new Date().toISOString(), load1: 0.9 },
+        },
+      }),
+    );
+    expect(mismatched.status).toBe(409);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toEqual(lease);
+
+    const invalid = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+        headers,
+        body: { expectedProvider: "AWS", idleTimeoutSeconds: 3600 },
+      }),
+    );
+    expect(invalid.status).toBe(400);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toEqual(lease);
+
+    const matching = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+        headers,
+        body: { expectedProvider: "aws", idleTimeoutSeconds: 2400 },
+      }),
+    );
+    expect(matching.status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.idleTimeoutSeconds).toBe(2400);
+
+    const omitted = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+        headers,
+        body: { idleTimeoutSeconds: 3000 },
+      }),
+    );
+    expect(omitted.status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.idleTimeoutSeconds).toBe(3000);
+
+    const aliasLease = testLease({
+      id: "cbx_provider_bound_heartbeat_google_cloud",
+      provider: "google-cloud",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${aliasLease.id}`, aliasLease);
+    const aliasResponse = await fleet.fetch(
+      request("POST", `/v1/leases/${aliasLease.id}/heartbeat`, {
+        headers,
+        body: { expectedProvider: "gcp", idleTimeoutSeconds: 2400 },
+      }),
+    );
+    expect(aliasResponse.status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${aliasLease.id}`)?.idleTimeoutSeconds).toBe(2400);
+  });
+
+  it("atomically binds Tailscale mutations to an optional expected provider", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const lease = testLease({
+      id: "cbx_provider_bound_tailscale",
+      provider: "aws",
+      tailscale: { enabled: true, state: "requested", hostname: "provider-bound" },
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const headers = {
+      "x-crabbox-owner": lease.owner,
+      "x-crabbox-org": "openclaw",
+    };
+
+    const mismatched = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/tailscale`, {
+        headers,
+        body: { expectedProvider: "external", ipv4: "100.64.0.10", state: "ready" },
+      }),
+    );
+    expect(mismatched.status).toBe(409);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toEqual(lease);
+
+    const invalid = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/tailscale`, {
+        headers,
+        body: { expectedProvider: " aws", ipv4: "100.64.0.10", state: "ready" },
+      }),
+    );
+    expect(invalid.status).toBe(400);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toEqual(lease);
+
+    const matching = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/tailscale`, {
+        headers,
+        body: { expectedProvider: "aws", ipv4: "100.64.0.10", state: "ready" },
+      }),
+    );
+    expect(matching.status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.tailscale?.ipv4).toBe("100.64.0.10");
+
+    const omitted = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/tailscale`, {
+        headers,
+        body: { fqdn: "provider-bound.example.ts.net" },
+      }),
+    );
+    expect(omitted.status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.tailscale?.fqdn).toBe(
+      "provider-bound.example.ts.net",
+    );
+
+    const aliasLease = testLease({
+      id: "cbx_provider_bound_tailscale_google_cloud",
+      provider: "google-cloud",
+      tailscale: { enabled: true, state: "requested", hostname: "provider-bound-alias" },
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${aliasLease.id}`, aliasLease);
+    const aliasResponse = await fleet.fetch(
+      request("POST", `/v1/leases/${aliasLease.id}/tailscale`, {
+        headers,
+        body: { expectedProvider: "gcp", ipv4: "100.64.0.11", state: "ready" },
+      }),
+    );
+    expect(aliasResponse.status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${aliasLease.id}`)?.tailscale?.ipv4).toBe(
+      "100.64.0.11",
+    );
   });
 
   it("requires manage access for lease metadata writes", async () => {
@@ -30586,6 +30880,186 @@ describe("fleet run history", () => {
       cleanupAttempts: 1,
       cleanupRetryAt: expiredRetryAt,
     });
+  });
+
+  it("serializes control heartbeat provider validation with its mutation", async () => {
+    const storage = new MemoryStorage();
+    const runtime = new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
+    const fleet = new FleetCoordinator(runtime, {
+      CRABBOX_DEFAULT_ORG: "openclaw",
+    } as Env);
+    const leaseID = "cbx_control_provider_fence";
+    const now = new Date();
+    const original = testLease({
+      id: leaseID,
+      provider: "aws",
+      owner: "peter@example.com",
+      org: "openclaw",
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      lastTouchedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+    });
+    const replacementTouchedAt = new Date(now.getTime() - 30_000).toISOString();
+    const replacement = testLease({
+      id: leaseID,
+      provider: "external",
+      lifecycle: "registered",
+      owner: "peter@example.com",
+      org: "openclaw",
+      idleTimeoutSeconds: 777,
+      updatedAt: replacementTouchedAt,
+      lastTouchedAt: replacementTouchedAt,
+      telemetry: { capturedAt: replacementTouchedAt, load1: 0.2 },
+      expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${leaseID}`, original);
+
+    const replacementDone = deferred<void>();
+    let replacementScheduled = false;
+    storage.afterGet = (key) => {
+      if (key !== `lease:${leaseID}` || replacementScheduled) {
+        return;
+      }
+      replacementScheduled = true;
+      void runtime.runExclusive(async () => {
+        storage.seed(`lease:${leaseID}`, replacement);
+        replacementDone.resolve();
+      });
+    };
+
+    const attachment = {
+      kind: "control" as const,
+      clientID: "ctrl_provider_fence",
+      owner: "peter@example.com",
+      org: "openclaw",
+      subscriptions: {},
+    };
+    const socket = new FakeWebSocket(attachment);
+    (
+      fleet as unknown as {
+        controlSockets: Map<string, WebSocket>;
+      }
+    ).controlSockets.set(attachment.clientID, socket as unknown as WebSocket);
+
+    await fleet.webSocketMessage(
+      socket as unknown as WebSocket,
+      JSON.stringify({
+        type: "heartbeat",
+        leaseID,
+        expectedProvider: "aws",
+        idleTimeoutSeconds: 3600,
+        telemetry: { capturedAt: new Date().toISOString(), load1: 0.9 },
+      }),
+    );
+    await replacementDone.promise;
+
+    await fleet.webSocketMessage(
+      socket as unknown as WebSocket,
+      JSON.stringify({
+        type: "heartbeat",
+        leaseID,
+        expectedProvider: "aws",
+        idleTimeoutSeconds: 4000,
+      }),
+    );
+
+    expect(socket.sentJSON()).toEqual([
+      expect.objectContaining({ type: "heartbeat", leaseID, ok: true }),
+      {
+        type: "heartbeat",
+        leaseID,
+        ok: false,
+        error: "provider_identity_mismatch",
+      },
+    ]);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      provider: "external",
+      lifecycle: "registered",
+      idleTimeoutSeconds: 777,
+      updatedAt: replacementTouchedAt,
+      lastTouchedAt: replacementTouchedAt,
+      telemetry: { capturedAt: replacementTouchedAt, load1: 0.2 },
+    });
+  });
+
+  it("canonicalizes exact provider aliases for control heartbeats", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const attachment = {
+      kind: "control" as const,
+      clientID: "ctrl_provider_alias",
+      owner: "peter@example.com",
+      org: "openclaw",
+      subscriptions: {},
+    };
+    const socket = new FakeWebSocket(attachment);
+    (
+      fleet as unknown as {
+        controlSockets: Map<string, WebSocket>;
+      }
+    ).controlSockets.set(attachment.clientID, socket as unknown as WebSocket);
+
+    const heartbeatAlias = async (provider: string): Promise<void> => {
+      const lease = testLease({
+        id: `cbx_control_provider_${provider}`,
+        provider,
+        owner: "peter@example.com",
+        org: "openclaw",
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      await fleet.webSocketMessage(
+        socket as unknown as WebSocket,
+        JSON.stringify({
+          type: "heartbeat",
+          leaseID: lease.id,
+          expectedProvider: "gcp",
+          idleTimeoutSeconds: 2400,
+        }),
+      );
+    };
+    await heartbeatAlias("google-cloud");
+    await heartbeatAlias("google");
+
+    const azure = testLease({
+      id: "cbx_control_provider_azure",
+      provider: "azure",
+      owner: "peter@example.com",
+      org: "openclaw",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${azure.id}`, azure);
+    await fleet.webSocketMessage(
+      socket as unknown as WebSocket,
+      JSON.stringify({
+        type: "heartbeat",
+        leaseID: azure.id,
+        expectedProvider: "azure-dynamic-sessions",
+        idleTimeoutSeconds: 2400,
+      }),
+    );
+
+    expect(socket.sentJSON()).toEqual([
+      expect.objectContaining({
+        type: "heartbeat",
+        leaseID: "cbx_control_provider_google-cloud",
+        ok: true,
+      }),
+      expect.objectContaining({
+        type: "heartbeat",
+        leaseID: "cbx_control_provider_google",
+        ok: true,
+      }),
+      {
+        type: "heartbeat",
+        leaseID: azure.id,
+        ok: false,
+        error: "provider_identity_mismatch",
+      },
+    ]);
+    expect(storage.value<LeaseRecord>(`lease:${azure.id}`)?.idleTimeoutSeconds).not.toBe(2400);
   });
 
   it("records finished runs and serves logs", async () => {

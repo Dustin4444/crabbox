@@ -27,6 +27,14 @@ selected by the CLI. Legacy responses may omit provider metadata and inherit
 that selection, but a response naming an unknown or different provider is
 rejected before the CLI converts or acts on the lease.
 
+Mutating CLI requests for release, heartbeat (including idle-timeout and
+telemetry updates), and Tailscale metadata carry the canonical selected
+provider as `expectedProvider`. The coordinator compares it with the stored
+record inside the same state transaction and returns a stable `409` identity
+error before any mutation when they differ. Omitting `expectedProvider` remains
+supported for older clients and provider-neutral portal flows; when supplied,
+it must be a nonempty normalized provider name.
+
 `broker.mode: registered` is provider-neutral. Provisioning, SSH, touch, and
 cleanup remain in the direct adapter, while the CLI idempotently registers an
 owner-scoped lease record with the coordinator. This enables portal inventory,

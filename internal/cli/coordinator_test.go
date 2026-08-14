@@ -798,16 +798,19 @@ func mapStringString(input map[string]any) map[string]string {
 }
 
 func TestHeartbeatRequestBodyOmitsIdleTimeoutForTouch(t *testing.T) {
-	if body := heartbeatRequestBody(nil, nil); len(body) != 0 {
+	if body := heartbeatRequestBody("", nil, nil); len(body) != 0 {
 		t.Fatalf("touch heartbeat body=%v, want empty", body)
 	}
 	idleTimeout := 45 * time.Minute
-	body := heartbeatRequestBody(&idleTimeout, nil)
+	body := heartbeatRequestBody("aws", &idleTimeout, nil)
 	if body["idleTimeoutSeconds"] != 2700 {
 		t.Fatalf("heartbeat body=%v, want idle timeout seconds", body)
 	}
 	load := 0.42
-	body = heartbeatRequestBody(nil, &LeaseTelemetry{Load1: &load})
+	if body["expectedProvider"] != "aws" {
+		t.Fatalf("heartbeat body=%v, want expected provider", body)
+	}
+	body = heartbeatRequestBody("aws", nil, &LeaseTelemetry{Load1: &load})
 	if body["telemetry"] == nil {
 		t.Fatalf("heartbeat body=%v, want telemetry", body)
 	}
@@ -826,18 +829,141 @@ func TestCoordinatorTouchAndUpdateHeartbeatBodies(t *testing.T) {
 	}))
 	defer server.Close()
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
-	if _, err := client.TouchLease(context.Background(), "cbx_123"); err != nil {
+	if _, err := client.TouchLeaseForProvider(context.Background(), "cbx_123", "google-cloud"); err != nil {
 		t.Fatal(err)
 	}
 	load := 0.42
-	if _, err := client.TouchLeaseWithTelemetry(context.Background(), "cbx_123", &LeaseTelemetry{Load1: &load}); err != nil {
+	if _, err := client.TouchLeaseWithTelemetryForProvider(context.Background(), "cbx_123", "google", &LeaseTelemetry{Load1: &load}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.UpdateLeaseIdleTimeout(context.Background(), "cbx_123", 45*time.Minute); err != nil {
+	if _, err := client.UpdateLeaseIdleTimeoutForProvider(context.Background(), "cbx_123", "google-cloud", 45*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if len(bodies) != 3 || bodies[0] != "{}" || !strings.Contains(bodies[1], `"load1":0.42`) || !strings.Contains(bodies[2], `"idleTimeoutSeconds":2700`) {
+	if len(bodies) != 3 || !strings.Contains(bodies[0], `"expectedProvider":"gcp"`) || !strings.Contains(bodies[1], `"expectedProvider":"gcp"`) || !strings.Contains(bodies[1], `"load1":0.42`) || !strings.Contains(bodies[2], `"expectedProvider":"gcp"`) || !strings.Contains(bodies[2], `"idleTimeoutSeconds":2700`) {
 		t.Fatalf("heartbeat bodies=%q", bodies)
+	}
+}
+
+func TestCoordinatorTailscaleUpdateIncludesExpectedProvider(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_123/tailscale" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: "cbx_123", Provider: "aws", State: "active",
+		}})
+	}))
+	defer server.Close()
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	if _, err := client.UpdateLeaseTailscaleForProvider(context.Background(), "cbx_123", "google-cloud", TailscaleMetadata{
+		Enabled: true, IPv4: "100.64.0.10",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if body["expectedProvider"] != "gcp" || body["ipv4"] != "100.64.0.10" {
+		t.Fatalf("tailscale body=%#v", body)
+	}
+}
+
+func TestCoordinatorMutationTransportsCanonicalizeProviderAliasesAndRejectInvalid(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		invoke func(context.Context, *CoordinatorClient, string) error
+	}{
+		{
+			name: "release", path: "/v1/leases/cbx_123/release",
+			invoke: func(ctx context.Context, client *CoordinatorClient, provider string) error {
+				_, err := client.ReleaseLeaseForProvider(ctx, "cbx_123", true, provider)
+				return err
+			},
+		},
+		{
+			name: "admin release", path: "/v1/admin/leases/cbx_123/release",
+			invoke: func(ctx context.Context, client *CoordinatorClient, provider string) error {
+				_, err := client.AdminReleaseLeaseForProvider(ctx, "cbx_123", true, provider)
+				return err
+			},
+		},
+		{
+			name: "runtime adapter completion", path: "/v1/leases/cbx_123/release",
+			invoke: func(ctx context.Context, client *CoordinatorClient, provider string) error {
+				_, err := client.CompleteRuntimeAdapterDeleteForProvider(ctx, "cbx_123", provider, "adapter", "workspace", "registration")
+				return err
+			},
+		},
+		{
+			name: "legacy runtime adapter completion", path: "/v1/leases/cbx_123/release",
+			invoke: func(ctx context.Context, client *CoordinatorClient, provider string) error {
+				_, err := client.CompleteLegacyRuntimeAdapterDeleteForProvider(ctx, "cbx_123", provider, "adapter", "workspace")
+				return err
+			},
+		},
+		{
+			name: "heartbeat", path: "/v1/leases/cbx_123/heartbeat",
+			invoke: func(ctx context.Context, client *CoordinatorClient, provider string) error {
+				_, err := client.TouchLeaseForProvider(ctx, "cbx_123", provider)
+				return err
+			},
+		},
+		{
+			name: "tailscale", path: "/v1/leases/cbx_123/tailscale",
+			invoke: func(ctx context.Context, client *CoordinatorClient, provider string) error {
+				_, err := client.UpdateLeaseTailscaleForProvider(ctx, "cbx_123", provider, TailscaleMetadata{Enabled: true})
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			var body map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.Method != http.MethodPost || r.URL.Path != test.path {
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_123", Provider: "gcp"}})
+			}))
+			defer server.Close()
+			client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+
+			if err := test.invoke(context.Background(), client, "google-cloud"); err != nil {
+				t.Fatal(err)
+			}
+			if requests != 1 || body["expectedProvider"] != "gcp" {
+				t.Fatalf("requests=%d body=%#v", requests, body)
+			}
+			if err := test.invoke(context.Background(), client, "future-cloud"); err == nil {
+				t.Fatal("invalid provider was accepted")
+			}
+			if requests != 1 {
+				t.Fatalf("invalid provider sent request; requests=%d", requests)
+			}
+		})
+	}
+}
+
+func TestCoordinatorHeartbeatRejectsInvalidProviderBeforeStarting(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests++
+	}))
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	stop, err := startCoordinatorHeartbeat(context.Background(), client, "cbx_123", "future-cloud", 30*time.Minute, nil, nil, io.Discard)
+	if err == nil || stop != nil {
+		t.Fatalf("stop_present=%t error=%v, want invalid provider rejection", stop != nil, err)
+	}
+	if requests != 0 {
+		t.Fatalf("invalid provider sent %d request(s)", requests)
 	}
 }
 
@@ -880,7 +1006,10 @@ func TestCoordinatorHeartbeatTouchesImmediately(t *testing.T) {
 	defer server.Close()
 
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
-	stop := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", 30*time.Minute, nil, nil, io.Discard)
+	stop, err := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", "aws", 30*time.Minute, nil, nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer stop()
 
 	select {
@@ -1016,12 +1145,15 @@ func TestCoordinatorHeartbeatIncludesTelemetry(t *testing.T) {
 		return &LeaseTelemetry{Load1: &load}, nil
 	}
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
-	stop := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", 30*time.Minute, nil, collector, io.Discard)
+	stop, err := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", "aws", 30*time.Minute, nil, collector, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer stop()
 
 	select {
 	case body := <-bodies:
-		if !strings.Contains(body, `"load1":0.77`) {
+		if !strings.Contains(body, `"expectedProvider":"aws"`) || !strings.Contains(body, `"load1":0.77`) {
 			t.Fatalf("heartbeat body=%s, want telemetry", body)
 		}
 	case <-time.After(2 * time.Second):
@@ -1064,12 +1196,15 @@ func TestCoordinatorHeartbeatUsesControlWebSocket(t *testing.T) {
 		return &LeaseTelemetry{Load1: &load}, nil
 	}
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
-	stop := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", 30*time.Minute, nil, collector, io.Discard)
+	stop, err := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", "google-cloud", 30*time.Minute, nil, collector, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer stop()
 
 	select {
 	case body := <-bodies:
-		if !strings.Contains(body, `"type":"heartbeat"`) || !strings.Contains(body, `"load1":0.77`) {
+		if !strings.Contains(body, `"type":"heartbeat"`) || !strings.Contains(body, `"expectedProvider":"gcp"`) || !strings.Contains(body, `"load1":0.77`) {
 			t.Fatalf("control heartbeat body=%s", body)
 		}
 	case <-time.After(2 * time.Second):
@@ -1126,7 +1261,10 @@ func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
 		},
 		Client: server.Client(),
 	}
-	stop := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", 30*time.Minute, nil, nil, io.Discard)
+	stop, err := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", "aws", 30*time.Minute, nil, nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer stop()
 
 	select {

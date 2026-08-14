@@ -2,6 +2,10 @@
 
 ## 0.42.1 - Unreleased
 
+### Fixed
+
+- Bound coordinator release, heartbeat, and Tailscale mutations to the CLI-selected provider, preventing cross-provider lease deletion or metadata changes.
+
 ## 0.42.0 - 2026-08-14
 
 ### Added

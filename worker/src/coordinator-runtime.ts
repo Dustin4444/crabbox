@@ -12,6 +12,18 @@ export interface CoordinatorStorage {
 
 export type CoordinatorRequestQueue = "direct" | "lifecycle";
 
+export function controlMessageOwnsTransaction(message: unknown): boolean {
+  if (typeof message !== "string") {
+    return false;
+  }
+  try {
+    const input = JSON.parse(message) as { type?: unknown };
+    return input.type === "heartbeat";
+  } catch {
+    return false;
+  }
+}
+
 export function coordinatorRequestQueue(request: Request): CoordinatorRequestQueue {
   const url = new URL(request.url);
   const path = url.pathname.split("/").filter(Boolean);
@@ -89,7 +101,10 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[1] === "leases" &&
     path[2] &&
     method === "POST" &&
-    (path[3] === "heartbeat" || path[3] === "release" || path[3] === "cancel-create")
+    (path[3] === "heartbeat" ||
+      path[3] === "tailscale" ||
+      path[3] === "release" ||
+      path[3] === "cancel-create")
   ) {
     return "direct";
   }
@@ -234,7 +249,7 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     }
     socket.accept();
     socket.addEventListener("message", (event) => {
-      void this.runSocketOperation(attachment, () => handlers.message(event.data));
+      void this.runSocketOperation(attachment, event.data, () => handlers.message(event.data));
     });
     socket.addEventListener("close", (event) => {
       handlers.close(event.code, event.reason);
@@ -279,9 +294,13 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     return this.state.storage.deleteAlarm();
   }
 
-  private runSocketOperation<T>(attachment: unknown, callback: () => Promise<T> | T): Promise<T> {
+  private runSocketOperation<T>(
+    attachment: unknown,
+    message: unknown,
+    callback: () => Promise<T> | T,
+  ): Promise<T> {
     const operation = async () => callback();
-    if (socketAttachmentKind(attachment) === "control") {
+    if (socketAttachmentKind(attachment) === "control" && !controlMessageOwnsTransaction(message)) {
       return this.runExclusive(operation);
     }
     return operation();
