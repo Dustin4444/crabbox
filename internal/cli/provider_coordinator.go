@@ -28,6 +28,47 @@ type coordinatorLeaseBackend struct {
 	rt     Runtime
 }
 
+type coordinatorProviderIdentityError struct {
+	selectedProvider string
+	returnedProvider string
+	leaseID          string
+}
+
+func (e coordinatorProviderIdentityError) Error() string {
+	return fmt.Sprintf(
+		"coordinator lease provider identity mismatch: selected_provider=%s returned_provider=%s lease_id=%s",
+		blank(e.selectedProvider, "<empty>"),
+		blank(e.returnedProvider, "<empty>"),
+		blank(e.leaseID, "<empty>"),
+	)
+}
+
+func (e coordinatorProviderIdentityError) Unwrap() error {
+	return exit(4, "%s", e.Error())
+}
+
+func isCoordinatorProviderIdentityError(err error) bool {
+	var identityErr coordinatorProviderIdentityError
+	return errors.As(err, &identityErr)
+}
+
+func canonicalProviderName(name string) (string, error) {
+	provider, err := ProviderFor(strings.TrimSpace(name))
+	if err != nil {
+		return "", err
+	}
+	return provider.Name(), nil
+}
+
+func canonicalProvidersMatch(expected, actual string) bool {
+	expected, err := canonicalProviderName(expected)
+	if err != nil {
+		return false
+	}
+	actual, err = canonicalProviderName(actual)
+	return err == nil && actual == expected
+}
+
 func (b *coordinatorLeaseBackend) BeginRunFailureEvidence(ctx context.Context, req RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error) {
 	capability, ok := b.direct.(SSHRunFailureEvidenceBackend)
 	if !ok {
@@ -55,29 +96,38 @@ func (b *coordinatorLeaseBackend) validateCoordinatorProviderIdentity(leaseID, r
 	if selectedProvider == "" {
 		selectedProvider = strings.TrimSpace(b.cfg.Provider)
 	}
+	return validateCoordinatorProviderIdentity(selectedProvider, leaseID, returnedProvider, true)
+}
+
+func validateCoordinatorProviderIdentity(selectedProvider, leaseID, returnedProvider string, allowEmptyReturned bool) error {
+	selectedProvider = strings.TrimSpace(selectedProvider)
 	returnedProvider = strings.TrimSpace(returnedProvider)
 	identityError := func() error {
-		return exit(
-			4,
-			"coordinator lease provider identity mismatch: selected_provider=%s returned_provider=%s lease_id=%s",
-			blank(selectedProvider, "<empty>"),
-			blank(returnedProvider, "<empty>"),
-			blank(strings.TrimSpace(leaseID), "<empty>"),
-		)
+		return coordinatorProviderIdentityError{
+			selectedProvider: selectedProvider,
+			returnedProvider: returnedProvider,
+			leaseID:          strings.TrimSpace(leaseID),
+		}
 	}
-	selected, err := ProviderFor(selectedProvider)
+	selectedProvider, err := canonicalProviderName(selectedProvider)
 	if err != nil {
 		return identityError()
 	}
-	selectedProvider = selected.Name()
-	if returnedProvider == "" {
+	if returnedProvider == "" && allowEmptyReturned {
 		return nil
 	}
-	provider, err := ProviderFor(returnedProvider)
-	if err == nil && provider.Name() == selectedProvider {
+	if canonicalProvidersMatch(selectedProvider, returnedProvider) {
 		return nil
 	}
 	return identityError()
+}
+
+func (b *coordinatorLeaseBackend) expectedProvider() (string, error) {
+	selectedProvider := strings.TrimSpace(b.spec.Name)
+	if selectedProvider == "" {
+		selectedProvider = strings.TrimSpace(b.cfg.Provider)
+	}
+	return canonicalProviderName(selectedProvider)
 }
 
 func (b *coordinatorLeaseBackend) coordinatorLeaseTarget(lease CoordinatorLease, coord *CoordinatorClient) (LeaseTarget, error) {
@@ -170,17 +220,6 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 		}
 		return LeaseTarget{}, err
 	}
-	if requestedLeaseID != "" && lease.ID != leaseID {
-		return LeaseTarget{}, exit(4, "lease_id_conflict: coordinator fixed create returned lease %s for operation %s", blank(lease.ID, "<empty>"), leaseID)
-	}
-	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
-		if requestedLeaseID == "" {
-			if releaseErr := releaseCoordinatorLease(context.Background(), b.coord, blank(lease.ID, leaseID)); releaseErr != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: release failed after provider identity mismatch for %s: %v\n", blank(lease.ID, leaseID), releaseErr)
-			}
-		}
-		return LeaseTarget{}, err
-	}
 	if lease.ID != "" && lease.ID != leaseID {
 		if err := moveStoredTestboxKey(leaseID, lease.ID); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: could not move local key from %s to %s: %v\n", leaseID, lease.ID, err)
@@ -188,7 +227,7 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	}
 	if err := validateCoordinatorLeaseCapabilities(cfg, lease); err != nil {
 		if requestedLeaseID == "" {
-			if releaseErr := releaseCoordinatorLease(context.Background(), b.coord, blank(lease.ID, leaseID)); releaseErr != nil {
+			if releaseErr := releaseCoordinatorLease(context.Background(), b.coord, blank(lease.ID, leaseID), cfg.Provider); releaseErr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: release failed after capability mismatch for %s: %v\n", blank(lease.ID, leaseID), releaseErr)
 			}
 		}
@@ -205,14 +244,17 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	}
 	waitCtx, cancelWait := context.WithCancelCause(ctx)
 	defer cancelWait(nil)
-	stopHeartbeat := startCoordinatorHeartbeat(waitCtx, b.coord, leaseID, cfg.IdleTimeout, nil, leaseTelemetryCollectorForTarget(target), b.rt.Stderr)
+	stopHeartbeat, err := startCoordinatorHeartbeat(waitCtx, b.coord, leaseID, cfg.Provider, cfg.IdleTimeout, nil, leaseTelemetryCollectorForTarget(target), b.rt.Stderr)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
 	defer stopHeartbeat()
 	stopLeaseWatch := startCoordinatorLeaseWatch(waitCtx, b.coord, leaseID, cancelWait, b.rt.Stderr)
 	defer stopLeaseWatch()
 	bootstrapTarget := bootstrapNetworkTarget(cfg, server, target)
 	if err := bootstrapManagedWindowsDesktop(waitCtx, cfg, &bootstrapTarget, publicKey, b.rt.Stderr); err != nil {
 		if requestedLeaseID == "" {
-			if releaseErr := releaseCoordinatorLease(context.Background(), b.coord, leaseID); releaseErr != nil {
+			if releaseErr := releaseCoordinatorLease(context.Background(), b.coord, leaseID, cfg.Provider); releaseErr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: release failed after bootstrap error for %s: %v\n", leaseID, releaseErr)
 			}
 		}
@@ -262,11 +304,16 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgress(ctx context
 	return b.createCoordinatorLeaseWithProgressMode(ctx, cfg, publicKey, keep, leaseID, slug, false)
 }
 
-func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string, fixed bool) (CoordinatorLease, error) {
+func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string, fixed bool) (lease CoordinatorLease, err error) {
 	createAttemptID := ""
 	if !fixed {
 		createAttemptID = coordinatorCreateAttemptID()
 	}
+	defer func() {
+		if err == nil {
+			lease, err = b.validateCoordinatorLeaseCreateResult(ctx, lease, leaseID, slug, createAttemptID, fixed)
+		}
+	}()
 	timeout := coordinatorCreateLeaseTimeoutForConfig(cfg)
 	createCtx, cancelCreate := context.WithTimeout(ctx, timeout)
 	defer cancelCreate()
@@ -299,8 +346,8 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 			}
 			if result.err != nil && errors.Is(result.err, context.DeadlineExceeded) && ctx.Err() == nil {
 				err := coordinatorCreateLeaseTimeoutError(cfg, leaseID, slug, timeout)
-				if lease, ok := b.recoverCoordinatorLeaseAfterCreateError(ctx, cfg, publicKey, keep, leaseID, slug, createAttemptID, err); ok {
-					return lease, nil
+				if lease, recoverErr, handled := b.recoverCoordinatorLeaseAfterCreateError(ctx, cfg, publicKey, keep, leaseID, slug, createAttemptID, err); handled {
+					return lease, recoverErr
 				}
 				if ctx.Err() != nil {
 					return CoordinatorLease{}, b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, createAttemptID, false, result.err)
@@ -308,8 +355,8 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 				return CoordinatorLease{}, b.abandonUnrecoveredCoordinatorLeaseCreate(ctx, leaseID, slug, createAttemptID, err)
 			}
 			if result.err != nil {
-				if lease, ok := b.recoverCoordinatorLeaseAfterCreateError(ctx, cfg, publicKey, keep, leaseID, slug, createAttemptID, result.err); ok {
-					return lease, nil
+				if lease, recoverErr, handled := b.recoverCoordinatorLeaseAfterCreateError(ctx, cfg, publicKey, keep, leaseID, slug, createAttemptID, result.err); handled {
+					return lease, recoverErr
 				}
 				if ctx.Err() != nil {
 					return CoordinatorLease{}, b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, createAttemptID, false, result.err)
@@ -349,8 +396,8 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 				}
 				return CoordinatorLease{}, err
 			}
-			if lease, ok := b.recoverCoordinatorLeaseAfterCreateError(ctx, cfg, publicKey, keep, leaseID, slug, createAttemptID, err); ok {
-				return lease, nil
+			if lease, recoverErr, handled := b.recoverCoordinatorLeaseAfterCreateError(ctx, cfg, publicKey, keep, leaseID, slug, createAttemptID, err); handled {
+				return lease, recoverErr
 			}
 			if ctx.Err() != nil {
 				return CoordinatorLease{}, b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, createAttemptID, false, nil)
@@ -366,6 +413,30 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 			return CoordinatorLease{}, b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, createAttemptID, fixed, createErr)
 		}
 	}
+}
+
+func (b *coordinatorLeaseBackend) validateCoordinatorLeaseCreateResult(
+	ctx context.Context,
+	lease CoordinatorLease,
+	requestedLeaseID, slug, createAttemptID string,
+	fixed bool,
+) (CoordinatorLease, error) {
+	if fixed && lease.ID != requestedLeaseID {
+		return CoordinatorLease{}, exit(4, "lease_id_conflict: coordinator fixed create returned lease %s for operation %s", blank(lease.ID, "<empty>"), requestedLeaseID)
+	}
+	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
+		if fixed {
+			return CoordinatorLease{}, err
+		}
+		cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), coordinatorCanceledCreateRecoveryTimeout)
+		defer cancel()
+		fmt.Fprintf(b.rt.Stderr, "warning: coordinator create returned mismatched provider for %s; recording durable cancellation\n", requestedLeaseID)
+		if cancelErr := b.cancelCoordinatorLeaseCreate(cancelCtx, requestedLeaseID, slug, createAttemptID); cancelErr != nil {
+			return CoordinatorLease{}, errors.Join(err, fmt.Errorf("cancel mismatched coordinator lease create %s: %w", requestedLeaseID, cancelErr))
+		}
+		return CoordinatorLease{}, err
+	}
+	return lease, nil
 }
 
 func (b *coordinatorLeaseBackend) canceledCoordinatorLeaseCreateError(ctx context.Context, leaseID, slug, createAttemptID string, fixed bool, createErr error) error {
@@ -508,9 +579,9 @@ func (b *coordinatorLeaseBackend) waitForCoordinatorLeaseActivation(ctx context.
 	}
 }
 
-func (b *coordinatorLeaseBackend) recoverCoordinatorLeaseAfterCreateError(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug, createAttemptID string, createErr error) (CoordinatorLease, bool) {
+func (b *coordinatorLeaseBackend) recoverCoordinatorLeaseAfterCreateError(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug, createAttemptID string, createErr error) (CoordinatorLease, error, bool) {
 	if !coordinatorCreateLeaseErrorMayHaveCommitted(createErr) {
-		return CoordinatorLease{}, false
+		return CoordinatorLease{}, nil, false
 	}
 	recoverCtx, cancel := context.WithTimeout(ctx, coordinatorCreateLeaseRecoveryTimeout)
 	defer cancel()
@@ -520,28 +591,36 @@ func (b *coordinatorLeaseBackend) recoverCoordinatorLeaseAfterCreateError(ctx co
 	for {
 		lease, err := b.coord.CreateLeaseWithAttempt(recoverCtx, cfg, publicKey, keep, leaseID, slug, createAttemptID)
 		if err == nil {
+			lease, identityErr := b.validateCoordinatorLeaseCreateResult(recoverCtx, lease, leaseID, slug, createAttemptID, false)
+			if identityErr != nil {
+				return CoordinatorLease{}, identityErr, true
+			}
 			if coordinatorLeaseRecoveredFromCreateError(cfg, lease) {
 				fmt.Fprintf(b.rt.Stderr, "recovered coordinator lease %s slug=%s with token-bound POST after uncertain response\n", lease.ID, blank(lease.Slug, slug))
-				return lease, true
+				return lease, nil, true
 			}
 			if lease.State == "provisioning" {
 				active, waitErr := b.waitForCoordinatorLeaseActivation(recoverCtx, blank(lease.ID, leaseID), lease)
 				if waitErr == nil {
+					active, identityErr = b.validateCoordinatorLeaseCreateResult(recoverCtx, active, leaseID, slug, createAttemptID, false)
+					if identityErr != nil {
+						return CoordinatorLease{}, identityErr, true
+					}
 					fmt.Fprintf(b.rt.Stderr, "recovered coordinator lease %s slug=%s with token-bound POST after uncertain response\n", active.ID, blank(active.Slug, slug))
-					return active, true
+					return active, nil, true
 				}
-				return CoordinatorLease{}, false
+				return CoordinatorLease{}, nil, false
 			}
 			if lease.State == "failed" || lease.State == "released" || lease.State == "expired" {
-				return CoordinatorLease{}, false
+				return CoordinatorLease{}, nil, false
 			}
 		} else if !coordinatorCreateLeaseErrorMayHaveCommitted(err) {
-			return CoordinatorLease{}, false
+			return CoordinatorLease{}, nil, false
 		}
 		select {
 		case <-ticker.C:
 		case <-recoverCtx.Done():
-			return CoordinatorLease{}, false
+			return CoordinatorLease{}, nil, false
 		}
 	}
 }
@@ -564,7 +643,7 @@ func coordinatorLeaseRecoveredFromCreateError(cfg Config, lease CoordinatorLease
 	if lease.ID == "" || lease.State != "active" || lease.Host == "" {
 		return false
 	}
-	if lease.Provider != "" && !strings.EqualFold(lease.Provider, cfg.Provider) {
+	if lease.Provider != "" && !canonicalProvidersMatch(cfg.Provider, lease.Provider) {
 		return false
 	}
 	if lease.TargetOS != "" && cfg.TargetOS != "" && !strings.EqualFold(lease.TargetOS, cfg.TargetOS) {
@@ -779,7 +858,7 @@ func filterCoordinatorLeasesForProvider(leases []CoordinatorLease, provider stri
 	}
 	out := make([]CoordinatorLease, 0, len(leases))
 	for _, lease := range leases {
-		if strings.EqualFold(strings.TrimSpace(lease.Provider), provider) {
+		if canonicalProvidersMatch(provider, lease.Provider) {
 			out = append(out, lease)
 		}
 	}
@@ -804,16 +883,20 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 	if req.Lease.LeaseID == "" {
 		return exit(2, "missing coordinator lease id")
 	}
-	if err := b.validateCoordinatorLeaseTargetProviderIdentity(req.Lease); err != nil {
+	expectedProvider, err := b.expectedProvider()
+	if err != nil {
 		return err
 	}
-	if err := releaseCoordinatorLease(ctx, b.coord, req.Lease.LeaseID); err != nil {
+	if err := validateCoordinatorProviderIdentity(expectedProvider, req.Lease.LeaseID, req.Lease.Server.Provider, false); err != nil {
+		return err
+	}
+	if err := releaseCoordinatorLease(ctx, b.coord, req.Lease.LeaseID, expectedProvider); err != nil {
 		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
 			adminCoord, adminErr := b.adminCoordinatorClient()
 			if adminErr != nil {
 				return err
 			}
-			if _, adminErr = adminCoord.AdminReleaseLease(ctx, req.Lease.LeaseID, true); adminErr == nil {
+			if _, adminErr = adminCoord.AdminReleaseLeaseForProvider(ctx, req.Lease.LeaseID, true, expectedProvider); adminErr == nil {
 				removeLeaseClaim(req.Lease.LeaseID)
 				return nil
 			}
@@ -833,10 +916,14 @@ func (b *coordinatorLeaseBackend) adminCoordinatorClient() (*CoordinatorClient, 
 }
 
 func (b *coordinatorLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
-	if err := b.validateCoordinatorLeaseTargetProviderIdentity(req.Lease); err != nil {
+	expectedProvider, err := b.expectedProvider()
+	if err != nil {
 		return req.Lease.Server, err
 	}
-	lease, err := b.coord.TouchLease(ctx, req.Lease.LeaseID)
+	if err := validateCoordinatorProviderIdentity(expectedProvider, req.Lease.LeaseID, req.Lease.Server.Provider, false); err != nil {
+		return req.Lease.Server, err
+	}
+	lease, err := b.coord.TouchLeaseForProvider(ctx, req.Lease.LeaseID, expectedProvider)
 	if err != nil {
 		return req.Lease.Server, err
 	}

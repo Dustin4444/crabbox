@@ -1627,6 +1627,45 @@ func TestCoordinatorProviderIdentityValidationCanonicalizesAliases(t *testing.T)
 	}
 }
 
+func TestCoordinatorCreateRecoveryCanonicalProviderMatching(t *testing.T) {
+	cfg := Config{Provider: "gcp", TargetOS: targetLinux}
+	base := CoordinatorLease{ID: "cbx_recovered", State: "active", Host: "203.0.113.10", TargetOS: targetLinux}
+	for _, test := range []struct {
+		name     string
+		provider string
+		want     bool
+	}{
+		{name: "canonical", provider: "gcp", want: true},
+		{name: "alias", provider: "google-cloud", want: true},
+		{name: "legacy empty", provider: "", want: true},
+		{name: "cross provider", provider: "aws"},
+		{name: "distinct azure route", provider: "azure-dynamic-sessions"},
+		{name: "unknown", provider: "future-cloud"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lease := base
+			lease.Provider = test.provider
+			if got := coordinatorLeaseRecoveredFromCreateError(cfg, lease); got != test.want {
+				t.Fatalf("recovered=%t want %t for provider=%q", got, test.want, test.provider)
+			}
+		})
+	}
+}
+
+func TestCoordinatorListCanonicalProviderMatching(t *testing.T) {
+	leases := []CoordinatorLease{
+		{ID: "canonical", Provider: "gcp"},
+		{ID: "alias", Provider: "google-cloud"},
+		{ID: "cross", Provider: "aws"},
+		{ID: "empty"},
+		{ID: "unknown", Provider: "future-cloud"},
+	}
+	filtered := filterCoordinatorLeasesForProvider(leases, "gcp")
+	if len(filtered) != 2 || filtered[0].ID != "canonical" || filtered[1].ID != "alias" {
+		t.Fatalf("filtered leases=%#v", filtered)
+	}
+}
+
 func TestCoordinatorResolveEnforcesSelectedProviderIdentity(t *testing.T) {
 	for _, test := range []struct {
 		name             string
@@ -1757,36 +1796,114 @@ func TestCoordinatorReleaseRejectsInputProviderMismatchBeforeRequest(t *testing.
 	defer server.Close()
 
 	backend := newCoordinatorIdentityTestBackend(t, server.URL, "admin-token")
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
-		LeaseID: "cbx_release_identity",
-		Server:  Server{Provider: "external"},
-	}})
-	assertCoordinatorProviderIdentityError(t, err, "external", "cbx_release_identity")
+	for _, provider := range []string{"", "external"} {
+		err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+			LeaseID: "cbx_release_identity",
+			Server:  Server{Provider: provider},
+		}})
+		assertCoordinatorProviderIdentityError(t, err, provider, "cbx_release_identity")
+	}
 	if requests != 0 {
 		t.Fatalf("release mismatch sent %d coordinator request(s), want zero", requests)
 	}
 }
 
+func TestStopCoordinatorProviderMismatchDoesNotRelease(t *testing.T) {
+	clearConfigEnv(t)
+	isolateTestUserDirs(t)
+	releases := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_stop_identity":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: "cbx_stop_identity", Provider: "external", State: "active",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_stop_identity/release":
+			releases++
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_stop_identity", State: "released"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+		"--provider", "aws", "--id", "cbx_stop_identity",
+	})
+	assertCoordinatorProviderIdentityError(t, err, "external", "cbx_stop_identity")
+	if releases != 0 {
+		t.Fatalf("release requests=%d want zero", releases)
+	}
+}
+
+func TestStopCoordinatorInspectFailureKeepsProviderBinding(t *testing.T) {
+	clearConfigEnv(t)
+	isolateTestUserDirs(t)
+	var releaseBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_stop_fallback":
+			http.Error(w, `{"error":"inspect_failed"}`, http.StatusInternalServerError)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_stop_fallback/release":
+			if err := json.NewDecoder(r.Body).Decode(&releaseBody); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: "cbx_stop_fallback", Provider: "aws", State: "released",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+	if err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+		"--provider", "aws", "--id", "cbx_stop_fallback",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if releaseBody["expectedProvider"] != "aws" {
+		t.Fatalf("release body=%#v, want expectedProvider=aws", releaseBody)
+	}
+}
+
 func TestCoordinatorAcquireProviderMismatchCleanupPolicy(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		fixed     bool
-		wantLease string
-		wantPath  string
-		wantPut   bool
-		wantDrops int
+		name        string
+		fixed       bool
+		wantLease   string
+		wantPath    string
+		wantPut     bool
+		wantCancels int
 	}{
-		{name: "new non-fixed lease rolls back", wantLease: "cbx_created_identity", wantPath: "/v1/leases", wantDrops: 1},
+		{name: "new non-fixed lease cancels requested create", wantLease: "cbx_created_identity", wantPath: "/v1/leases", wantCancels: 1},
 		{name: "fixed lease is retained", fixed: true, wantLease: "cbx_fixed_identity", wantPath: "/v1/leases/cbx_fixed_identity", wantPut: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			isolateTestUserDirs(t)
 			releases := 0
+			cancellations := 0
+			var capturedRequestedID, createAttemptID string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.URL.Path == test.wantPath && ((!test.wantPut && r.Method == http.MethodPost) || (test.wantPut && r.Method == http.MethodPut)):
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Fatal(err)
+					}
+					capturedRequestedID, _ = body["leaseID"].(string)
+					createAttemptID, _ = body["createAttemptID"].(string)
 					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
 						ID: test.wantLease, Provider: "external", TargetOS: targetLinux, State: "active",
+					}})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+capturedRequestedID+"/cancel-create":
+					cancellations++
+					_ = json.NewEncoder(w).Encode(map[string]any{"canceledCreate": CoordinatorCanceledCreateAttestation{
+						Version: 1, RequestedLeaseID: capturedRequestedID, CreateAttemptID: createAttemptID, State: "canceled",
 					}})
 				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+test.wantLease+"/release":
 					releases++
@@ -1799,14 +1916,17 @@ func TestCoordinatorAcquireProviderMismatchCleanupPolicy(t *testing.T) {
 
 			backend := newCoordinatorIdentityTestBackend(t, server.URL, "")
 			backend.cfg.AWSSSHCIDRs = []string{"0.0.0.0/0"}
-			requestedID := ""
+			operationID := ""
 			if test.fixed {
-				requestedID = test.wantLease
+				operationID = test.wantLease
 			}
-			_, err := backend.acquireOnceWithLeaseID(context.Background(), false, requestedID, "identity-fence")
+			_, err := backend.acquireOnceWithLeaseID(context.Background(), false, operationID, "identity-fence")
 			assertCoordinatorProviderIdentityError(t, err, "external", test.wantLease)
-			if releases != test.wantDrops {
-				t.Fatalf("release requests=%d want %d", releases, test.wantDrops)
+			if cancellations != test.wantCancels {
+				t.Fatalf("cancel-create requests=%d want %d", cancellations, test.wantCancels)
+			}
+			if releases != 0 {
+				t.Fatalf("release requests=%d want zero", releases)
 			}
 		})
 	}
@@ -1892,6 +2012,9 @@ func newCoordinatorIdentityTestBackend(t *testing.T, serverURL, adminToken strin
 
 func assertCoordinatorProviderIdentityError(t *testing.T, err error, returnedProvider, leaseID string) {
 	t.Helper()
+	if !isCoordinatorProviderIdentityError(err) {
+		t.Fatalf("error=%v, want typed coordinator provider identity error", err)
+	}
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 4 {
 		t.Fatalf("error=%v, want exit 4 provider identity mismatch", err)
@@ -1910,11 +2033,19 @@ func assertCoordinatorProviderIdentityError(t *testing.T, err error, returnedPro
 func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
 	isolateTestUserDirs(t)
 	adminReleased := false
+	var payloads []map[string]any
+	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/leases/cbx_admin/release" && r.URL.Path != "/v1/leases/cbx_admin/release" {
 			http.NotFound(w, r)
 			return
 		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		payloads = append(payloads, body)
+		paths = append(paths, r.URL.Path)
 		switch r.Header.Get("Authorization") {
 		case "Bearer user-token":
 			http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
@@ -1943,12 +2074,22 @@ func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
 	}
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 
-	err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_admin"}})
+	err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+		LeaseID: "cbx_admin", Server: Server{Provider: "aws"},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !adminReleased {
 		t.Fatal("admin release was not called")
+	}
+	if len(payloads) != 6 || paths[len(paths)-1] != "/v1/admin/leases/cbx_admin/release" {
+		t.Fatalf("release paths=%#v payloads=%#v", paths, payloads)
+	}
+	for i, payload := range payloads {
+		if payload["expectedProvider"] != "aws" {
+			t.Fatalf("release payload %d=%#v, want expectedProvider=aws", i, payload)
+		}
 	}
 }
 

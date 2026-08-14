@@ -642,8 +642,19 @@ func (a App) adminRelease(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	lease, err := coord.AdminReleaseLease(ctx, *id, *deleteServer)
+	current, err := coord.GetLease(ctx, *id)
 	if err != nil {
+		return err
+	}
+	expectedProvider, err := canonicalProviderName(current.Provider)
+	if err != nil {
+		return err
+	}
+	lease, err := coord.AdminReleaseLeaseForProvider(ctx, *id, *deleteServer, expectedProvider)
+	if err != nil {
+		return err
+	}
+	if err := validateCoordinatorProviderIdentity(expectedProvider, lease.ID, lease.Provider, true); err != nil {
 		return err
 	}
 	if *jsonOut {

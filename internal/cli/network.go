@@ -363,10 +363,16 @@ func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend B
 	}
 	applyTailscaleMetadataToServer(server, meta)
 	if useCoordinator && coord != nil && leaseID != "" {
-		if lease, err := coord.UpdateLeaseTailscale(ctx, leaseID, meta); err == nil {
-			updated, _, _ := leaseToServerTarget(lease, cfg)
+		if lease, err := coord.UpdateLeaseTailscaleForProvider(ctx, leaseID, cfg.Provider, meta); err == nil {
+			updated, identityErr := coordinatorTailscaleResponseServer(cfg, original, lease)
+			if identityErr != nil {
+				*server = original
+				fmt.Fprintf(a.Stderr, "warning: tailscale metadata update returned mismatched provider for %s: %v\n", leaseID, identityErr)
+				return
+			}
 			*server = updated
 		} else {
+			*server = original
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata update failed for %s: %v\n", leaseID, err)
 		}
 	} else if direct, ok := backend.(TailscaleMetadataBackend); ok && leaseID != "" {
@@ -378,6 +384,14 @@ func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend B
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata update failed for %s: %v\n", leaseID, err)
 		}
 	}
+}
+
+func coordinatorTailscaleResponseServer(cfg Config, previous Server, lease CoordinatorLease) (Server, error) {
+	if err := validateCoordinatorProviderIdentity(cfg.Provider, lease.ID, lease.Provider, true); err != nil {
+		return previous, err
+	}
+	updated, _, _ := leaseToServerTarget(lease, cfg)
+	return updated, nil
 }
 
 func readRemoteTailscaleMetadata(ctx context.Context, target SSHTarget) (TailscaleMetadata, error) {

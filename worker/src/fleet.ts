@@ -65,6 +65,7 @@ import {
 import {
   CloudflareCoordinatorRuntime,
   bufferCoordinatorRequestBody,
+  controlMessageOwnsTransaction,
   coordinatorRequestQueue,
   type CoordinatorRuntime,
 } from "./coordinator-runtime";
@@ -587,6 +588,7 @@ interface RuntimeAdapterDeleteDispatch {
 type RuntimeAdapterDeleteFinalization =
   | { status: "completed"; lease: LeaseRecord }
   | { status: "in-flight"; retryAt: string }
+  | { status: "provider-mismatch" }
   | { status: "mismatch" };
 
 interface RuntimeAdapterDeleteCompletion {
@@ -983,10 +985,15 @@ type ControlMessage =
   | {
       type: "heartbeat";
       leaseID?: string;
+      expectedProvider?: unknown;
       idleTimeoutSeconds?: number;
       telemetry?: Partial<LeaseTelemetry>;
     }
   | { type: "ping" };
+
+type ControlHeartbeatResult =
+  | { leaseID: string; ok: true; expiresAt: string }
+  | { leaseID: string; ok: false; error: string };
 
 interface WebVNCEvent {
   at: string;
@@ -2603,39 +2610,6 @@ export class FleetCoordinator {
     input: Extract<ControlMessage, { type: "heartbeat" }>,
   ): Promise<void> {
     const leaseID = typeof input.leaseID === "string" ? input.leaseID : "";
-    const lease = leaseID ? await this.resolveLeaseForControl(leaseID, attachment) : undefined;
-    if (!lease) {
-      sendControl(socket, { type: "heartbeat", leaseID, ok: false, error: "not_found" });
-      return;
-    }
-    if (lease.workspaceID) {
-      sendControl(socket, {
-        type: "heartbeat",
-        leaseID: lease.id,
-        ok: false,
-        error: "workspace_managed_lease",
-      });
-      return;
-    }
-    if (lease.cleanupStartedAt) {
-      sendControl(socket, {
-        type: "heartbeat",
-        leaseID: lease.id,
-        ok: false,
-        error: "cleanup_in_progress",
-      });
-      return;
-    }
-    const heartbeatError = leaseHeartbeatStateError(lease);
-    if (heartbeatError) {
-      sendControl(socket, {
-        type: "heartbeat",
-        leaseID: lease.id,
-        ok: false,
-        error: heartbeatError,
-      });
-      return;
-    }
     const heartbeat: { idleTimeoutSeconds?: number; telemetry?: Partial<LeaseTelemetry> } = {};
     if (input.idleTimeoutSeconds !== undefined) {
       heartbeat.idleTimeoutSeconds = input.idleTimeoutSeconds;
@@ -2643,13 +2617,29 @@ export class FleetCoordinator {
     if (input.telemetry !== undefined) {
       heartbeat.telemetry = input.telemetry;
     }
-    const updated = await this.applyLeaseHeartbeatState(lease, heartbeat);
-    sendControl(socket, {
-      type: "heartbeat",
-      leaseID: lease.id,
-      ok: true,
-      expiresAt: updated.expiresAt,
+    const result = await this.state.runExclusive<ControlHeartbeatResult>(async () => {
+      const lease = leaseID ? await this.resolveLeaseForControl(leaseID, attachment) : undefined;
+      if (!lease) {
+        return { leaseID, ok: false, error: "not_found" };
+      }
+      const providerError = mutationExpectedProviderErrorCode(input.expectedProvider, lease);
+      if (providerError) {
+        return { leaseID: lease.id, ok: false, error: providerError };
+      }
+      if (lease.workspaceID) {
+        return { leaseID: lease.id, ok: false, error: "workspace_managed_lease" };
+      }
+      if (lease.cleanupStartedAt) {
+        return { leaseID: lease.id, ok: false, error: "cleanup_in_progress" };
+      }
+      const heartbeatError = leaseHeartbeatStateError(lease);
+      if (heartbeatError) {
+        return { leaseID: lease.id, ok: false, error: heartbeatError };
+      }
+      const updated = await this.applyLeaseHeartbeatState(lease, heartbeat);
+      return { leaseID: lease.id, ok: true, expiresAt: updated.expiresAt };
     });
+    sendControl(socket, { type: "heartbeat", ...result });
   }
 
   private serializeBridgeAttachment(socket: WebSocket, attachment: BridgeAttachment): void {
@@ -6514,22 +6504,30 @@ export class FleetCoordinator {
       return this.heartbeatLease(request, leaseID);
     }
     if (method === "POST" && action === "tailscale") {
-      const admin = isAdminRequest(request);
-      const lease = await this.resolveLease(leaseID, request, admin);
-      if (!lease) {
-        return notFound();
-      }
-      if (!this.leaseManageableByRequest(lease, request, admin)) {
-        return json(
-          { error: "forbidden", message: "lease manage access required" },
-          { status: 403 },
-        );
-      }
-      const input = await readJson<Partial<TailscaleMetadata>>(request);
-      lease.tailscale = mergeTailscaleMetadata(lease.tailscale, input);
-      lease.updatedAt = new Date().toISOString();
-      await this.putLease(lease);
-      return json({ lease: this.leaseForRequest(lease, request, admin) });
+      const input = await readJson<Partial<TailscaleMetadata> & { expectedProvider?: unknown }>(
+        request,
+      );
+      return await this.state.runExclusive(async () => {
+        const admin = isAdminRequest(request);
+        const lease = await this.resolveLease(leaseID, request, admin);
+        if (!lease) {
+          return notFound();
+        }
+        if (!this.leaseManageableByRequest(lease, request, admin)) {
+          return json(
+            { error: "forbidden", message: "lease manage access required" },
+            { status: 403 },
+          );
+        }
+        const providerError = mutationExpectedProviderError(input.expectedProvider, lease);
+        if (providerError) {
+          return providerError;
+        }
+        lease.tailscale = mergeTailscaleMetadata(lease.tailscale, input);
+        lease.updatedAt = new Date().toISOString();
+        await this.putLease(lease);
+        return json({ lease: this.leaseForRequest(lease, request, admin) });
+      });
     }
     if (method === "POST" && action === "release") {
       return this.releaseLease(request, leaseID, false);
@@ -6823,6 +6821,7 @@ export class FleetCoordinator {
 
   private async heartbeatLease(request: Request, leaseID: string): Promise<Response> {
     const input = await optionalJson<{
+      expectedProvider?: unknown;
       idleTimeoutSeconds?: number;
       telemetry?: Partial<LeaseTelemetry>;
     }>(request);
@@ -6838,6 +6837,10 @@ export class FleetCoordinator {
           { error: "forbidden", message: "lease manage access required" },
           { status: 403 },
         );
+      }
+      const providerError = mutationExpectedProviderError(input.expectedProvider, lease);
+      if (providerError) {
+        return providerError;
       }
       if (lease.workspaceID) {
         return workspaceManagedLeaseResponse();
@@ -7052,6 +7055,12 @@ export class FleetCoordinator {
   }
 
   private async releaseLease(request: Request, leaseID: string, admin: boolean): Promise<Response> {
+    const body = await optionalJson<{
+      expectedProvider?: unknown;
+      delete?: boolean;
+      runtimeAdapterDeleteCompletion?: unknown;
+      runtimeAdapterLegacyDeleteCompletion?: unknown;
+    }>(request);
     const lease = await this.resolveLease(leaseID, request, admin);
     if (!lease) {
       return notFound();
@@ -7059,14 +7068,15 @@ export class FleetCoordinator {
     if (!this.leaseManageableByRequest(lease, request, admin)) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
+    const providerError = mutationExpectedProviderError(body.expectedProvider, lease);
+    if (providerError) {
+      return providerError;
+    }
+    const expectedProvider =
+      typeof body.expectedProvider === "string" ? body.expectedProvider : undefined;
     if (lease.workspaceID) {
       return workspaceManagedLeaseResponse();
     }
-    const body = await optionalJson<{
-      delete?: boolean;
-      runtimeAdapterDeleteCompletion?: unknown;
-      runtimeAdapterLegacyDeleteCompletion?: unknown;
-    }>(request);
     const runtimeAdapterCompletion = runtimeAdapterDeleteCompletion(
       body.runtimeAdapterDeleteCompletion,
     );
@@ -7114,6 +7124,7 @@ export class FleetCoordinator {
         lease,
         runtimeAdapterCompletion,
         admin,
+        expectedProvider,
       );
     }
     if (runtimeAdapterLegacyCompletion) {
@@ -7122,6 +7133,7 @@ export class FleetCoordinator {
         lease,
         runtimeAdapterLegacyCompletion,
         admin,
+        expectedProvider,
       );
     }
     if (
@@ -7140,7 +7152,7 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      return await this.deleteRegisteredRuntimeAdapterWorkspace(request, lease);
+      return await this.deleteRegisteredRuntimeAdapterWorkspace(request, lease, expectedProvider);
     }
     if (lease.runtimeAdapterDeleteRequestedAt) {
       return this.runtimeAdapterDeletePendingResponse(lease, request, admin);
@@ -7165,6 +7177,7 @@ export class FleetCoordinator {
       released = await this.releaseResolvedLease(lease, {
         deleteServer: shouldDelete,
         expectedLease: lease,
+        ...(expectedProvider ? { expectedProvider } : {}),
       });
     } catch (error) {
       if (error instanceof LeaseReleaseResolutionConflictError) {
@@ -7175,6 +7188,9 @@ export class FleetCoordinator {
           },
           { status: 409 },
         );
+      }
+      if (error instanceof LeaseProviderIdentityMismatchError) {
+        return providerIdentityMismatchResponse();
       }
       throw error;
     }
@@ -7199,6 +7215,7 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     completion: RuntimeAdapterDeleteCompletion,
     admin: boolean,
+    expectedProvider?: string,
   ): Promise<Response> {
     if (
       !isRegisteredLease(lease) ||
@@ -7228,7 +7245,11 @@ export class FleetCoordinator {
       );
     }
     return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
-      const result = await this.finalizeRuntimeAdapterDeleteCompletion(lease, completion);
+      const result = await this.finalizeRuntimeAdapterDeleteCompletion(
+        lease,
+        completion,
+        expectedProvider,
+      );
       if (result.status === "in-flight") {
         return runtimeAdapterDeleteInFlightResponse(result.retryAt);
       }
@@ -7243,6 +7264,9 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
+      if (result.status === "provider-mismatch") {
+        return providerIdentityMismatchResponse();
+      }
       return json({ lease: publicLeaseRecord(result.lease) });
     });
   }
@@ -7252,6 +7276,7 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     completion: RuntimeAdapterLegacyDeleteCompletion,
     admin: boolean,
+    expectedProvider?: string,
   ): Promise<Response> {
     if (
       !isRegisteredLease(lease) ||
@@ -7281,7 +7306,11 @@ export class FleetCoordinator {
       );
     }
     return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
-      const result = await this.finalizeLegacyRuntimeAdapterDelete(lease, completion);
+      const result = await this.finalizeLegacyRuntimeAdapterDelete(
+        lease,
+        completion,
+        expectedProvider,
+      );
       if (result.status === "in-flight") {
         return runtimeAdapterDeleteInFlightResponse(result.retryAt);
       }
@@ -7295,6 +7324,9 @@ export class FleetCoordinator {
           },
           { status: 409 },
         );
+      }
+      if (result.status === "provider-mismatch") {
+        return providerIdentityMismatchResponse();
       }
       return json({ lease: publicLeaseRecord(result.lease) });
     });
@@ -8242,6 +8274,7 @@ export class FleetCoordinator {
   private async deleteRegisteredRuntimeAdapterWorkspace(
     request: Request,
     lease: LeaseRecord,
+    expectedProvider?: string,
   ): Promise<Response> {
     const adapterID = lease.runtimeAdapterID;
     const workspaceID = lease.runtimeAdapterWorkspaceID;
@@ -8271,6 +8304,9 @@ export class FleetCoordinator {
           403,
         );
       }
+      if (expectedProvider && !mutationProvidersMatch(current.provider, expectedProvider)) {
+        return providerIdentityMismatchResponse();
+      }
       if (
         current.runtimeAdapterID !== adapterID ||
         current.runtimeAdapterWorkspaceID !== workspaceID ||
@@ -8283,10 +8319,19 @@ export class FleetCoordinator {
           409,
         );
       }
-      const deleteClaim = await this.markRuntimeAdapterDeletePending(
-        current,
-        runtimeAdapterDeleteInitialRetryMs,
-      );
+      let deleteClaim: RuntimeAdapterDeleteClaim | undefined;
+      try {
+        deleteClaim = await this.markRuntimeAdapterDeletePending(
+          current,
+          runtimeAdapterDeleteInitialRetryMs,
+          expectedProvider,
+        );
+      } catch (error) {
+        if (error instanceof LeaseProviderIdentityMismatchError) {
+          return providerIdentityMismatchResponse();
+        }
+        throw error;
+      }
       if (!deleteClaim) {
         return runtimeAdapterWorkspaceDeleteError(
           "runtime_adapter_lease_inactive",
@@ -8431,9 +8476,17 @@ export class FleetCoordinator {
   private async markRuntimeAdapterDeletePending(
     lease: LeaseRecord,
     retryDelay: number,
+    expectedProvider?: string,
   ): Promise<RuntimeAdapterDeleteClaim | undefined> {
     return await this.state.runExclusive(async () => {
       const current = await this.getLease(lease.id);
+      if (
+        current &&
+        expectedProvider &&
+        !mutationProvidersMatch(current.provider, expectedProvider)
+      ) {
+        throw new LeaseProviderIdentityMismatchError();
+      }
       if (
         !current ||
         !leaseIsLive(current) ||
@@ -8536,10 +8589,18 @@ export class FleetCoordinator {
   private async finalizeRuntimeAdapterDeleteCompletion(
     lease: LeaseRecord,
     completion: RuntimeAdapterDeleteCompletion,
+    expectedProvider?: string,
   ): Promise<RuntimeAdapterDeleteFinalization> {
     const result = await this.state.runExclusive(
       async (): Promise<RuntimeAdapterDeleteFinalization> => {
         const current = await this.getLease(lease.id);
+        if (
+          current &&
+          expectedProvider &&
+          !mutationProvidersMatch(current.provider, expectedProvider)
+        ) {
+          return { status: "provider-mismatch" };
+        }
         if (
           !current ||
           !isRegisteredLease(current) ||
@@ -8580,10 +8641,18 @@ export class FleetCoordinator {
   private async finalizeLegacyRuntimeAdapterDelete(
     lease: LeaseRecord,
     completion: RuntimeAdapterLegacyDeleteCompletion,
+    expectedProvider?: string,
   ): Promise<RuntimeAdapterDeleteFinalization> {
     const result = await this.state.runExclusive(
       async (): Promise<RuntimeAdapterDeleteFinalization> => {
         const current = await this.getLease(lease.id);
+        if (
+          current &&
+          expectedProvider &&
+          !mutationProvidersMatch(current.provider, expectedProvider)
+        ) {
+          return { status: "provider-mismatch" };
+        }
         if (
           !current ||
           !isRegisteredLease(current) ||
@@ -16165,6 +16234,7 @@ export class FleetCoordinator {
       awaitProviderCleanup?: boolean;
       expectedCreateAttempt?: CreateAttemptRecord;
       expectedLease?: LeaseRecord;
+      expectedProvider?: string;
     },
   ): Promise<LeaseRecord> {
     const current = (await this.getLease(lease.id)) ?? lease;
@@ -16236,10 +16306,18 @@ export class FleetCoordinator {
       awaitProviderCleanup?: boolean;
       expectedCreateAttempt?: CreateAttemptRecord;
       expectedLease?: LeaseRecord;
+      expectedProvider?: string;
     },
   ): Promise<LeaseRecord> {
     const preparation = await this.state.runExclusive(async () => {
       const stored = await this.getLease(lease.id);
+      if (
+        stored &&
+        options.expectedProvider &&
+        !mutationProvidersMatch(stored.provider, options.expectedProvider)
+      ) {
+        throw new LeaseProviderIdentityMismatchError();
+      }
       if (options.expectedCreateAttempt) {
         const currentAttempt = await this.getCreateAttempt(
           options.expectedCreateAttempt.requestedLeaseID,
@@ -16419,7 +16497,7 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
 
   override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const attachment = this.runtime.socketAttachment<{ kind?: string }>(socket);
-    if (attachment?.kind !== "control") {
+    if (attachment?.kind !== "control" || controlMessageOwnsTransaction(message)) {
       return super.webSocketMessage(socket, message);
     }
     return this.runtime.runExclusive(() => super.webSocketMessage(socket, message));
@@ -16443,6 +16521,8 @@ interface CreateAttemptRecord {
 class CreateAttemptConflictError extends Error {}
 
 class LeaseReleaseResolutionConflictError extends Error {}
+
+class LeaseProviderIdentityMismatchError extends Error {}
 
 class LeaseCleanupInProgressError extends Error {}
 
@@ -19785,6 +19865,63 @@ function sanitizeRegisteredPorts(value: unknown): string[] | undefined {
 function sanitizeRunnerProvider(value: unknown): string {
   const provider = nonSecretString(value).toLowerCase();
   return /^[a-z0-9][a-z0-9-]{1,63}$/.test(provider) ? provider : "";
+}
+
+function mutationExpectedProviderError(value: unknown, lease: LeaseRecord): Response | undefined {
+  const code = mutationExpectedProviderErrorCode(value, lease);
+  if (code === "invalid_expected_provider") {
+    return json(
+      {
+        error: code,
+        message: "expectedProvider must be a nonempty normalized provider",
+      },
+      { status: 400 },
+    );
+  }
+  if (code === "provider_identity_mismatch") {
+    return providerIdentityMismatchResponse();
+  }
+  return undefined;
+}
+
+function mutationExpectedProviderErrorCode(
+  value: unknown,
+  lease: LeaseRecord,
+): "invalid_expected_provider" | "provider_identity_mismatch" | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const expectedProvider = sanitizeRunnerProvider(value);
+  if (typeof value !== "string" || !expectedProvider || expectedProvider !== value) {
+    return "invalid_expected_provider";
+  }
+  return mutationProvidersMatch(lease.provider, expectedProvider)
+    ? undefined
+    : "provider_identity_mismatch";
+}
+
+function canonicalMutationProvider(value: unknown): string {
+  const provider = sanitizeRunnerProvider(value);
+  if (provider === "google" || provider === "google-cloud") {
+    return "gcp";
+  }
+  return provider;
+}
+
+function mutationProvidersMatch(stored: unknown, expected: unknown): boolean {
+  const storedProvider = canonicalMutationProvider(stored);
+  const expectedProvider = canonicalMutationProvider(expected);
+  return Boolean(storedProvider && expectedProvider && storedProvider === expectedProvider);
+}
+
+function providerIdentityMismatchResponse(): Response {
+  return json(
+    {
+      error: "provider_identity_mismatch",
+      message: "expectedProvider does not match the lease provider",
+    },
+    { status: 409 },
+  );
 }
 
 function sanitizeExternalRunner(

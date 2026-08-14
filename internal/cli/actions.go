@@ -165,7 +165,10 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	if coord := backendCoordinator(backend); coord != nil {
-		stopHeartbeat := startCoordinatorHeartbeat(ctx, coord, leaseID, cfg.IdleTimeout, nil, leaseTelemetryCollectorForTarget(target), a.Stderr)
+		stopHeartbeat, err := startCoordinatorHeartbeat(ctx, coord, leaseID, cfg.Provider, cfg.IdleTimeout, nil, leaseTelemetryCollectorForTarget(target), a.Stderr)
+		if err != nil {
+			return err
+		}
 		defer stopHeartbeat()
 	} else if sshBackend, ok := backend.(SSHLeaseBackend); ok {
 		_, err := sshBackend.Touch(ctx, TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: blank(server.Labels["state"], "ready"), IdleTimeout: cfg.IdleTimeout})

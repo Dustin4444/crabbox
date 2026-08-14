@@ -238,7 +238,7 @@ func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config,
 	if cfg.macOSPortalAuto {
 		if err := persistAutomaticCoordinatorRegistrationBinding(lease.LeaseID, cfg, coord.BaseURL); err != nil {
 			callCtx, cancel := context.WithTimeout(context.Background(), coordinatorRegistrationTimeout)
-			_, releaseErr := coord.ReleaseLease(callCtx, lease.LeaseID, false)
+			_, releaseErr := coord.ReleaseLeaseForProvider(callCtx, lease.LeaseID, false, cfg.Provider)
 			cancel()
 			a.coordinatorRegistrationWarning(lease.LeaseID, errors.Join(err, releaseErr))
 			return err
@@ -559,6 +559,7 @@ func (a App) completeRuntimeAdapterDeleteAfterConfirmedAbsence(ctx context.Conte
 			ctx,
 			coord,
 			leaseID,
+			cfg.Provider,
 			adapterID,
 			workspaceID,
 		)
@@ -568,7 +569,7 @@ func (a App) completeRuntimeAdapterDeleteAfterConfirmedAbsence(ctx context.Conte
 			return fmt.Errorf("runtime adapter delete completion has an invalid persisted registration id")
 		}
 		callCtx, cancel := context.WithTimeout(ctx, coordinatorRegistrationTimeout)
-		_, err := coord.CompleteRuntimeAdapterDelete(callCtx, leaseID, adapterID, workspaceID, registrationID)
+		_, err := coord.CompleteRuntimeAdapterDeleteForProvider(callCtx, leaseID, cfg.Provider, adapterID, workspaceID, registrationID)
 		cancel()
 		if err == nil || isCoordinatorNotFound(err) {
 			return nil
@@ -582,6 +583,7 @@ func (a App) completeRuntimeAdapterDeleteAfterConfirmedAbsence(ctx context.Conte
 		ctx,
 		coord,
 		leaseID,
+		cfg.Provider,
 		adapterID,
 		workspaceID,
 	)
@@ -590,11 +592,11 @@ func (a App) completeRuntimeAdapterDeleteAfterConfirmedAbsence(ctx context.Conte
 func completeLegacyRuntimeAdapterDeleteAfterConfirmedAbsence(
 	ctx context.Context,
 	coord *CoordinatorClient,
-	leaseID, adapterID, workspaceID string,
+	leaseID, expectedProvider, adapterID, workspaceID string,
 ) error {
 	callCtx, cancel := context.WithTimeout(ctx, coordinatorRegistrationTimeout)
 	defer cancel()
-	_, err := coord.CompleteLegacyRuntimeAdapterDelete(callCtx, leaseID, adapterID, workspaceID)
+	_, err := coord.CompleteLegacyRuntimeAdapterDeleteForProvider(callCtx, leaseID, expectedProvider, adapterID, workspaceID)
 	if isCoordinatorNotFound(err) {
 		return nil
 	}
@@ -625,7 +627,7 @@ func (a App) releaseRegisteredCoordinatorLease(ctx context.Context, cfg Config, 
 	}
 	callCtx, cancel := context.WithTimeout(ctx, coordinatorRegistrationTimeout)
 	defer cancel()
-	if _, err := coord.ReleaseLease(callCtx, leaseID, false); err != nil {
+	if _, err := coord.ReleaseLeaseForProvider(callCtx, leaseID, false, cfg.Provider); err != nil {
 		return err
 	}
 	return nil

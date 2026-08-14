@@ -298,8 +298,12 @@ func (a App) releasePrewarmLeaseAfterFailure(ctx context.Context, backend Backen
 			fmt.Fprintf(a.Stderr, "warning: prewarm %s failed; automatic release of %s skipped: %v; next: crabbox stop --provider %s --id %s\n", stage, leaseID, err, cfg.Provider, leaseID)
 			return
 		}
+		if isCoordinatorProviderIdentityError(err) {
+			fmt.Fprintf(a.Stderr, "warning: prewarm %s failed; automatic release of %s blocked: %v\n", stage, leaseID, err)
+			return
+		}
 		fmt.Fprintf(a.Stderr, "warning: could not inspect lease %s before prewarm cleanup: %v; releasing by lease ID\n", leaseID, err)
-		lease = LeaseTarget{LeaseID: leaseID}
+		lease = LeaseTarget{LeaseID: leaseID, Server: Server{Provider: sshBackend.Spec().Name}}
 	}
 	fmt.Fprintf(a.Stderr, "prewarm cleanup: releasing id=%s after %s failure\n", leaseID, stage)
 	a.cleanupBackendLeaseConnectionsBestEffort(cleanupCtx, lease)

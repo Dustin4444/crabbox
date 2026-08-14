@@ -1002,29 +1002,39 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		stopHeartbeat = nil
 	}
 	defer stopRunHeartbeat()
-	startRunHeartbeat := func(updateIdleTimeout *time.Duration) {
+	startRunHeartbeat := func(updateIdleTimeout *time.Duration) error {
 		stopRunHeartbeat()
 		heartbeatCoord := coord
 		if heartbeatCoord == nil {
 			heartbeatCoord = registrationCoord
 		}
 		if heartbeatCoord != nil {
-			stopHeartbeat = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr)
+			var err error
+			stopHeartbeat, err = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.Provider, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr)
+			return err
 		}
+		return nil
 	}
 	if useCoordinator && leaseID != "" {
 		var heartbeatIdleTimeout *time.Duration
 		if *leaseIDFlag != "" && flagWasSet(fs, "idle-timeout") {
 			heartbeatIdleTimeout = &cfg.IdleTimeout
-			if lease, err := coord.UpdateLeaseIdleTimeout(ctx, leaseID, *heartbeatIdleTimeout); err == nil {
+			if lease, err := coord.UpdateLeaseIdleTimeoutForProvider(ctx, leaseID, cfg.Provider, *heartbeatIdleTimeout); err == nil {
+				if identityErr := validateCoordinatorProviderIdentity(cfg.Provider, lease.ID, lease.Provider, true); identityErr != nil {
+					return recordFailure(identityErr)
+				}
 				fmt.Fprintf(a.Stderr, "updated idle_timeout=%s expires=%s\n", cfg.IdleTimeout, blank(lease.ExpiresAt, "-"))
 			} else {
 				return recordFailure(err)
 			}
 		}
-		startRunHeartbeat(heartbeatIdleTimeout)
+		if err := startRunHeartbeat(heartbeatIdleTimeout); err != nil {
+			return recordFailure(err)
+		}
 	} else if registrationCoord != nil && leaseID != "" {
-		startRunHeartbeat(nil)
+		if err := startRunHeartbeat(nil); err != nil {
+			return recordFailure(err)
+		}
 	}
 	if shouldAcquireWorkspaceOwner(acquired, sshBackend) {
 		target = bootstrapNetworkTarget(cfg, server, target)
@@ -3135,11 +3145,11 @@ func shouldReplaceLeaseAfterBeforeCommandSSHFailure(err error, acquired, useCoor
 	return shouldReleaseRunLease(acquired, keep, keepOnFailure, stopAfter, err)
 }
 
-func releaseCoordinatorLease(ctx context.Context, coord *CoordinatorClient, leaseID string) error {
+func releaseCoordinatorLease(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string) error {
 	var lastErr error
 	for attempt := 1; attempt <= 5; attempt++ {
 		releaseCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		_, err := coord.ReleaseLease(releaseCtx, leaseID, true)
+		_, err := coord.ReleaseLeaseForProvider(releaseCtx, leaseID, true, expectedProvider)
 		cancel()
 		if err == nil {
 			return nil
@@ -3245,7 +3255,11 @@ func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, c
 	return nil
 }
 
-func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer) func() {
+func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer) (func(), error) {
+	expectedProvider, err := canonicalProviderName(expectedProvider)
+	if err != nil {
+		return nil, err
+	}
 	rootCtx, cancel := context.WithCancel(ctx)
 	interval := heartbeatInterval(idleTimeout)
 	done := make(chan struct{})
@@ -3271,7 +3285,7 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 				control, _ = dialCoordinatorControl(callCtx, coord)
 			}
 			if control != nil {
-				err = control.heartbeat(callCtx, leaseID, idleTimeoutOverride, telemetry)
+				err = control.heartbeat(callCtx, leaseID, expectedProvider, idleTimeoutOverride, telemetry)
 				if err != nil {
 					control.close()
 					control = nil
@@ -3279,9 +3293,9 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 			}
 			if control == nil {
 				if updateIdleTimeout != nil {
-					_, err = coord.UpdateLeaseIdleTimeoutWithTelemetry(callCtx, leaseID, *updateIdleTimeout, telemetry)
+					_, err = coord.UpdateLeaseIdleTimeoutWithTelemetryForProvider(callCtx, leaseID, expectedProvider, *updateIdleTimeout, telemetry)
 				} else {
-					_, err = coord.TouchLeaseWithTelemetry(callCtx, leaseID, telemetry)
+					_, err = coord.TouchLeaseWithTelemetryForProvider(callCtx, leaseID, expectedProvider, telemetry)
 				}
 			} else {
 				err = nil
@@ -3300,7 +3314,7 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 	return func() {
 		cancel()
 		<-done
-	}
+	}, nil
 }
 
 var readyPoolBorrowHeartbeatInterval = 30 * time.Second
@@ -3644,8 +3658,11 @@ func (a App) stop(ctx context.Context, args []string) error {
 	})
 	if err != nil {
 		if backendCoordinator(backend) != nil {
+			if isCoordinatorProviderIdentityError(err) {
+				return err
+			}
 			fmt.Fprintf(a.Stderr, "warning: could not inspect lease before release: %v\n", err)
-			lease = LeaseTarget{LeaseID: *id}
+			lease = LeaseTarget{LeaseID: *id, Server: Server{Provider: backend.Spec().Name}}
 		} else {
 			return err
 		}

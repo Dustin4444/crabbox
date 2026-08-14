@@ -120,6 +120,19 @@ func TestRenderTailscaleHostname(t *testing.T) {
 	}
 }
 
+func TestCoordinatorTailscaleProviderMismatchRetainsPreviousServer(t *testing.T) {
+	previous := Server{CloudID: "i-original", Provider: "aws", Name: "original"}
+	updated, err := coordinatorTailscaleResponseServer(Config{Provider: "aws"}, previous, CoordinatorLease{
+		ID: "cbx_tailscale_identity", Provider: "external", CloudID: "external-workspace", ServerName: "replacement",
+	})
+	if !isCoordinatorProviderIdentityError(err) {
+		t.Fatalf("error=%v, want typed provider identity mismatch", err)
+	}
+	if updated.CloudID != previous.CloudID || updated.Provider != previous.Provider || updated.Name != previous.Name {
+		t.Fatalf("updated server=%#v, want previous=%#v", updated, previous)
+	}
+}
+
 func TestValidateNetworkConfigRejectsStaticProvisioning(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "ssh"

@@ -41,7 +41,11 @@ func (a App) startInteractiveSSHLeaseActivity(ctx context.Context, cfg Config, l
 		if resolved, ok := parseDurationSecondsLabel(lease.Server.Labels["idle_timeout_secs"]); ok {
 			heartbeatIdleTimeout = resolved
 		}
-		stopHeartbeat = startCoordinatorHeartbeat(ctx, coord, lease.LeaseID, heartbeatIdleTimeout, nil, telemetry, a.Stderr)
+		var heartbeatErr error
+		stopHeartbeat, heartbeatErr = startCoordinatorHeartbeat(ctx, coord, lease.LeaseID, cfg.Provider, heartbeatIdleTimeout, nil, telemetry, a.Stderr)
+		if heartbeatErr != nil {
+			fmt.Fprintf(a.Stderr, "warning: coordinator heartbeat disabled for %s: %v\n", lease.LeaseID, heartbeatErr)
+		}
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
