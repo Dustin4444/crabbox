@@ -11,7 +11,7 @@ import (
 func (a App) ports(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("ports", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	var publish stringListFlag

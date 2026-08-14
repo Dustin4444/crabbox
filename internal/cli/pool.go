@@ -18,7 +18,7 @@ var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 func (a App) list(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("list", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	jsonOut := fs.Bool("json", false, "print JSON")
 	all := fs.Bool("all", false, "include provider inventory outside Crabbox-owned leases where supported")
 	refresh := fs.Bool("refresh", false, "refresh provider-backed state where supported")
@@ -495,7 +495,7 @@ func coordinatorMachineOrphanField(labels map[string]string, activeLeaseIDs map[
 func (a App) cleanup(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("machine cleanup", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpCleanup())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpCleanup())
 	dryRun := fs.Bool("dry-run", false, "only print")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)

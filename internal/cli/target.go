@@ -308,6 +308,10 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if flagWasSet(fs, "provider") && !isStaticProvider(cfg.Provider) {
 		return nil
 	}
+	authoritative := providerSelectionIsAuthoritativeRoute(*cfg)
+	if authoritative && !isStaticProvider(cfg.Provider) {
+		return nil
+	}
 	claim, hasClaim, err := staticLeaseClaim(id)
 	if err != nil {
 		return err
@@ -315,7 +319,7 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if (!hasStaticPrefix || suffix == "") && !hasClaim {
 		return nil
 	}
-	if !flagWasSet(fs, "provider") {
+	if !flagWasSet(fs, "provider") && !authoritative {
 		setProviderSelection(cfg, staticProvider, providerSelectionLeaseContext)
 	}
 	if !isStaticProvider(cfg.Provider) {
@@ -391,6 +395,10 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 		}
 		return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
 	}
+	authoritative := providerSelectionIsAuthoritativeRoute(*cfg)
+	if authoritative && !providerSelected {
+		return nil
+	}
 	if providerSelected && strings.TrimSpace(cfg.External.RoutingFile) != "" {
 		if !cfg.External.routingLoaded {
 			if err := loadExternalRoutingConfig(cfg, cfg.External.RoutingFile, false); err != nil {
@@ -416,7 +424,7 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 		}
 		return err
 	}
-	if !cfg.providerExplicit {
+	if !cfg.providerExplicit && !authoritative {
 		setProviderSelection(cfg, "external", providerSelectionLeaseContext)
 	}
 	if err := loadExternalRoutingConfig(cfg, path, true); err != nil {

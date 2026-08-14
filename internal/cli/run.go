@@ -3486,7 +3486,7 @@ func FindServerByAlias(servers []Server, id string) (Server, string, error) {
 func (a App) stop(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("stop", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "adopt an unclaimed provider resource before stopping it")
 	expectedLeaseID := fs.String("expected-provider-lease-id", "", "internal: immutable provider lease identity")

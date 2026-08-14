@@ -14,7 +14,7 @@ import (
 func (a App) screenshot(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("screenshot", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	output := fs.String("output", "", "local PNG output path")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")

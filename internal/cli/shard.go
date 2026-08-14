@@ -202,6 +202,9 @@ func (a App) shard(ctx context.Context, args []string) error {
 		mergedPolicy = *failOnTestFailures
 	}
 	if *dryRun {
+		if !providerSelectionIsActionable(cfg) {
+			return exit(2, "%s", providerSelectionRequiredDiagnostic)
+		}
 		for i := 1; i <= *count; i++ {
 			slug := checkpointForkFanoutSlug(requestedSlug, i, *count)
 			expandedCommand := checkpointForkRunCommand(command, checkpointForkRunContext{Index: i, Total: *count, Slug: slug})

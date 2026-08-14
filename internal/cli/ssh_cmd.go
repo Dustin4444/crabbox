@@ -38,7 +38,7 @@ type sshCommandResolveOptions struct {
 func (a App) resolveSSHCommandTargetWithOptions(ctx context.Context, command string, args []string, allowShowSecret bool, opts sshCommandResolveOptions) (resolvedSSHCommandTarget, error) {
 	defaults := defaultConfig()
 	fs := newFlagSet(command, a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	var showSecret *bool

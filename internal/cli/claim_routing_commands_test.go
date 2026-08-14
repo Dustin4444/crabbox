@@ -82,6 +82,28 @@ func (b claimRoutingStatusBackend) Status(_ context.Context, req StatusRequest) 
 func (b claimRoutingStatusBackend) Stop(context.Context, StopRequest) error {
 	return errors.New("stop provider=" + b.spec.Name)
 }
+func (b claimRoutingStatusBackend) Acquire(_ context.Context, req AcquireRequest) (LeaseTarget, error) {
+	return b.Resolve(context.Background(), ResolveRequest{ID: req.RequestedLeaseID})
+}
+func (b claimRoutingStatusBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+	leaseID := firstNonBlank(req.ID, "cbx_claim_routing")
+	return LeaseTarget{
+		LeaseID: leaseID,
+		Server: Server{
+			Provider: b.spec.Name,
+			CloudID:  leaseID,
+			Status:   "ready",
+			Labels:   map[string]string{"lease": leaseID, "provider": b.spec.Name, "state": "ready"},
+		},
+		SSH: SSHTarget{Host: "claim-routing.example.test", User: "runner", Port: "22", TargetOS: targetLinux},
+	}, nil
+}
+func (claimRoutingStatusBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+	return req.Lease.Server, nil
+}
+func (claimRoutingStatusBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+	return nil
+}
 
 func TestStatusAndInspectRouteImplicitIdentifiersThroughLocalClaims(t *testing.T) {
 	commands := []struct {

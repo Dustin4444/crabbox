@@ -16,7 +16,7 @@ func (a App) resume(ctx context.Context, args []string) error {
 func (a App) pauseResume(ctx context.Context, args []string, action string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet(action, a.Stderr)
-	provider := fs.String("provider", defaults.Provider, providerHelpAll())
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
