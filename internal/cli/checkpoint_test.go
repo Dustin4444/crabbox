@@ -310,6 +310,26 @@ func TestCheckpointForkDryRunDoesNotAcquireLease(t *testing.T) {
 	}
 }
 
+func TestCheckpointForkParallelsTemplateDryRunConfigMarksProviderIntent(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	defaults := defaultConfig()
+	fs := newFlagSet("checkpoint fork parallels dry run", io.Discard)
+	leaseFlags := registerLeaseCreateFlags(fs, defaults)
+	_ = fs.String("parallels-template", "", "")
+	if err := parseFlags(fs, []string{"--parallels-template", "win"}); err != nil {
+		t.Fatal(err)
+	}
+	*leaseFlags.Provider = "parallels"
+	cfg, err := loadCheckpointForkParallelsConfig(fs, leaseFlags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "parallels" || cfg.providerSelectionSource != providerSelectionFlag || !providerSelectionIsActionable(cfg) {
+		t.Fatalf("provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
+	}
+}
+
 func TestCheckpointForkDryRunFansOutRequestedSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
@@ -968,6 +988,9 @@ func TestDirectAWSCheckpointConfigUsesDirectMarker(t *testing.T) {
 	}
 	if cfg.AWSRegion != "eu-west-1" {
 		t.Fatalf("AWSRegion=%q, want record region", cfg.AWSRegion)
+	}
+	if cfg.providerSelectionSource != providerSelectionRecordedRun {
+		t.Fatalf("provider source=%q want %q", cfg.providerSelectionSource, providerSelectionRecordedRun)
 	}
 
 	if err := os.WriteFile(cfgPath, []byte("provider: aws\ncoordinator: https://coordinator.example\naws:\n  region: us-east-1\n"), 0o600); err != nil {
@@ -1714,6 +1737,9 @@ func TestApplyAWSMacOSCheckpointForkConfigPreservesTypeWithoutHostPin(t *testing
 
 	if cfg.Provider != "aws" || cfg.TargetOS != targetMacOS || cfg.AWSSnapshot != "snap-000000000001" {
 		t.Fatalf("aws macOS snapshot config not applied: %#v", cfg)
+	}
+	if cfg.providerSelectionSource != providerSelectionRecordedRun {
+		t.Fatalf("provider source=%q want %q", cfg.providerSelectionSource, providerSelectionRecordedRun)
 	}
 	if cfg.HostID != "" || cfg.AWSMacHostID != "" {
 		t.Fatalf("host pin carried into fork: hostID=%q awsMacHostID=%q", cfg.HostID, cfg.AWSMacHostID)

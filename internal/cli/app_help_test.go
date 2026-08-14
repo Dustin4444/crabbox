@@ -41,6 +41,26 @@ func TestCleanupHelpListsRegisteredXCPNgProvider(t *testing.T) {
 	}
 }
 
+func TestWarmupHelpDescribesConfiguredProviderWithoutCompiledDefault(t *testing.T) {
+	isolateDoctorProviderSelectionTest(t)
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).warmup(context.Background(), []string{"--help"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 0 {
+		t.Fatalf("crabbox warmup --help error=%v stderr=%q", err, stderr.String())
+	}
+	help := stderr.String()
+	if strings.Contains(help, `default "hetzner"`) {
+		t.Fatalf("warmup help exposed compiled provider default:\n%s", help)
+	}
+	if !strings.Contains(help, "defaults to configured selection") {
+		t.Fatalf("warmup help omitted configured-selection guidance:\n%s", help)
+	}
+	if !strings.Contains(help, `default "default"`) {
+		t.Fatalf("warmup help suppressed unrelated defaults:\n%s", help)
+	}
+}
+
 func TestRunHelpDescribesStandaloneScriptUpload(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{"run", "--help"})

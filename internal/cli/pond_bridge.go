@@ -191,7 +191,7 @@ func (a App) pondRelease(ctx context.Context, args []string) error {
 			fmt.Fprintf(a.Stderr, "warning: skip %s/%s: load config: %v\n", claim.Provider, claim.LeaseID, cerr)
 			continue
 		}
-		cfg.Provider = canonicalClaimProvider(claim.Provider)
+		setProviderSelection(&cfg, canonicalClaimProvider(claim.Provider), providerSelectionLeaseContext)
 		var routeErr error
 		if canonicalClaimProvider(claim.Provider) == "external" {
 			routeErr = routeExternalLeaseClaim(&cfg, claim.LeaseID)

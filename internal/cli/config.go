@@ -259,6 +259,8 @@ type Config struct {
 
 type providerSelectionSource string
 
+const providerSelectionRequiredDiagnostic = "no provider selected; use --provider <name>, set CRABBOX_PROVIDER, or configure a provider; run 'crabbox providers recommend' to compare options"
+
 const (
 	providerSelectionCompiledDefault providerSelectionSource = "compiled_default"
 	providerSelectionUserConfig      providerSelectionSource = "user_config"
@@ -272,6 +274,32 @@ const (
 func setProviderSelection(cfg *Config, provider string, source providerSelectionSource) {
 	cfg.Provider = provider
 	cfg.providerSelectionSource = source
+}
+
+func providerSelectionIsActionable(cfg Config) bool {
+	if strings.TrimSpace(cfg.Provider) == "" {
+		return false
+	}
+	switch cfg.providerSelectionSource {
+	case providerSelectionUserConfig,
+		providerSelectionRepoConfig,
+		providerSelectionEnvironment,
+		providerSelectionFlag,
+		providerSelectionRecordedRun,
+		providerSelectionLeaseContext:
+		return true
+	default:
+		return false
+	}
+}
+
+func providerSelectionIsAuthoritativeRoute(cfg Config) bool {
+	switch cfg.providerSelectionSource {
+	case providerSelectionRecordedRun, providerSelectionLeaseContext:
+		return true
+	default:
+		return false
+	}
 }
 
 func providerSelectionSourceForConfigPath(trust configPathTrust) providerSelectionSource {

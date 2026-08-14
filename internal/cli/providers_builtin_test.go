@@ -202,8 +202,14 @@ func (testAzureProvider) RouteConfig(cfg *Config, fs *flag.FlagSet, values any) 
 	return nil
 }
 func (p testAzureProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if err := p.RouteConfig(cfg, fs, values); err != nil {
-		return err
+	backendExplicit := fs != nil && flagWasSet(fs, "azure-backend")
+	if !providerSelectionIsAuthoritativeRoute(*cfg) || backendExplicit {
+		if err := p.RouteConfig(cfg, fs, values); err != nil {
+			return err
+		}
+	}
+	if cfg.Provider != p.Name() {
+		return nil
 	}
 	flags, _ := values.(testAzureFlagValues)
 	if fs != nil && flagWasSet(fs, "azure-snapshot-sku") && flags.SnapshotSKU != nil {
@@ -398,13 +404,24 @@ func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	return testHetznerBackend{testSSHBackend{spec: p.Spec()}}, nil
 }
 func (p testHetznerProvider) ConfigureDoctor(Config, Runtime) (DoctorBackend, error) {
 	if _, err := newHetznerClient(); err != nil {
 		return nil, err
 	}
 	return testDoctorDelegatedBackend{testDelegatedBackend{spec: p.Spec()}}, nil
+}
+
+type testHetznerBackend struct {
+	testSSHBackend
+}
+
+func (b testHetznerBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+	if _, err := newHetznerClient(); err != nil {
+		return LeaseTarget{}, err
+	}
+	return b.testSSHBackend.Acquire(ctx, req)
 }
 
 type testDigitalOceanProvider struct{}

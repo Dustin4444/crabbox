@@ -622,6 +622,7 @@ func TestLoadBackendRejectsRepositoryCredentialDestination(t *testing.T) {
 			e2bAPIKey: credentialSourceEnvironment,
 		},
 	}
+	setProviderSelection(&cfg, "e2b", providerSelectionFlag)
 	if _, err := loadBackend(cfg, Runtime{}); err == nil || !strings.Contains(err.Error(), "e2b.apiUrl") {
 		t.Fatalf("loadBackend error=%v", err)
 	}

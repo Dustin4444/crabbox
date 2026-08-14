@@ -3561,6 +3561,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 			}
 		}
 	}
+	if err := autoRouteClaimLeaseProvider(&cfg, fs, *id); err != nil {
+		return err
+	}
 	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
 		return err
 	}

@@ -69,8 +69,11 @@ func (Provider) RouteConfig(cfg *core.Config, fs *flag.FlagSet, values any) erro
 }
 
 func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	if err := p.RouteConfig(cfg, fs, values); err != nil {
-		return err
+	backendExplicit := fs != nil && core.FlagWasSet(fs, "azure-backend")
+	if !core.ProviderSelectionIsAuthoritativeRoute(*cfg) || backendExplicit {
+		if err := p.RouteConfig(cfg, fs, values); err != nil {
+			return err
+		}
 	}
 	if cfg.Provider != p.Name() {
 		return nil

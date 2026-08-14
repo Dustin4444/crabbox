@@ -35,6 +35,12 @@ func (a App) pauseResume(ctx context.Context, args []string, action string) erro
 	if err := prepareProviderSelection(&cfg, *provider); err != nil {
 		return err
 	}
+	if err := autoRouteClaimLeaseProvider(&cfg, fs, *id); err != nil {
+		return err
+	}
+	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
+		return err
+	}
 	if err := autoRouteExternalLease(&cfg, fs, *id); err != nil {
 		return err
 	}

@@ -26,12 +26,38 @@ func testRuntimeWithRunner(r CommandRunner) Runtime {
 	return Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: realClock{}, Exec: r}
 }
 
+func TestLoadBackendRequiresActionableProviderSelection(t *testing.T) {
+	t.Setenv(controllerProviderScopeEnv, "")
+	t.Setenv("HCLOUD_TOKEN", "")
+	t.Setenv("HETZNER_TOKEN", "")
+	cfg := baseConfig()
+
+	_, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || exitErr.Message != providerSelectionRequiredDiagnostic {
+		t.Fatalf("compiled-default error=%v, want exit 2 %q", err, providerSelectionRequiredDiagnostic)
+	}
+	if strings.Contains(err.Error(), "HCLOUD_TOKEN") || strings.Contains(err.Error(), "HETZNER_TOKEN") {
+		t.Fatalf("compiled default reached provider credential validation: %v", err)
+	}
+
+	setProviderSelection(&cfg, claimRoutingUnusableProvider, providerSelectionFlag)
+	if _, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{})); err == nil || !strings.Contains(err.Error(), "configured provider credentials are unavailable") {
+		t.Fatalf("actionable selection did not reach provider configuration: %v", err)
+	}
+
+	setProviderSelection(&cfg, "ssh", providerSelectionEnvironment)
+	if _, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{})); err != nil {
+		t.Fatalf("actionable non-Hetzner selection rejected: %v", err)
+	}
+}
+
 func TestLoadBackendScrubsTrustedExternalDesktopPasswordFromNonExternalCommands(t *testing.T) {
 	t.Setenv(controllerProviderScopeEnv, "")
 	t.Setenv("TRUSTED_DESKTOP_PASSWORD", "ambient-secret")
 	t.Setenv("CRABBOX_TEST_CHILD_KEEP", "ambient-value")
 	cfg := baseConfig()
-	cfg.Provider = "aws"
+	setProviderSelection(&cfg, "aws", providerSelectionFlag)
 	cfg.Coordinator = "https://coordinator.example"
 	cfg.External.Connection.Desktop.PasswordEnv = "TRUSTED_DESKTOP_PASSWORD"
 	MarkExternalDesktopPasswordEnvExplicit(&cfg)
@@ -310,10 +336,74 @@ func TestProviderFlagsOverrideDynamicSessionsConfigWithoutLeaseCreate(t *testing
 	}
 }
 
+func TestRouteConfiguredProviderPreservesAuthoritativeProviderFamilyRoute(t *testing.T) {
+	for _, source := range []providerSelectionSource{providerSelectionLeaseContext, providerSelectionRecordedRun} {
+		t.Run(string(source), func(t *testing.T) {
+			defaults := baseConfig()
+			defaults.Provider = "azure"
+			defaults.AzureBackend = AzureBackendDynamicSessions
+			fs := newFlagSet("authoritative Azure flags", io.Discard)
+			values := registerProviderFlags(fs, defaults)
+			if err := parseFlags(fs, []string{"--azure-snapshot-sku", "premium_lrs"}); err != nil {
+				t.Fatal(err)
+			}
+			cfg := defaults
+			setProviderSelection(&cfg, "azure", source)
+			if !ProviderSelectionIsAuthoritativeRoute(cfg) {
+				t.Fatalf("source=%q not exposed as authoritative", source)
+			}
+			if err := routeConfiguredProvider(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Provider != "azure" || cfg.providerSelectionSource != source {
+				t.Fatalf("provider=%q source=%q, want authoritative azure/%s", cfg.Provider, cfg.providerSelectionSource, source)
+			}
+			if cfg.AzureSnapshotSKU != "Premium_LRS" {
+				t.Fatalf("snapshot SKU=%q, want non-routing flag applied", cfg.AzureSnapshotSKU)
+			}
+		})
+	}
+
+	for _, source := range []providerSelectionSource{providerSelectionUserConfig, providerSelectionFlag} {
+		t.Run("routed_"+string(source), func(t *testing.T) {
+			cfg := baseConfig()
+			setProviderSelection(&cfg, "azure", source)
+			cfg.AzureBackend = AzureBackendDynamicSessions
+			if err := routeConfiguredProvider(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Provider != "azure-dynamic-sessions" || cfg.providerSelectionSource != source {
+				t.Fatalf("provider=%q source=%q, want routed azure-dynamic-sessions/%s", cfg.Provider, cfg.providerSelectionSource, source)
+			}
+		})
+	}
+
+	t.Run("routing flag overrides authoritative route", func(t *testing.T) {
+		defaults := baseConfig()
+		defaults.Provider = "azure"
+		fs := newFlagSet("authoritative route override", io.Discard)
+		values := registerProviderFlags(fs, defaults)
+		if err := parseFlags(fs, []string{"--azure-backend", "dynamic-sessions"}); err != nil {
+			t.Fatal(err)
+		}
+		cfg := defaults
+		setProviderSelection(&cfg, "azure", providerSelectionLeaseContext)
+		if err := applyProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "azure-dynamic-sessions" || cfg.providerSelectionSource != providerSelectionFlag {
+			t.Fatalf("provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
+		}
+	})
+}
+
 func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	t.Setenv(controllerProviderScopeEnv, "")
 	cfg := baseConfig()
-	cfg.Provider = "aws"
+	setProviderSelection(&cfg, "aws", providerSelectionFlag)
 	cfg.Coordinator = "https://coordinator.example"
 	backend, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
 	if err != nil {
@@ -431,7 +521,7 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 
 func TestLoadBackendRejectsChangedControllerProviderScope(t *testing.T) {
 	cfg := baseConfig()
-	cfg.Provider = "external"
+	setProviderSelection(&cfg, "external", providerSelectionFlag)
 	cfg.External.Command = "provider-a"
 	_, scope, _, err := controllerProviderIdentityForConfig(cfg)
 	if err != nil {
@@ -449,7 +539,7 @@ func TestLoadBackendRejectsChangedControllerProviderScope(t *testing.T) {
 
 func TestLoadBackendResetsInferredTargetAfterProviderSwitch(t *testing.T) {
 	cfg := baseConfig()
-	cfg.Provider = "cloudflare-dynamic-workers"
+	setProviderSelection(&cfg, "cloudflare-dynamic-workers", providerSelectionFlag)
 	applySingleProviderTargetDefault(&cfg)
 	if cfg.TargetOS != "worker-runtime" {
 		t.Fatalf("initial target=%q, want worker-runtime", cfg.TargetOS)
@@ -473,7 +563,7 @@ func TestLoadBackendResetsInferredTargetAfterProviderSwitch(t *testing.T) {
 func TestRegisteredBrokerKeepsProviderLifecycleDirect(t *testing.T) {
 	t.Setenv(controllerProviderScopeEnv, "")
 	cfg := baseConfig()
-	cfg.Provider = "aws"
+	setProviderSelection(&cfg, "aws", providerSelectionFlag)
 	cfg.Coordinator = "https://coordinator.example"
 	cfg.BrokerMode = BrokerModeRegistered
 	backend, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))

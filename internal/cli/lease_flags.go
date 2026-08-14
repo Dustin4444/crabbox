@@ -92,12 +92,16 @@ func autoRouteClaimLeaseProvider(cfg *Config, fs *flag.FlagSet, identifier strin
 	if flagWasSet(fs, "provider") {
 		return nil
 	}
+	return autoRouteClaimLeaseProviderForIdentifier(cfg, identifier)
+}
+
+func autoRouteClaimLeaseProviderForIdentifier(cfg *Config, identifier string) error {
 	provider, ok, err := claimProviderForIdentifier(identifier)
 	if err != nil {
 		return err
 	}
 	if ok {
-		cfg.Provider = provider
+		setProviderSelection(cfg, provider, providerSelectionLeaseContext)
 	}
 	return nil
 }
@@ -418,7 +422,11 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.Provider = provider
+	if flagWasSet(fs, "provider") {
+		setProviderSelection(&cfg, provider, providerSelectionFlag)
+	} else {
+		cfg.Provider = provider
+	}
 	prepareProviderDefaults(&cfg)
 	if opts.Desktop {
 		cfg.Desktop = true

@@ -433,7 +433,7 @@ func parallelsSnapshotCheckpointView(source string, snapshot ParallelsSnapshot) 
 }
 
 func applyParallelsCheckpointHostConfig(cfg *Config, record checkpointRecord) {
-	cfg.Provider = "parallels"
+	setProviderSelection(cfg, "parallels", providerSelectionRecordedRun)
 	applyParallelsHostRefConfig(cfg, record.Native.Region)
 }
 
@@ -937,11 +937,8 @@ func validateCheckpointForkWorkdirs(ctx context.Context, backend Backend, lease 
 }
 
 func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagSet, leaseFlags leaseCreateFlagValues, source, snapshot string, keep, reclaim bool, requestedSlug string, count int, dryRun bool, runArgs []string) (err error) {
-	cfg, err := loadConfig()
+	cfg, err := loadCheckpointForkParallelsConfig(fs, leaseFlags)
 	if err != nil {
-		return err
-	}
-	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
 	}
 	if cfg.Provider != "parallels" {
@@ -1010,6 +1007,18 @@ func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagS
 		}
 	}
 	return nil
+}
+
+func loadCheckpointForkParallelsConfig(fs *flag.FlagSet, leaseFlags leaseCreateFlagValues) (Config, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return Config{}, err
+	}
+	setProviderSelection(&cfg, "parallels", providerSelectionFlag)
+	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
 }
 
 func (a App) checkpointForkParallelsSnapshotOnce(ctx context.Context, cfg Config, sshBackend SSHLeaseBackend, repo Repo, source, snapshot string, keep, reclaim bool, requestedSlug string, runOpts checkpointForkRunOptions) (err error) {

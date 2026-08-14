@@ -61,6 +61,15 @@ type claimRoutingStatusBackend struct {
 }
 
 func (b claimRoutingStatusBackend) Spec() ProviderSpec { return b.spec }
+func (b claimRoutingStatusBackend) Warmup(context.Context, WarmupRequest) error {
+	return nil
+}
+func (b claimRoutingStatusBackend) Run(context.Context, RunRequest) (RunResult, error) {
+	return RunResult{}, nil
+}
+func (b claimRoutingStatusBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
 func (b claimRoutingStatusBackend) Status(_ context.Context, req StatusRequest) (StatusView, error) {
 	return StatusView{
 		ID:       req.ID,
@@ -69,6 +78,9 @@ func (b claimRoutingStatusBackend) Status(_ context.Context, req StatusRequest) 
 		State:    "ready",
 		Ready:    true,
 	}, nil
+}
+func (b claimRoutingStatusBackend) Stop(context.Context, StopRequest) error {
+	return errors.New("stop provider=" + b.spec.Name)
 }
 
 func TestStatusAndInspectRouteImplicitIdentifiersThroughLocalClaims(t *testing.T) {
@@ -157,6 +169,30 @@ func TestStatusAndInspectRouteImplicitIdentifiersThroughLocalClaims(t *testing.T
 	}
 }
 
+func TestStopRoutesImplicitIdentifiersThroughLocalClaims(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		leaseID    string
+		slug       string
+		identifier string
+	}{
+		{name: "exact lease id", leaseID: "cbx_1293aa000011", slug: "stop-exact", identifier: "cbx_1293aa000011"},
+		{name: "unambiguous slug", leaseID: "cbx_1293aa000012", slug: "Stop Slug", identifier: "stop-slug"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			setupClaimRoutingCommandTest(t, claimRoutingUnusableProvider)
+			mustWriteClaimRoutingTestClaim(t, tt.leaseID, tt.slug, claimRoutingUsableProvider)
+
+			_, err := runClaimRoutingCommand(func(app App, ctx context.Context, args []string) error {
+				return app.stop(ctx, args)
+			}, []string{"--id", tt.identifier})
+			if err == nil || !strings.Contains(err.Error(), "stop provider="+claimRoutingUsableProvider) {
+				t.Fatalf("stop error=%v, want claim-routed provider", err)
+			}
+		})
+	}
+}
+
 func TestLoadLeaseTargetConfigKeepsProviderResourceIdentifiersOnConfiguredProvider(t *testing.T) {
 	setupClaimRoutingCommandTest(t, claimRoutingConfiguredProvider)
 	mustWriteClaimRoutingTestClaim(t, "cbx_1293aa000009", "native-vm-name", claimRoutingUsableProvider)
@@ -182,7 +218,7 @@ func TestLoadLeaseTargetConfigKeepsProviderResourceIdentifiersOnConfiguredProvid
 	}
 }
 
-func TestLoadLeaseTargetConfigClaimRoutingPreservesProviderProvenance(t *testing.T) {
+func TestLoadLeaseTargetConfigClaimRoutingSetsLeaseContextProvenance(t *testing.T) {
 	setupClaimRoutingCommandTest(t, claimRoutingConfiguredProvider)
 	mustWriteClaimRoutingTestClaim(t, "cbx_1293aa000010", "provenance-claim", claimRoutingUsableProvider)
 	defaults := defaultConfig()
@@ -199,8 +235,8 @@ func TestLoadLeaseTargetConfigClaimRoutingPreservesProviderProvenance(t *testing
 	if cfg.Provider != claimRoutingUsableProvider {
 		t.Fatalf("provider=%q want claim provider %q", cfg.Provider, claimRoutingUsableProvider)
 	}
-	if cfg.providerSelectionSource != defaults.providerSelectionSource {
-		t.Fatalf("provider source=%q want unchanged provenance %q", cfg.providerSelectionSource, defaults.providerSelectionSource)
+	if cfg.providerSelectionSource != providerSelectionLeaseContext {
+		t.Fatalf("provider source=%q want %q", cfg.providerSelectionSource, providerSelectionLeaseContext)
 	}
 }
 

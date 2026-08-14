@@ -4153,6 +4153,9 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 		if cfg.Provider != "aws" {
 			t.Fatalf("provider=%q want aws", cfg.Provider)
 		}
+		if cfg.providerSelectionSource != providerSelectionLeaseContext {
+			t.Fatalf("provider source=%q want %q", cfg.providerSelectionSource, providerSelectionLeaseContext)
+		}
 	})
 
 	t.Run("exact id wins over slug collision", func(t *testing.T) {
@@ -4186,6 +4189,9 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 		}
 		if cfg.Provider != "local-container" {
 			t.Fatalf("provider=%q want local-container", cfg.Provider)
+		}
+		if cfg.providerSelectionSource != providerSelectionLeaseContext {
+			t.Fatalf("provider source=%q want %q", cfg.providerSelectionSource, providerSelectionLeaseContext)
 		}
 	})
 

@@ -48,6 +48,15 @@ crabbox doctor --provider <name>
 before spending real capacity. For the live proof expected from provider PRs,
 see [Provider live smoke](provider-live-smoke.md).
 
+Lifecycle commands require actionable provider intent: pass `--provider
+<name>`, set `CRABBOX_PROVIDER`, or configure a provider in user, repository,
+or broker config. The compiled provider value is retained only for compatible
+default derivation and is never enough to initialize a backend. Existing lease
+commands may instead route from an exact local claim, an unambiguous claimed
+slug, or recorded run context. With no actionable selection, commands stop with
+shared guidance before provider credential validation. Run `crabbox providers
+recommend` when choosing a provider.
+
 ## Selection rules
 
 Use these rules before adding a new adapter:

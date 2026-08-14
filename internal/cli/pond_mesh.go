@@ -588,7 +588,7 @@ func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Conf
 			continue
 		}
 		providerCfg := cfg
-		providerCfg.Provider = p
+		setProviderSelection(&providerCfg, p, providerSelectionLeaseContext)
 		backend, berr := loadBackend(providerCfg, rt)
 		if berr != nil {
 			return nil, nil, fmt.Errorf("load backend for provider %s: %w", p, berr)
