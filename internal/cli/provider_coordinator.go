@@ -87,10 +87,6 @@ func (b *coordinatorLeaseBackend) validateCoordinatorLeaseProviderIdentity(lease
 	return b.validateCoordinatorProviderIdentity(lease.ID, lease.Provider)
 }
 
-func (b *coordinatorLeaseBackend) validateCoordinatorLeaseTargetProviderIdentity(lease LeaseTarget) error {
-	return b.validateCoordinatorProviderIdentity(lease.LeaseID, lease.Server.Provider)
-}
-
 func (b *coordinatorLeaseBackend) validateCoordinatorProviderIdentity(leaseID, returnedProvider string) error {
 	selectedProvider := strings.TrimSpace(b.spec.Name)
 	if selectedProvider == "" {
