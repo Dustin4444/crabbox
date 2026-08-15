@@ -2,6 +2,10 @@
 
 ## 0.42.1 - Unreleased
 
+### Added
+
+- Added opt-in `python` and `python3` preflight probes that check the literal executable on POSIX, WSL2, and native Windows targets.
+
 ### Fixed
 
 - Selected native WSL rsync and OpenSSH correctly on Windows instead of falling back to incompatible Windows shims.

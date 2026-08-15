@@ -513,6 +513,8 @@ var preflightToolRegistry = map[string]preflightToolSpec{
 	"npm":              {Posix: []string{"npm", "--version"}, Windows: []string{"npm", "--version"}},
 	"pnpm":             {Posix: []string{"pnpm", "--version"}, Windows: []string{"pnpm", "--version"}},
 	"powershell":       {Windows: []string{"$PSVersionTable.PSVersion.ToString()"}, OS: map[string]bool{"windows": true}},
+	"python":           {Posix: []string{"python", "--version"}, Windows: []string{"python", "--version"}},
+	"python3":          {Posix: []string{"python3", "--version"}, Windows: []string{"python3", "--version"}},
 	"pwsh":             {Windows: []string{"pwsh", "--version"}, OS: map[string]bool{"windows": true}},
 	"sudo":             {OS: map[string]bool{"linux": true, "macos": true}},
 	"tar":              {Posix: []string{"tar", "--version"}, Windows: []string{"tar", "--version"}},
