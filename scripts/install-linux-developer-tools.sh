@@ -8,6 +8,9 @@ telegram_desktop_version="7.0.9"
 telegram_desktop_sha256="d3c05df0259ab116d11d8c1cdc1403019d2a3be303ad3b46d16a84e19df6615f"
 docker_images="${CRABBOX_LINUX_DOCKER_IMAGES:-hello-world ubuntu:24.04 node:24-bookworm}"
 install_desktop="${CRABBOX_LINUX_DESKTOP_TOOLS:-1}"
+# Variant capability, off by default: the generic desktop image stays free of the
+# Telegram client; variant bakes opt in and promote catalog-only with --sdk telegram-desktop=<version>.
+install_telegram_desktop="${CRABBOX_LINUX_TELEGRAM_DESKTOP:-0}"
 install_browser="${CRABBOX_LINUX_BROWSER:-1}"
 apt_keyrings_dir="${CRABBOX_LINUX_APT_KEYRINGS_DIR:-/etc/apt/keyrings}"
 apt_sources_dir="${CRABBOX_LINUX_APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
@@ -22,7 +25,7 @@ trufflehog_bin_dir="${CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR:-/usr/local/bin}"
 telegram_install_dir="${CRABBOX_LINUX_TELEGRAM_INSTALL_DIR:-/opt/Telegram}"
 telegram_state_dir="${CRABBOX_LINUX_TELEGRAM_STATE_DIR:-/var/lib/crabbox}"
 telegram_version_file="$telegram_state_dir/telegram-desktop-version"
-sudo_preserve_env="CRABBOX_LINUX_PNPM_VERSION,CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_DOCKER_IMAGES,CRABBOX_LINUX_DESKTOP_TOOLS,CRABBOX_LINUX_BROWSER,CRABBOX_LINUX_APT_KEYRINGS_DIR,CRABBOX_LINUX_APT_SOURCES_DIR,CRABBOX_LINUX_APT_CONF_DIR,CRABBOX_LINUX_OS_RELEASE_FILE,CRABBOX_LINUX_CHROME_POLICY_DIR,CRABBOX_LINUX_CHROMIUM_POLICY_DIR,CRABBOX_LINUX_BROWSER_BIN_DIR,CRABBOX_LINUX_BROWSER_STATE_DIR,CRABBOX_LINUX_CHROME_DEFAULTS_FILE,CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR,CRABBOX_LINUX_TELEGRAM_INSTALL_DIR,CRABBOX_LINUX_TELEGRAM_STATE_DIR,HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy,ALL_PROXY,all_proxy"
+sudo_preserve_env="CRABBOX_LINUX_PNPM_VERSION,CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_DOCKER_IMAGES,CRABBOX_LINUX_DESKTOP_TOOLS,CRABBOX_LINUX_BROWSER,CRABBOX_LINUX_APT_KEYRINGS_DIR,CRABBOX_LINUX_APT_SOURCES_DIR,CRABBOX_LINUX_APT_CONF_DIR,CRABBOX_LINUX_OS_RELEASE_FILE,CRABBOX_LINUX_CHROME_POLICY_DIR,CRABBOX_LINUX_CHROMIUM_POLICY_DIR,CRABBOX_LINUX_BROWSER_BIN_DIR,CRABBOX_LINUX_BROWSER_STATE_DIR,CRABBOX_LINUX_CHROME_DEFAULTS_FILE,CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR,CRABBOX_LINUX_TELEGRAM_DESKTOP,CRABBOX_LINUX_TELEGRAM_INSTALL_DIR,CRABBOX_LINUX_TELEGRAM_STATE_DIR,HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy,ALL_PROXY,all_proxy"
 nodesource_signing_key_fingerprint="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
 docker_signing_key_fingerprint="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 google_linux_signing_key_fingerprint="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
@@ -459,10 +462,11 @@ APT
   fi
 
   if [[ "$install_desktop" == "1" ]]; then
+    apt_install xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation
+  fi
+  if [[ "$install_desktop" == "1" && "$install_telegram_desktop" == "1" ]]; then
     apt_install \
-      xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings \
-      x11vnc xauth dbus-x11 x11-xserver-utils x11-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel \
-      fonts-dejavu-core fonts-liberation zbar-tools \
+      x11-utils zbar-tools \
       libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
       libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxkbcommon-x11-0
     install_telegram_desktop

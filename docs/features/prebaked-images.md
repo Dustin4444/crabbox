@@ -58,8 +58,11 @@ Bake stable machine capabilities:
 - current OS security updates and base packages;
 - core access tooling: SSH, Git, rsync, curl, jq, and the readiness helpers;
 - desktop and browser capabilities for `--desktop --browser` leases
-  (resize-capable TigerVNC, slim XFCE, Chrome or Chromium, checksum-pinned
-  Telegram Desktop on amd64, and QR/screen tools);
+  (resize-capable TigerVNC, slim XFCE, Chrome or Chromium);
+- application capabilities only some lanes need — for example checksum-pinned
+  Telegram Desktop (`CRABBOX_LINUX_TELEGRAM_DESKTOP=1`, amd64) — go into a
+  variant image promoted catalog-only with a declared `--sdk`, never into the
+  generic default;
 - capture tools such as `ffmpeg`, `ffprobe`, `scrot`, and `xdotool`;
 - language and build toolchains the image targets: Node 24 with corepack/pnpm,
   `build-essential`, Python, and common native-addon headers;

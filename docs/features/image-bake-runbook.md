@@ -352,10 +352,12 @@ scripts/mint-aws-devtools-image.sh \
 
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, Chrome or
-  Chromium for browser lanes, desktop/VNC helpers, and checksum-pinned Telegram
-  Desktop 7.0.9 with QR/screen tools (amd64 only; other architectures skip it
-  and omit the version marker). It also installs Docker Engine,
-  Compose, buildx, and a small default Docker image set. TruffleHog archives are pinned
+  Chromium for browser lanes, desktop/VNC helpers, Docker Engine, Compose,
+  buildx, and a small default Docker image set. With
+  `CRABBOX_LINUX_TELEGRAM_DESKTOP=1` it additionally bakes checksum-pinned
+  Telegram Desktop 7.0.9 plus QR/screen tools for a variant image (amd64 only;
+  other architectures skip it and omit `/var/lib/crabbox/telegram-desktop-version`);
+  the default bake never includes it. TruffleHog archives are pinned
   to reviewed SHA-256 digests for amd64 and arm64. NodeSource, Docker, and
   Chrome APT repositories use scoped keyrings whose primary fingerprints are
   checked before installation; primary-key rotations require a reviewed code

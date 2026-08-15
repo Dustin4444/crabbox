@@ -875,11 +875,18 @@ test("linux desktop image installs pinned Telegram Desktop once without its upda
 	assert.equal(fs.statSync(path.join(fixture.stateDir, "telegram-desktop-version")).mode & 0o777, 0o644);
 });
 
-test("linux desktop package block includes Telegram runtime and screen tools", () => {
+test("linux desktop package block keeps the generic image free of Telegram; the variant gate adds it", () => {
 	const script = fs.readFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), "utf8");
+	assert.match(script, /^install_telegram_desktop="\$\{CRABBOX_LINUX_TELEGRAM_DESKTOP:-0\}"$/m);
+	assert.match(script, /sudo_preserve_env=".*CRABBOX_LINUX_TELEGRAM_DESKTOP.*"/);
 	const main = script.slice(script.indexOf("main() {"));
 	const desktopBlock = main.match(/if \[\[ "\$install_desktop" == "1" \]\]; then([\s\S]*?)\n  fi/);
 	assert.ok(desktopBlock, "missing desktop package block");
+	assert.doesNotMatch(desktopBlock[1], /install_telegram_desktop|zbar-tools|libxcb-cursor0/);
+	const telegramBlock = main.match(
+		/if \[\[ "\$install_desktop" == "1" && "\$install_telegram_desktop" == "1" \]\]; then([\s\S]*?)\n  fi/,
+	);
+	assert.ok(telegramBlock, "missing Telegram variant block");
 	for (const packageName of [
 		"libopengl0",
 		"libxcb-cursor0",
@@ -895,9 +902,9 @@ test("linux desktop package block includes Telegram runtime and screen tools", (
 		"zbar-tools",
 		"x11-utils",
 	]) {
-		assert.match(desktopBlock[1], new RegExp(`\\b${packageName}\\b`));
+		assert.match(telegramBlock[1], new RegExp(`\\b${packageName}\\b`));
 	}
-	assert.match(desktopBlock[1], /install_telegram_desktop/);
+	assert.match(telegramBlock[1], /install_telegram_desktop/);
 });
 
 test("linux desktop image skips Telegram Desktop on non-amd64 without downloading", () => {
