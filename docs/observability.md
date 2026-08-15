@@ -298,12 +298,13 @@ a prebaked image, a devcontainer/Nix/mise/asdf setup, or the uploaded
 script/command itself.
 
 The built-in probes cover common toolchains — `git`, `tar`, `node`, `npm`,
-`corepack`, `pnpm`, `yarn`, `bun`, `docker`, `uv` — plus target-specific probes
-such as `sudo`, `apt`, `bubblewrap`, `powershell`, `execution_policy`,
-`longpaths`, `temp`, and `pwsh`. Override the probe list per run:
+`corepack`, `pnpm`, `yarn`, `bun`, `docker`, and opt-in `uv`, `python`, and
+`python3` — plus target-specific probes such as `sudo`, `apt`, `bubblewrap`,
+`powershell`, `execution_policy`, `longpaths`, `temp`, and `pwsh`. Override the
+probe list per run:
 
 ```sh
-crabbox run --preflight --preflight-tools node,bun,docker -- bun test
+crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
 ```
 
 Or per repository:
@@ -311,9 +312,8 @@ Or per repository:
 ```yaml
 run:
   preflightTools:
-    - node
-    - bun
-    - docker
+    - python
+    - python3
 ```
 
 ## Actions hydration

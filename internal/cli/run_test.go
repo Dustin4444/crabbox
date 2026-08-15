@@ -3589,6 +3589,67 @@ func TestValidatePreflightToolsRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestPythonPreflightToolValidationAndTargetFiltering(t *testing.T) {
+	if err := validatePreflightTools([]string{"python", "python3"}); err != nil {
+		t.Fatalf("python tools should validate: %v", err)
+	}
+	err := validatePreflightTools([]string{"python", "bogus", "python3"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, `unknown preflight tool "bogus"`) {
+		t.Fatalf("error=%v, want exit 2 for bogus tool", err)
+	}
+
+	targets := []struct {
+		name   string
+		target SSHTarget
+	}{
+		{name: "linux", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "macos", target: SSHTarget{TargetOS: targetMacOS}},
+		{name: "wsl2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}},
+		{name: "windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
+	}
+	for _, tt := range targets {
+		t.Run(tt.name, func(t *testing.T) {
+			got := preflightToolsForTarget(tt.target, []string{"python", "python3"})
+			if strings.Join(got, ",") != "python,python3" {
+				t.Fatalf("tools=%v", got)
+			}
+		})
+	}
+
+	for _, tool := range preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, nil) {
+		if tool == "python" || tool == "python3" {
+			t.Fatalf("%s must remain opt-in, default tools=%v", tool, defaultPreflightToolNames)
+		}
+	}
+}
+
+func TestPythonPreflightPOSIXProbeUsesLiteralExecutableAndMissingContract(t *testing.T) {
+	script := remoteCapabilityPreflightCommand("/work/repo", nil, nil, []string{"python", "python3"})
+	for _, want := range []string{
+		`preflight_cmd '\''python'\'' '\''python'\'' python --version`,
+		`preflight_cmd '\''python3'\'' '\''python3'\'' python3 --version`,
+		`printf '\''%s=missing\n'\'' "$label"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("POSIX preflight script missing %q in %q", want, script)
+		}
+	}
+}
+
+func TestPythonPreflightWindowsProbeUsesLiteralExecutableAndMissingContract(t *testing.T) {
+	script := windowsRemoteCapabilityPreflightScript(`C:\crabbox\repo`, nil, nil, []string{"python", "python3"})
+	for _, want := range []string{
+		`Test-Tool 'python' 'python' @('--version')`,
+		`Test-Tool 'python3' 'python3' @('--version')`,
+		`Write-Output ($Label + "=missing")`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("Windows preflight script missing %q in %q", want, script)
+		}
+	}
+}
+
 func TestDelegatedPreflightPrintsUnsupportedMessage(t *testing.T) {
 	var stderr bytes.Buffer
 	printDelegatedPreflightUnsupported(&stderr, "e2b")

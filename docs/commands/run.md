@@ -368,31 +368,35 @@ or the command/script you run.
 
 By default it probes common language and infrastructure tools plus OS-specific
 basics. Default generic probes are `git`, `tar`, `node`, `npm`, `corepack`,
-`pnpm`, `yarn`, `bun`, and `docker`; `uv` is available as an additional built-in.
-POSIX/Linux/WSL probes also include `sudo`, `apt`, and `bubblewrap`; native
-Windows probes include `powershell`, `execution_policy`, `longpaths`, `temp`,
-and `pwsh`.
+`pnpm`, `yarn`, `bun`, and `docker`; `uv`, `python`, and `python3` are available
+as additional opt-in built-ins. POSIX/Linux/WSL probes also include `sudo`,
+`apt`, and `bubblewrap`; native Windows probes include `powershell`,
+`execution_policy`, `longpaths`, `temp`, and `pwsh`.
 
 Use `--preflight-tools` to replace the default tool list for one run:
 
 ```sh
 crabbox run --preflight --preflight-tools node,bun,docker -- bun test
 crabbox run --preflight --preflight-tools default,uv -- node --test
+crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
 crabbox run --preflight --preflight-tools none -- ./smoke.sh
 ```
 
-`default` expands to the built-ins; `none` keeps only the workspace summary.
-Unknown tool names fail before leasing so typos do not hide missing
+`default` expands to the default probe list; `none` keeps only the workspace
+summary. Unknown tool names fail before leasing so typos do not hide missing
 diagnostics. Unsupported OS-specific probes are skipped for the current target.
+The Python probes always invoke the literal requested command with `--version`,
+including `python` and `python3` on native Windows; Crabbox does not map either
+name to `py`. An unavailable literal command prints `<name>=missing` and the run
+continues.
 
 Configure the default per repo:
 
 ```yaml
 run:
   preflightTools:
-    - node
-    - bun
-    - docker
+    - python
+    - python3
 ```
 
 ## Profiles, presets, and proof
