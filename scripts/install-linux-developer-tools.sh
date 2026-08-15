@@ -4,6 +4,8 @@ set -euo pipefail
 pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
 node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
 trufflehog_version="3.95.9"
+telegram_desktop_version="7.0.9"
+telegram_desktop_sha256="d3c05df0259ab116d11d8c1cdc1403019d2a3be303ad3b46d16a84e19df6615f"
 docker_images="${CRABBOX_LINUX_DOCKER_IMAGES:-hello-world ubuntu:24.04 node:24-bookworm}"
 install_desktop="${CRABBOX_LINUX_DESKTOP_TOOLS:-1}"
 install_browser="${CRABBOX_LINUX_BROWSER:-1}"
@@ -17,7 +19,10 @@ browser_bin_dir="${CRABBOX_LINUX_BROWSER_BIN_DIR:-/usr/local/bin}"
 browser_state_dir="${CRABBOX_LINUX_BROWSER_STATE_DIR:-/var/lib/crabbox}"
 chrome_defaults_file="${CRABBOX_LINUX_CHROME_DEFAULTS_FILE:-/etc/default/google-chrome}"
 trufflehog_bin_dir="${CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR:-/usr/local/bin}"
-sudo_preserve_env="CRABBOX_LINUX_PNPM_VERSION,CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_DOCKER_IMAGES,CRABBOX_LINUX_DESKTOP_TOOLS,CRABBOX_LINUX_BROWSER,CRABBOX_LINUX_APT_KEYRINGS_DIR,CRABBOX_LINUX_APT_SOURCES_DIR,CRABBOX_LINUX_APT_CONF_DIR,CRABBOX_LINUX_OS_RELEASE_FILE,CRABBOX_LINUX_CHROME_POLICY_DIR,CRABBOX_LINUX_CHROMIUM_POLICY_DIR,CRABBOX_LINUX_BROWSER_BIN_DIR,CRABBOX_LINUX_BROWSER_STATE_DIR,CRABBOX_LINUX_CHROME_DEFAULTS_FILE,CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR,HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy,ALL_PROXY,all_proxy"
+telegram_install_dir="${CRABBOX_LINUX_TELEGRAM_INSTALL_DIR:-/opt/Telegram}"
+telegram_state_dir="${CRABBOX_LINUX_TELEGRAM_STATE_DIR:-/var/lib/crabbox}"
+telegram_version_file="$telegram_state_dir/telegram-desktop-version"
+sudo_preserve_env="CRABBOX_LINUX_PNPM_VERSION,CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_DOCKER_IMAGES,CRABBOX_LINUX_DESKTOP_TOOLS,CRABBOX_LINUX_BROWSER,CRABBOX_LINUX_APT_KEYRINGS_DIR,CRABBOX_LINUX_APT_SOURCES_DIR,CRABBOX_LINUX_APT_CONF_DIR,CRABBOX_LINUX_OS_RELEASE_FILE,CRABBOX_LINUX_CHROME_POLICY_DIR,CRABBOX_LINUX_CHROMIUM_POLICY_DIR,CRABBOX_LINUX_BROWSER_BIN_DIR,CRABBOX_LINUX_BROWSER_STATE_DIR,CRABBOX_LINUX_CHROME_DEFAULTS_FILE,CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR,CRABBOX_LINUX_TELEGRAM_INSTALL_DIR,CRABBOX_LINUX_TELEGRAM_STATE_DIR,HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy,ALL_PROXY,all_proxy"
 nodesource_signing_key_fingerprint="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
 docker_signing_key_fingerprint="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 google_linux_signing_key_fingerprint="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
@@ -307,6 +312,55 @@ install_trufflehog() {
   mv -f "$candidate" "$target"
 }
 
+telegram_desktop_ready() {
+  [[ -x "$telegram_install_dir/Telegram" ]] &&
+    [[ -f "$telegram_version_file" ]] &&
+    [[ "$(<"$telegram_version_file")" == "$telegram_desktop_version" ]]
+}
+
+install_telegram_desktop() {
+  local arch
+  local archive="tsetup.${telegram_desktop_version}.tar.xz"
+  local tmp_dir
+  local url="https://github.com/telegramdesktop/tdesktop/releases/download/v${telegram_desktop_version}/${archive}"
+  local version_tmp
+
+  arch="$(dpkg --print-architecture)"
+  # Upstream ships amd64 only. Non-amd64 desktop images stay valid without Telegram;
+  # consumers detect absence through the missing version marker.
+  if [[ "$arch" != "amd64" ]]; then
+    log "skipping Telegram Desktop: upstream tarball is amd64-only; found $arch"
+    return 0
+  fi
+
+  if telegram_desktop_ready; then
+    rm -f "$telegram_install_dir/Updater"
+    return 0
+  fi
+
+  tmp_dir="$(mktemp -d)"
+  if ! retry curl -fsSL --output "$tmp_dir/$archive" "$url" ||
+    ! (
+      cd "$tmp_dir"
+      printf '%s  %s\n' "$telegram_desktop_sha256" "$archive" | sha256sum -c -
+    ) ||
+    ! tar --no-same-owner -xJf "$tmp_dir/$archive" -C "$tmp_dir" Telegram; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  rm -f "$tmp_dir/Telegram/Updater"
+  chmod 0755 "$tmp_dir/Telegram" "$tmp_dir/Telegram/Telegram"
+  install -d -m 0755 "$(dirname "$telegram_install_dir")" "$telegram_state_dir"
+  rm -rf "$telegram_install_dir"
+  mv "$tmp_dir/Telegram" "$telegram_install_dir"
+  version_tmp="$(mktemp "$telegram_state_dir/.telegram-desktop-version.tmp.XXXXXX")"
+  printf '%s\n' "$telegram_desktop_version" >"$version_tmp"
+  chmod 0644 "$version_tmp"
+  mv -f "$version_tmp" "$telegram_version_file"
+  rm -rf "$tmp_dir"
+}
+
 install_docker() {
   apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   systemctl enable --now docker || service docker start
@@ -335,7 +389,7 @@ prepare_fast_boot() {
 }
 
 print_versions() {
-  # shellcheck disable=SC1091
+  # shellcheck disable=SC1090
   . "$os_release_file"
   printf 'os=%s %s\n' "${PRETTY_NAME:-unknown}" "$(uname -m)"
   git --version
@@ -351,6 +405,9 @@ print_versions() {
   "$trufflehog_bin_dir/trufflehog" --no-update --version
   docker --version
   docker compose version
+  if [[ -f "$telegram_version_file" ]]; then
+    printf 'telegram-desktop=%s\n' "$(<"$telegram_version_file")"
+  fi
 }
 
 main() {
@@ -402,7 +459,13 @@ APT
   fi
 
   if [[ "$install_desktop" == "1" ]]; then
-    apt_install xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation
+    apt_install \
+      xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings \
+      x11vnc xauth dbus-x11 x11-xserver-utils x11-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel \
+      fonts-dejavu-core fonts-liberation zbar-tools \
+      libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+      libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxkbcommon-x11-0
+    install_telegram_desktop
   fi
   if [[ "$install_browser" == "1" ]]; then
     install_chrome_or_chromium

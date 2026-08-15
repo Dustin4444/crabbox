@@ -58,7 +58,8 @@ Bake stable machine capabilities:
 - current OS security updates and base packages;
 - core access tooling: SSH, Git, rsync, curl, jq, and the readiness helpers;
 - desktop and browser capabilities for `--desktop --browser` leases
-  (resize-capable TigerVNC, slim XFCE, Chrome or Chromium);
+  (resize-capable TigerVNC, slim XFCE, Chrome or Chromium, checksum-pinned
+  Telegram Desktop on amd64, and QR/screen tools);
 - capture tools such as `ffmpeg`, `ffprobe`, `scrot`, and `xdotool`;
 - language and build toolchains the image targets: Node 24 with corepack/pnpm,
   `build-essential`, Python, and common native-addon headers;

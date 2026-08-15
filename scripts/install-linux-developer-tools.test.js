@@ -9,6 +9,8 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const nodesourceSigningKeyFingerprint = "6F71F525282841EEDAF851B42F59B5F99B1BE0B4";
 const dockerSigningKeyFingerprint = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88";
 const googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
+const telegramDesktopVersion = "7.0.9";
+const telegramDesktopSha256 = "d3c05df0259ab116d11d8c1cdc1403019d2a3be303ad3b46d16a84e19df6615f";
 
 function writeExecutable(file, body) {
 	fs.writeFileSync(file, body, "utf8");
@@ -534,6 +536,12 @@ function installTruffleHogFixture(dir) {
 	const downloadLog = path.join(dir, "download.log");
 	const checksumLog = path.join(dir, "checksum.log");
 	fs.mkdirSync(bin);
+	writeExecutable(
+		path.join(bin, "dpkg"),
+		`#!/usr/bin/env bash
+[[ "$*" == "--print-architecture" ]] && printf 'amd64\n'
+`,
+	);
 	fs.mkdirSync(targetBin);
 	writeExecutable(
 		path.join(bin, "dpkg"),
@@ -717,7 +725,10 @@ test("linux developer image reports TruffleHog from the configured install direc
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-version-"));
 	const fixture = installTruffleHogFixture(dir);
 	const osRelease = path.join(dir, "os-release");
+	const telegramState = path.join(dir, "state");
+	fs.mkdirSync(telegramState);
 	fs.writeFileSync(osRelease, "PRETTY_NAME='Test Linux'\n", "utf8");
+	fs.writeFileSync(path.join(telegramState, "telegram-desktop-version"), `${telegramDesktopVersion}\n`, "utf8");
 	writeExecutable(
 		path.join(fixture.targetBin, "trufflehog"),
 		"#!/usr/bin/env bash\nprintf 'trufflehog 3.95.9\\n'\n",
@@ -737,6 +748,7 @@ test("linux developer image reports TruffleHog from the configured install direc
 				...process.env,
 				PATH: `${fixture.bin}${path.delimiter}/usr/bin:/bin`,
 				CRABBOX_LINUX_OS_RELEASE_FILE: osRelease,
+				CRABBOX_LINUX_TELEGRAM_STATE_DIR: telegramState,
 				CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR: fixture.targetBin,
 			},
 			encoding: "utf8",
@@ -745,10 +757,176 @@ test("linux developer image reports TruffleHog from the configured install direc
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 	assert.match(result.stdout, /trufflehog 3\.95\.9/);
+	assert.match(result.stdout, /telegram-desktop=7\.0\.9/);
 });
 
 test("linux developer image keeps pinned TruffleHog probes update-free", () => {
 	const script = fs.readFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), "utf8");
 	assert.match(script, /"\$binary" --no-update --version/);
 	assert.match(script, /"\$trufflehog_bin_dir\/trufflehog" --no-update --version/);
+});
+
+function installTelegramDesktopFixture(dir) {
+	const bin = path.join(dir, "bin");
+	const installDir = path.join(dir, "opt", "Telegram");
+	const stateDir = path.join(dir, "state");
+	const downloadLog = path.join(dir, "download.log");
+	const checksumLog = path.join(dir, "checksum.log");
+	fs.mkdirSync(bin);
+	writeExecutable(
+		path.join(bin, "curl"),
+		`#!/usr/bin/env bash
+set -euo pipefail
+output=""
+printf '%s\n' "$*" >>"$CRABBOX_FAKE_DOWNLOAD_LOG"
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -o|--output)
+      output="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+printf 'fake Telegram archive\n' >"$output"
+`,
+	);
+	writeExecutable(
+		path.join(bin, "sha256sum"),
+		`#!/usr/bin/env bash
+set -euo pipefail
+cat >"$CRABBOX_FAKE_CHECKSUM_LOG"
+`,
+	);
+	writeExecutable(
+		path.join(bin, "tar"),
+		`#!/usr/bin/env bash
+set -euo pipefail
+output_dir=""
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -C)
+      output_dir="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+mkdir -p "$output_dir/Telegram"
+cat >"$output_dir/Telegram/Telegram" <<'SCRIPT'
+#!/usr/bin/env bash
+exit 0
+SCRIPT
+chmod 0755 "$output_dir/Telegram/Telegram"
+printf 'updater\n' >"$output_dir/Telegram/Updater"
+`,
+	);
+	return { bin, installDir, stateDir, downloadLog, checksumLog };
+}
+
+test("linux desktop image installs pinned Telegram Desktop once without its updater", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-telegram-"));
+	const fixture = installTelegramDesktopFixture(dir);
+	const result = spawnSync(
+		"bash",
+		[
+			"-c",
+			"set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ninstall_telegram_desktop\ninstall_telegram_desktop",
+		],
+		{
+			cwd: repoRoot,
+			env: {
+				...process.env,
+				PATH: `${fixture.bin}${path.delimiter}/usr/bin:/bin`,
+				CRABBOX_FAKE_CHECKSUM_LOG: fixture.checksumLog,
+				CRABBOX_FAKE_DOWNLOAD_LOG: fixture.downloadLog,
+				CRABBOX_LINUX_TELEGRAM_INSTALL_DIR: fixture.installDir,
+				CRABBOX_LINUX_TELEGRAM_STATE_DIR: fixture.stateDir,
+			},
+			encoding: "utf8",
+		},
+	);
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	const downloadLog = fs.readFileSync(fixture.downloadLog, "utf8");
+	assert.equal(downloadLog.trim().split("\n").length, 1, "matching marker and binary must skip the second download");
+	assert.match(
+		downloadLog,
+		new RegExp(
+			`telegramdesktop/tdesktop/releases/download/v${telegramDesktopVersion}/tsetup\\.${telegramDesktopVersion}\\.tar\\.xz`,
+		),
+	);
+	assert.equal(
+		fs.readFileSync(fixture.checksumLog, "utf8"),
+		`${telegramDesktopSha256}  tsetup.${telegramDesktopVersion}.tar.xz\n`,
+	);
+	assert.equal(fs.existsSync(path.join(fixture.installDir, "Telegram")), true);
+	assert.equal(fs.existsSync(path.join(fixture.installDir, "Updater")), false);
+	assert.equal(fs.statSync(fixture.installDir).mode & 0o777, 0o755);
+	assert.equal(fs.statSync(path.join(fixture.installDir, "Telegram")).mode & 0o777, 0o755);
+	assert.equal(
+		fs.readFileSync(path.join(fixture.stateDir, "telegram-desktop-version"), "utf8"),
+		`${telegramDesktopVersion}\n`,
+	);
+	assert.equal(fs.statSync(path.join(fixture.stateDir, "telegram-desktop-version")).mode & 0o777, 0o644);
+});
+
+test("linux desktop package block includes Telegram runtime and screen tools", () => {
+	const script = fs.readFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), "utf8");
+	const main = script.slice(script.indexOf("main() {"));
+	const desktopBlock = main.match(/if \[\[ "\$install_desktop" == "1" \]\]; then([\s\S]*?)\n  fi/);
+	assert.ok(desktopBlock, "missing desktop package block");
+	for (const packageName of [
+		"libopengl0",
+		"libxcb-cursor0",
+		"libxcb-icccm4",
+		"libxcb-image0",
+		"libxcb-keysyms1",
+		"libxcb-randr0",
+		"libxcb-render-util0",
+		"libxcb-shape0",
+		"libxcb-xfixes0",
+		"libxcb-xinerama0",
+		"libxkbcommon-x11-0",
+		"zbar-tools",
+		"x11-utils",
+	]) {
+		assert.match(desktopBlock[1], new RegExp(`\\b${packageName}\\b`));
+	}
+	assert.match(desktopBlock[1], /install_telegram_desktop/);
+});
+
+test("linux desktop image skips Telegram Desktop on non-amd64 without downloading", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-telegram-arm64-"));
+	const fixture = installTelegramDesktopFixture(dir);
+	writeExecutable(
+		path.join(fixture.bin, "dpkg"),
+		`#!/usr/bin/env bash
+[[ "$*" == "--print-architecture" ]] && printf 'arm64\n'
+`,
+	);
+	const result = spawnSync(
+		"bash",
+		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ninstall_telegram_desktop"],
+		{
+			cwd: repoRoot,
+			env: {
+				...process.env,
+				PATH: `${fixture.bin}${path.delimiter}/usr/bin:/bin`,
+				CRABBOX_FAKE_CHECKSUM_LOG: fixture.checksumLog,
+				CRABBOX_FAKE_DOWNLOAD_LOG: fixture.downloadLog,
+				CRABBOX_LINUX_TELEGRAM_INSTALL_DIR: fixture.installDir,
+				CRABBOX_LINUX_TELEGRAM_STATE_DIR: fixture.stateDir,
+			},
+			encoding: "utf8",
+		},
+	);
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stderr, /skipping Telegram Desktop: upstream tarball is amd64-only/);
+	assert.equal(fs.existsSync(fixture.downloadLog), false);
 });
