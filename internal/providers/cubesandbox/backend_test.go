@@ -54,7 +54,7 @@ func TestCubeSandboxClientRedactsReflectedCredentials(t *testing.T) {
 				Request:    req,
 			}, nil
 		})}
-		client := &cubesandboxClient{httpClient: httpClient}
+		client := &cubesandboxClient{envdClient: httpClient}
 		_, err := client.StartProcess(context.Background(), cubesandboxSession{SandboxID: "sbx_1", Domain: "example.test", EnvdAccessToken: secret}, cubesandboxProcessRequest{Command: "true"})
 		assertCubeSandboxRedactedError(t, err, secret)
 	})
@@ -170,6 +170,83 @@ func TestCubeSandboxClientNormalizesUploadUser(t *testing.T) {
 	client := api.(*cubesandboxClient)
 	if client.user != "ubuntu" {
 		t.Fatalf("user=%q, want normalized upload user", client.user)
+	}
+}
+
+func TestCubeSandboxDefaultHTTPClientsSeparateControlAndDataPlanes(t *testing.T) {
+	api, err := newCubeSandboxClient(Config{CubeSandbox: CubeSandboxConfig{
+		APIURL: "http://127.0.0.1:3000",
+	}}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*cubesandboxClient)
+	if client.httpClient.Timeout != cubesandboxControlTimeout {
+		t.Fatalf("management Timeout = %v, want %v", client.httpClient.Timeout, cubesandboxControlTimeout)
+	}
+	if client.envdClient.Timeout != 0 {
+		t.Fatalf("data-plane Timeout = %v, want no whole-request timeout", client.envdClient.Timeout)
+	}
+	if client.httpClient == client.envdClient {
+		t.Fatal("management and data-plane fallbacks share one client")
+	}
+}
+
+func TestCubeSandboxInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
+	injected := &http.Client{Timeout: 17 * time.Second}
+	api, err := newCubeSandboxClient(Config{CubeSandbox: CubeSandboxConfig{
+		APIURL: "http://127.0.0.1:3000",
+	}}, Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*cubesandboxClient)
+	if client.httpClient != injected || client.envdClient != injected {
+		t.Fatalf("clients = management:%p data:%p, want injected %p", client.httpClient, client.envdClient, injected)
+	}
+}
+
+func TestCubeSandboxDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
+	const controlTimeout = 20 * time.Millisecond
+	managementClient, dataPlaneClient := cubeSandboxHTTPClients(nil, controlTimeout)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(3 * controlTimeout)
+		_, _ = w.Write(cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": true}}}))
+		_, _ = w.Write(cubesandboxTestEnvelope(2, map[string]any{}))
+	}))
+	defer server.Close()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(serverURL.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	routedDataPlaneClient, err := cubeSandboxDataPlaneHTTPClient(dataPlaneClient, serverURL.Hostname(), port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &cubesandboxClient{
+		domain:      "cube.test",
+		proxyScheme: "http",
+		httpClient:  managementClient,
+		envdClient:  routedDataPlaneClient,
+	}
+	started := time.Now()
+	code, err := client.StartProcess(t.Context(), cubesandboxSession{SandboxID: "sbx_1", Domain: "cube.test"}, cubesandboxProcessRequest{Command: "true"})
+	if err != nil || code != 0 {
+		t.Fatalf("StartProcess code=%d err=%v", code, err)
+	}
+	if elapsed := time.Since(started); elapsed <= controlTimeout {
+		t.Fatalf("stream completed in %v, want it to remain active beyond %v", elapsed, controlTimeout)
 	}
 }
 

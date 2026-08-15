@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFastAPICloudProviderSpec(t *testing.T) {
@@ -33,6 +34,43 @@ func TestFastAPICloudClientRequiresToken(t *testing.T) {
 	cfg.FastAPICloud.APIURL = "https://api.fastapicloud.com/api/v1"
 	if _, err := newFastAPICloudClient(cfg, Runtime{}); err == nil {
 		t.Fatal("newFastAPICloudClient accepted empty token")
+	}
+}
+
+func TestFastAPICloudFallbackHTTPClientIsBounded(t *testing.T) {
+	cfg := Config{FastAPICloud: FastAPICloudConfig{
+		Token:  "test-token",
+		APIURL: "http://127.0.0.1:8000/api/v1",
+	}}
+	api, err := newFastAPICloudClient(cfg, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*fastAPICloudClient)
+	if client.httpClient.Timeout != fastAPICloudControlTimeout {
+		t.Fatalf("fallback Timeout = %v, want %v", client.httpClient.Timeout, fastAPICloudControlTimeout)
+	}
+}
+
+func TestFastAPICloudFallbackHTTPClientTimesOutStalledControlResponse(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	fallback := fastAPICloudHTTPClient(nil, timeout)
+	client := &fastAPICloudClient{
+		token:      "test-token",
+		apiURL:     server.URL,
+		httpClient: secureFastAPICloudHTTPClient(fallback, server.URL),
+	}
+	started := time.Now()
+	_, err := client.GetApp(context.Background(), "app-1")
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetApp error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("stalled control request timed out after %v", elapsed)
 	}
 }
 

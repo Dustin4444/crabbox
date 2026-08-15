@@ -30,6 +30,7 @@ type fastAPICloudClient struct {
 const (
 	fastAPICloudMaxResponseBytes = 16 << 20
 	fastAPICloudListPageSize     = 100
+	fastAPICloudControlTimeout   = 60 * time.Second
 )
 
 type fastAPICloudAPIError struct {
@@ -138,11 +139,15 @@ func newFastAPICloudClient(cfg Config, rt Runtime) (fastAPICloudAPI, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpClient := rt.HTTP
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	httpClient := fastAPICloudHTTPClient(rt.HTTP, fastAPICloudControlTimeout)
 	return &fastAPICloudClient{token: token, apiURL: apiURL, httpClient: secureFastAPICloudHTTPClient(httpClient, apiURL)}, nil
+}
+
+func fastAPICloudHTTPClient(injected *http.Client, fallbackTimeout time.Duration) *http.Client {
+	if injected != nil {
+		return injected
+	}
+	return &http.Client{Timeout: fallbackTimeout}
 }
 
 func validateFastAPICloudAPIURL(raw string) (string, error) {
