@@ -329,6 +329,29 @@ scripts/mint-aws-devtools-image.sh \
   --run
 ```
 
+### Telegram Desktop variant
+
+Bake the Linux desktop variant with `--telegram-desktop`:
+
+```bash
+scripts/mint-aws-devtools-image.sh \
+  --target linux \
+  --region us-west-2 \
+  --type m7i.large \
+  --telegram-desktop \
+  --run
+```
+
+The smoke checks the Telegram binary, removed updater, pinned version marker,
+`zbarimg`, and `xdpyinfo`. Promotion uses `--catalog-only --desktop --variant-sdk
+telegram-desktop=<version>`, so it does not replace the generic Linux default
+and only an exactly matching request activates it. Consumers request the
+variant by capability:
+
+```bash
+crabbox warmup --desktop --image-sdk telegram-desktop=<version>
+```
+
 The wrapper captures its candidate through `crabbox checkpoint create`, so the
 same source/candidate proof works with direct AWS credentials and with an
 admin-authenticated broker. Promotion updates broker-managed image defaults;

@@ -16,7 +16,10 @@ async function setupFakeCrabbox() {
   const fake = path.join(dir, "crabbox");
   const linuxPrep = path.join(dir, "linux.sh");
   const windowsPrep = path.join(dir, "windows.ps1");
-  await writeFile(linuxPrep, "#!/usr/bin/env bash\nexit 0\n");
+  await writeFile(
+    linuxPrep,
+    '#!/usr/bin/env bash\ntelegram_desktop_version="7.0.9"\nexit 0\n',
+  );
   await chmod(linuxPrep, 0o755);
   await writeFile(windowsPrep, "exit 0\n");
   await writeFile(
@@ -37,9 +40,13 @@ case "$1" in
         printf 'image selected id=%s source=explicit kind=aws-ami region=%s promoted_at=-\\n' "\${CRABBOX_AWS_AMI:-}" "\${CRABBOX_AWS_REGION:-eu-west-1}"
         printf '{"leaseId":"cbx_candidate"}\\n'
         ;;
-      *)
+      3)
         printf 'image selected id=ami-devtools source=promoted kind=aws-ami region=%s promoted_at=2026-07-31T00:00:00Z\\n' "\${CRABBOX_AWS_REGION:-eu-west-1}"
         printf '{"leaseId":"cbx_promoted"}\\n'
+        ;;
+      *)
+        printf 'image selected id=ami-generic source=promoted kind=aws-ami region=%s promoted_at=2026-07-30T00:00:00Z\\n' "\${CRABBOX_AWS_REGION:-eu-west-1}"
+        printf '{"leaseId":"cbx_default"}\\n'
         ;;
     esac
     if [[ "\${CRABBOX_FAKE_WARMUP_FAIL_AFTER_LEASE:-0}" == "1" ]]; then
@@ -47,6 +54,9 @@ case "$1" in
     fi
     ;;
   run)
+    if [[ -n "\${CRABBOX_FAKE_CAPTURE_PREP_SCRIPT:-}" && "$*" == *"--script"* ]]; then
+      cp "\${@: -1}" "\${CRABBOX_FAKE_CAPTURE_PREP_SCRIPT}"
+    fi
     if [[ -n "\${CRABBOX_FAKE_CAPTURE_RUN_SCRIPT:-}" ]]; then
       last_arg="\${@: -1}"
       if [[ "$last_arg" == *"docker_probe="* ]]; then
@@ -137,6 +147,23 @@ test("AWS devtools mint wrapper defaults to dry plan", async () => {
   await assert.rejects(readFile(fake.log, "utf8"));
 });
 
+test("AWS devtools mint wrapper plans the Linux Telegram Desktop variant", async () => {
+  const fake = await setupFakeCrabbox();
+  const result = await runScript(
+    ["--telegram-desktop", "--prep-script", fake.linuxPrep],
+    {
+      CRABBOX_BIN: fake.fake,
+      CRABBOX_FAKE_LOG: fake.log,
+    },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /image:  crabbox-linux-devtools-telegram-/);
+  assert.match(
+    result.stderr,
+    /proof:  desktop=1 browser=1 telegram_desktop=1 promote=1/,
+  );
+});
+
 test("AWS developer image smoke executes package managers and requires TruffleHog", async () => {
   const text = await readFile(script, "utf8");
   assert.match(text, /pnpm --version\ntrufflehog --no-update --version\ndocker --version/);
@@ -189,6 +216,98 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.match(log, /env CRABBOX_AWS_REGION=us-west-2 AWS_REGION=us-west-2 CRABBOX_AWS_AMI= args checkpoint create --provider aws --target linux --id cbx_source --name crabbox-linux-devtools-/);
   assert.match(log, /--mode native --strategy image --no-reboot=false --wait --wait-timeout 60m/);
   assert.match(log, /image promote --target linux --json --region us-west-2 --fast-snapshot-restore --fsr-az us-west-2a ami-devtools/);
+});
+
+test("AWS devtools mint wrapper publishes a catalog-only Telegram variant", async () => {
+  const fake = await setupFakeCrabbox();
+  const prepCapture = path.join(fake.dir, "telegram-prep.sh");
+  const smokeCapture = path.join(fake.dir, "telegram-smoke.sh");
+  const result = await runScript(
+    [
+      "--target",
+      "linux",
+      "--region",
+      "us-west-2",
+      "--run",
+      "--telegram-desktop",
+      "--prep-script",
+      fake.linuxPrep,
+    ],
+    {
+      CRABBOX_BIN: fake.fake,
+      CRABBOX_FAKE_LOG: fake.log,
+      CRABBOX_FAKE_CAPTURE_PREP_SCRIPT: prepCapture,
+      CRABBOX_FAKE_CAPTURE_RUN_SCRIPT: smokeCapture,
+    },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /default image unchanged proof passed: ami-devtools/);
+
+  const prep = await readFile(prepCapture, "utf8");
+  assert.match(prep, /^#!\/usr\/bin\/env bash\nexport CRABBOX_LINUX_TELEGRAM_DESKTOP=1\n/);
+  assert.match(prep, /telegram_desktop_version="7\.0\.9"/);
+
+  const smoke = await readFile(smokeCapture, "utf8");
+  assert.match(smoke, /test -x \/opt\/Telegram\/Telegram/);
+  assert.match(smoke, /test ! -e \/opt\/Telegram\/Updater/);
+  assert.match(smoke, /telegram_desktop_expected=7\.0\.9/);
+  assert.match(smoke, /telegram-desktop-version\)" = "\$telegram_desktop_expected"/);
+  assert.match(smoke, /command -v zbarimg/);
+  assert.match(smoke, /command -v xdpyinfo/);
+
+  const log = await readFile(fake.log, "utf8");
+  assert.match(log, /--name crabbox-linux-devtools-telegram-/);
+  assert.match(
+    log,
+    /image promote --target linux --json --region us-west-2 --catalog-only --desktop --variant-sdk telegram-desktop=7\.0\.9 ami-devtools/,
+  );
+  const warmups = log.split("\n").filter((line) => line.includes("args warmup "));
+  assert.equal(warmups.length, 4);
+  assert.match(warmups[2], /--image-sdk telegram-desktop=7\.0\.9/);
+  assert.doesNotMatch(warmups[3], /--image-sdk/);
+  assert.match(log, /stop --provider aws --target linux cbx_promoted/);
+  assert.match(log, /stop --provider aws --target linux cbx_default/);
+  const prepRun = log.match(/run --provider aws --target linux --id cbx_source --no-sync --script (\S+)/);
+  assert.ok(prepRun);
+  await assert.rejects(readFile(prepRun[1], "utf8"));
+});
+
+test("AWS devtools mint wrapper rejects invalid Telegram variant targets", async () => {
+  const fake = await setupFakeCrabbox();
+  const windows = await runScript(
+    [
+      "--target",
+      "windows",
+      "--telegram-desktop",
+      "--prep-script",
+      fake.windowsPrep,
+    ],
+    { CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log },
+  );
+  assert.equal(windows.code, 2);
+  assert.match(windows.stderr, /--telegram-desktop requires --target linux/);
+
+  const headless = await runScript(
+    [
+      "--target",
+      "linux",
+      "--telegram-desktop",
+      "--no-desktop",
+      "--prep-script",
+      fake.linuxPrep,
+    ],
+    { CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log },
+  );
+  assert.equal(headless.code, 2);
+  assert.match(headless.stderr, /--telegram-desktop requires desktop bootstrap/);
+
+  await writeFile(fake.linuxPrep, "#!/usr/bin/env bash\nexit 0\n");
+  const unpinned = await runScript(
+    ["--target", "linux", "--telegram-desktop", "--prep-script", fake.linuxPrep],
+    { CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log },
+  );
+  assert.equal(unpinned.code, 2);
+  assert.match(unpinned.stderr, /telegram_desktop_version pin not found/);
 });
 
 test("AWS devtools mint wrapper isolates warmup logs from explicit image names", async () => {

@@ -22,6 +22,11 @@ on:
         required: true
         default: m7i.large
         type: string
+      telegram_desktop:
+        description: Bake the Linux Telegram Desktop variant and promote it catalog-only
+        required: true
+        default: false
+        type: boolean
       windows_type:
         description: Windows source instance type
         required: true
@@ -106,6 +111,7 @@ jobs:
       TARGET: ${{ inputs.target }}
       REGION: ${{ inputs.region }}
       LINUX_TYPE: ${{ inputs.linux_type }}
+      TELEGRAM_DESKTOP: ${{ inputs.telegram_desktop }}
       WINDOWS_TYPE: ${{ inputs.windows_type }}
       MACOS_TYPE: ${{ inputs.macos_type }}
       MACOS_HOST: ${{ inputs.macos_host }}
@@ -157,6 +163,9 @@ jobs:
                 --type "$LINUX_TYPE"
                 --run
               )
+              if [[ "$TELEGRAM_DESKTOP" == true ]]; then
+                command+=(--telegram-desktop)
+              fi
               ;;
             windows)
               command=(

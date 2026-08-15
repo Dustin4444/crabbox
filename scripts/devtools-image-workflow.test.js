@@ -33,6 +33,19 @@ test("publication uses the existing source candidate promotion proof wrappers", 
   assert.match(workflow, /go build -trimpath -o bin\/crabbox \.\/cmd\/crabbox/);
 });
 
+test("publication can select the Linux Telegram Desktop catalog variant", () => {
+  assert.match(
+    workflow,
+    /telegram_desktop:\n\s+description: Bake the Linux Telegram Desktop variant and promote it catalog-only\n\s+required: true\n\s+default: false\n\s+type: boolean/,
+  );
+  assert.match(workflow, /TELEGRAM_DESKTOP: \$\{\{ inputs\.telegram_desktop \}\}/);
+  assert.match(
+    workflow,
+    /linux\)[\s\S]*if \[\[ "\$TELEGRAM_DESKTOP" == true \]\]; then\n\s+command\+=\(--telegram-desktop\)\n\s+fi\n\s+;;/,
+  );
+  assert.equal((workflow.match(/command\+=\(--telegram-desktop\)/g) ?? []).length, 1);
+});
+
 test("publication keeps credentials environment-scoped and retains proof", () => {
   assert.match(workflow, /CRABBOX_COORDINATOR: \$\{\{ vars\.CRABBOX_COORDINATOR \}\}/);
   assert.equal(

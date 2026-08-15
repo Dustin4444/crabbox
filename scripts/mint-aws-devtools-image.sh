@@ -25,6 +25,7 @@ promote="${CRABBOX_IMAGE_PROMOTE:-1}"
 keep_lease="${CRABBOX_IMAGE_KEEP_LEASE:-0}"
 desktop="${CRABBOX_IMAGE_DESKTOP:-auto}"
 browser="${CRABBOX_IMAGE_BROWSER:-auto}"
+telegram_desktop="${CRABBOX_IMAGE_TELEGRAM_DESKTOP:-0}"
 windows_mode="${CRABBOX_WINDOWS_MODE:-normal}"
 prep_script="${CRABBOX_IMAGE_PREP_SCRIPT:-}"
 windows_reboot_marker='C:\ProgramData\crabbox\image-prep-reboot-required'
@@ -52,6 +53,7 @@ Flags:
   --desktop             request desktop bootstrap
   --no-desktop          do not request desktop bootstrap
   --no-browser          do not request browser bootstrap on Linux
+  --telegram-desktop    bake the Linux Telegram Desktop variant
   --windows-mode MODE   normal or wsl2, default normal
   --prep-script PATH    override target prep script
   -h, --help            show this help
@@ -71,6 +73,7 @@ Useful env:
   CRABBOX_IMAGE_WINDOWS_WARMUP_SETTLE_SECONDS
   CRABBOX_IMAGE_FAST_SNAPSHOT_RESTORE
   CRABBOX_IMAGE_FAST_SNAPSHOT_RESTORE_AZS
+  CRABBOX_IMAGE_TELEGRAM_DESKTOP
 USAGE
 }
 
@@ -138,6 +141,10 @@ while [[ "$#" -gt 0 ]]; do
       browser=0
       shift
       ;;
+    --telegram-desktop)
+      telegram_desktop=1
+      shift
+      ;;
     --windows-mode)
       [[ "$#" -ge 2 ]] || { printf '%s requires a value\n' "$1" >&2; exit 2; }
       windows_mode="$2"
@@ -170,10 +177,6 @@ esac
 
 invocation_id="$(date -u +%Y%m%d-%H%M%S)-$$-${RANDOM}"
 log_id="$(printf '%s' "$invocation_id" | tr -c 'A-Za-z0-9_.-' '_')"
-if [[ -z "$image_name" ]]; then
-  image_name="crabbox-${target}-devtools-${log_id}"
-fi
-log_image_name="$(printf '%s' "$image_name" | tr -c 'A-Za-z0-9_.-' '_')"
 if [[ -z "$prep_script" ]]; then
   if [[ "$target" == "windows" ]]; then
     prep_script="$ROOT/scripts/install-windows-developer-tools.ps1"
@@ -196,6 +199,22 @@ if [[ "$desktop" == "auto" ]]; then
   fi
 fi
 
+if [[ "$telegram_desktop" == "1" && "$target" != "linux" ]]; then
+  printf '%s\n' '--telegram-desktop requires --target linux' >&2
+  exit 2
+fi
+if [[ "$telegram_desktop" == "1" && "$desktop" != "1" ]]; then
+  printf '%s\n' '--telegram-desktop requires desktop bootstrap; remove --no-desktop' >&2
+  exit 2
+fi
+
+image_variant=""
+[[ "$telegram_desktop" == "1" ]] && image_variant="-telegram"
+if [[ -z "$image_name" ]]; then
+  image_name="crabbox-${target}-devtools${image_variant}-${log_id}"
+fi
+log_image_name="$(printf '%s' "$image_name" | tr -c 'A-Za-z0-9_.-' '_')"
+
 if [[ ! -x "$CRABBOX_BIN" ]]; then
   printf 'CRABBOX_BIN is not executable: %s\n' "$CRABBOX_BIN" >&2
   exit 2
@@ -205,13 +224,25 @@ if [[ ! -f "$prep_script" ]]; then
   exit 2
 fi
 
+telegram_desktop_version=""
+if [[ "$telegram_desktop" == "1" ]]; then
+  telegram_desktop_version="$(sed -n 's/^telegram_desktop_version="\([^"]*\)"$/\1/p' "$prep_script")"
+  if [[ -z "$telegram_desktop_version" ]]; then
+    printf 'telegram_desktop_version pin not found in prep script: %s\n' "$prep_script" >&2
+    exit 2
+  fi
+fi
+
 source_lease=""
 candidate_lease=""
 promoted_lease=""
+default_unchanged_lease=""
+telegram_prep_script=""
 
 cleanup() {
+  [[ -z "$telegram_prep_script" ]] || rm -f "$telegram_prep_script"
   [[ "$keep_lease" == "1" ]] && return 0
-  for lease in "$promoted_lease" "$candidate_lease" "$source_lease"; do
+  for lease in "$default_unchanged_lease" "$promoted_lease" "$candidate_lease" "$source_lease"; do
     [[ -n "$lease" ]] || continue
     "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" || true
   done
@@ -382,11 +413,13 @@ wait_windows_prep_task() {
 }
 
 warmup_args() {
+  local label="$1"
   printf '%s\0' warmup --provider aws --target "$target" --class "$server_class" --market on-demand --ttl "$ttl" --idle-timeout "$idle_timeout" --timing-json
   [[ -n "$server_type" ]] && printf '%s\0' --type "$server_type"
   [[ "$desktop" == "1" ]] && printf '%s\0' --desktop
   [[ "$browser" == "1" ]] && printf '%s\0' --browser
   [[ "$target" == "windows" ]] && printf '%s\0' --windows-mode "$windows_mode"
+  [[ "$label" == "promoted" && "$telegram_desktop" == "1" ]] && printf '%s\0' --image-sdk "telegram-desktop=$telegram_desktop_version"
 }
 
 lease_from_log() {
@@ -406,16 +439,38 @@ process.exit(1);
 ' "$1"
 }
 
+image_selections() {
+  grep -F 'image selected id=' "$1"
+}
+
 assert_selected_image() {
   local log="$1"
   local image_id="$2"
   local source="$3"
-  if ! grep -Fq "image selected id=$image_id source=$source" "$log"; then
+  local selection
+  selection="$(image_selections "$log" || true)"
+  if [[ "$selection" != *"image selected id=$image_id source=$source"* ]]; then
     printf 'warmup did not prove image selection id=%s source=%s; log=%s\n' \
       "$image_id" "$source" "$log" >&2
     return 1
   fi
   printf '%s image selection proved: %s\n' "$source" "$image_id" >&2
+}
+
+assert_different_image() {
+  local log="$1"
+  local image_id="$2"
+  local selection
+  selection="$(image_selections "$log" || true)"
+  if [[ -z "$selection" ]]; then
+    printf 'warmup did not report image selection; log=%s\n' "$log" >&2
+    return 1
+  fi
+  if [[ "$selection" == *"image selected id=$image_id "* ]]; then
+    printf 'warmup unexpectedly selected image id=%s; log=%s\n' "$image_id" "$log" >&2
+    return 1
+  fi
+  printf 'default image remained unchanged from: %s\n' "$image_id" >&2
 }
 
 warmup() {
@@ -424,7 +479,7 @@ warmup() {
   mkdir -p "$log_dir"
   log="$(mktemp "$log_dir/image-mint-${log_image_name}-${label}-${log_id}.log.XXXXXX")"
   local -a args
-  while IFS= read -r -d '' arg; do args+=("$arg"); done < <(warmup_args)
+  while IFS= read -r -d '' arg; do args+=("$arg"); done < <(warmup_args "$label")
   local -a env_args=()
   [[ -n "$region" ]] && env_args+=(CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
   [[ "$label" == "candidate" ]] && env_args+=(CRABBOX_AWS_AMI="$2")
@@ -447,14 +502,15 @@ warmup() {
     printf 'warmup did not return a lease id for %s\n' "$label" >&2
     return 1
   fi
-  if [[ "$label" == "candidate" ]]; then
-    if ! assert_selected_image "$log" "$2" explicit; then
-      return 1
-    fi
-  elif [[ "$label" == "promoted" ]]; then
-    if ! assert_selected_image "$log" "$ami_id" promoted; then
-      return 1
-    fi
+  local selection_status=0
+  case "$label" in
+    candidate) assert_selected_image "$log" "$2" explicit || selection_status=$? ;;
+    promoted) assert_selected_image "$log" "$ami_id" promoted || selection_status=$? ;;
+    default-unchanged) assert_different_image "$log" "$ami_id" || selection_status=$? ;;
+  esac
+  if [[ "$selection_status" -ne 0 ]]; then
+    [[ "$keep_lease" == "1" ]] || run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2 || true
+    return "$selection_status"
   fi
   if [[ "$target" == "windows" ]]; then
     sleep "$windows_warmup_settle_seconds"
@@ -539,6 +595,18 @@ fi
 test -d /var/cache/crabbox/pnpm
 test -f /var/lib/crabbox/image-ready
 SHELL
+    if [[ "$telegram_desktop" == "1" ]]; then
+      cat <<'SHELL'
+test -x /opt/Telegram/Telegram
+test ! -e /opt/Telegram/Updater
+SHELL
+      printf 'telegram_desktop_expected=%q\n' "$telegram_desktop_version"
+      cat <<'SHELL'
+test "$(</var/lib/crabbox/telegram-desktop-version)" = "$telegram_desktop_expected"
+command -v zbarimg
+command -v xdpyinfo
+SHELL
+    fi
   fi
 }
 
@@ -579,7 +647,18 @@ run_prep() {
     wait_windows_prep_task "$lease"
     return
   fi
-  run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script "$prep_script"
+  local run_prep_script="$prep_script"
+  if [[ "$telegram_desktop" == "1" ]]; then
+    telegram_prep_script="$(mktemp "${TMPDIR:-/tmp}/crabbox-telegram-prep.XXXXXX.sh")"
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf 'export CRABBOX_LINUX_TELEGRAM_DESKTOP=1\n'
+      cat "$prep_script"
+    } >"$telegram_prep_script"
+    chmod +x "$telegram_prep_script"
+    run_prep_script="$telegram_prep_script"
+  fi
+  run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script "$run_prep_script"
 }
 
 mark_linux_image_ready() {
@@ -647,7 +726,7 @@ AWS devtools image mint
   class:  $server_class
   type:   ${server_type:-auto}
   prep:   $prep_script
-  proof:  desktop=$desktop browser=$browser promote=$promote
+  proof:  desktop=$desktop browser=$browser telegram_desktop=$telegram_desktop promote=$promote
   fsr:    enabled=$fast_snapshot_restore azs=${fast_snapshot_restore_azs:-auto}
   paid:   run=$run keep_lease=$keep_lease
 EOF
@@ -698,6 +777,9 @@ if [[ "$fast_snapshot_restore" == "1" ]]; then
     promote_args+=(--fsr-az "$fsr_az")
   done
 fi
+if [[ "$telegram_desktop" == "1" ]]; then
+  promote_args+=(--catalog-only --desktop --variant-sdk "telegram-desktop=$telegram_desktop_version")
+fi
 promote_args+=("$ami_id")
 run_cmd "$CRABBOX_BIN" "${promote_args[@]}"
 
@@ -709,4 +791,8 @@ fi
 promoted_lease="$(warmup promoted)"
 smoke "$promoted_lease"
 printf 'promoted image selection proved: %s\n' "$ami_id"
+if [[ "$telegram_desktop" == "1" ]]; then
+  default_unchanged_lease="$(warmup default-unchanged)"
+  printf 'default image unchanged proof passed: %s\n' "$ami_id"
+fi
 printf 'promoted %s developer image passed: %s\n' "$target" "$ami_id"
