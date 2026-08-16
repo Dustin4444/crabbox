@@ -136,7 +136,9 @@ func waitForManagedWindowsLoopbackVNC(ctx context.Context, target *SSHTarget, st
 		if time.Now().After(deadline) {
 			return exit(5, "managed Windows desktop did not expose VNC on 127.0.0.1:5900")
 		}
-		time.Sleep(5 * time.Second)
+		if err := sleepContext(ctx, 5*time.Second); err != nil {
+			return context.Cause(ctx)
+		}
 	}
 }
 

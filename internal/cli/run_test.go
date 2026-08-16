@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -122,6 +123,65 @@ func TestReleaseBackendLeaseBestEffortCleansMediatedEgressBeforeRelease(t *testi
 		t.Fatalf("releaseBackendLeaseBestEffort error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 	}
 	assertSSHLogContains(t, logPath, remoteStopEgressClientCommand())
+}
+
+func TestReleaseCoordinatorLeaseHonorsCancellationDuringBackoff(t *testing.T) {
+	// Prove cancel is observed during the inter-attempt backoff, not only at
+	// the next release attempt. The coordinator always fails so release enters the sleep.
+	var (
+		mu    sync.Mutex
+		calls int
+		first = make(chan struct{})
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/release") {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "bad", http.StatusNotFound)
+			return
+		}
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			close(first)
+		}
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- releaseCoordinatorLease(ctx, client, "cbx_123", "aws")
+	}()
+
+	select {
+	case <-first:
+		// First failed release completed and the retry sleep is next.
+	case err := <-errCh:
+		t.Fatalf("releaseCoordinatorLease returned before backoff: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("releaseCoordinatorLease did not reach the backoff")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("releaseCoordinatorLease returned %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("releaseCoordinatorLease did not return within 3s after cancel; still blocked on bare sleep")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("release attempts=%d, want 1 (no retries after cancel)", calls)
+	}
 }
 
 func TestStopCleansMediatedEgressBeforeRelease(t *testing.T) {

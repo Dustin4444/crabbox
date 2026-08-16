@@ -3158,7 +3158,9 @@ func releaseCoordinatorLease(ctx context.Context, coord *CoordinatorClient, leas
 		if attempt == 5 {
 			break
 		}
-		time.Sleep(time.Duration(attempt*2) * time.Second)
+		if err := sleepContext(ctx, time.Duration(attempt*2)*time.Second); err != nil {
+			return err
+		}
 	}
 	return lastErr
 }

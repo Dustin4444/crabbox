@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -1891,5 +1892,73 @@ exit 255
 	}
 	if got := strings.Count(string(calls), "call\n"); got != 2 {
 		t.Fatalf("ssh calls=%d want 2", got)
+	}
+}
+
+func TestActionsHydrationWaitsHonorCancellationDuringBackoff(t *testing.T) {
+	// Prove cancel is observed during the inter-attempt backoff, not only at
+	// the top of the loop. Fake ssh always fails so wait enters the sleep.
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+exit 255
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	target := SSHTarget{User: "crabbox", Host: "private.example", Port: "22"}
+
+	tests := []struct {
+		name string
+		wait func(context.Context, io.Writer) error
+	}{
+		{
+			name: "remote",
+			wait: func(ctx context.Context, stderr io.Writer) error {
+				_, err := waitForActionsHydration(ctx, target, "cbx_123", "", time.Minute, stderr)
+				return err
+			},
+		},
+		{
+			name: "local",
+			wait: func(ctx context.Context, stderr io.Writer) error {
+				_, err := waitForLocalActionsHydration(ctx, target, "cbx_123", "", "1", time.Minute, stderr)
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			progress := &sshWaitProgressSignal{ready: make(chan struct{})}
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- test.wait(ctx, progress)
+			}()
+
+			select {
+			case <-progress.ready:
+				// Progress is written after the failed probe and immediately before backoff.
+			case err := <-errCh:
+				t.Fatalf("hydration wait returned before backoff: %v", err)
+			case <-time.After(3 * time.Second):
+				t.Fatal("hydration wait did not reach the backoff")
+			}
+			cancel()
+
+			select {
+			case err := <-errCh:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("hydration wait returned %v, want context.Canceled", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("hydration wait did not return within 3s after cancel; still blocked on bare sleep")
+			}
+		})
 	}
 }

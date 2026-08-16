@@ -2322,7 +2322,9 @@ func waitForActionsHydration(ctx context.Context, target SSHTarget, leaseID, exp
 			return actionsHydrationState{}, exit(5, "timed out waiting for GitHub Actions hydration marker for %s", leaseID)
 		}
 		fmt.Fprintf(stderr, "waiting for GitHub Actions hydration marker id=%s...\n", leaseID)
-		time.Sleep(10 * time.Second)
+		if err := sleepContext(ctx, 10*time.Second); err != nil {
+			return actionsHydrationState{}, err
+		}
 	}
 }
 
@@ -2370,7 +2372,9 @@ func waitForLocalActionsHydration(ctx context.Context, target SSHTarget, leaseID
 			return actionsHydrationState{}, exit(5, "timed out waiting for local Actions hydration marker for %s", leaseID)
 		}
 		fmt.Fprintf(stderr, "waiting for local Actions hydration marker id=%s...\n", leaseID)
-		time.Sleep(5 * time.Second)
+		if err := sleepContext(ctx, 5*time.Second); err != nil {
+			return actionsHydrationState{}, err
+		}
 	}
 }
 
