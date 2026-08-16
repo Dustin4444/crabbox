@@ -222,8 +222,14 @@ func directSSHExecutableForGOOS(goos string, getenv func(string) string, stat fu
 	return "ssh"
 }
 
+const sshCommandWaitDelay = 5 * time.Second
+
 func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, directSSHExecutable(), args...)
+	// A cancelled multiplexed SSH session can leave its ControlPersist master
+	// holding inherited pipes after the session process exits. Bound Go's pipe
+	// drain so cancellation cannot strand the caller in Cmd.Wait.
+	cmd.WaitDelay = sshCommandWaitDelay
 	applyTargetChildEnvironment(cmd, target)
 	return cmd
 }
@@ -460,8 +466,17 @@ func runSSHQuietWithOptions(ctx context.Context, target SSHTarget, remote, conne
 	return runSSHQuietWithOptionsResolvePort(ctx, &target, remote, connectTimeout, connectionAttempts)
 }
 
-func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, remote, connectTimeout, connectionAttempts string) error {
-	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
+func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, remote, connectTimeout, connectionAttempts string) (err error) {
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, *target, remote, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.close(ctx, *target))
+		}
+	}()
+	remote = prepared.command
 	remote = wrapRemoteForTarget(*target, remote)
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
@@ -482,8 +497,17 @@ func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, r
 	return lastErr
 }
 
-func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) error {
-	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
+func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (err error) {
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.close(ctx, target))
+		}
+	}()
+	remote = prepared.command
 	remote = wrapRemoteForTargetWithWaitTimeout(target, remote, waitTimeout)
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
@@ -503,8 +527,17 @@ func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, rem
 	return lastErr
 }
 
-func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
-	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
+func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (output string, err error) {
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.close(ctx, target))
+		}
+	}()
+	remote = prepared.command
 	remote = wrapRemoteForTarget(target, remote)
 	var lastOut []byte
 	var lastErr error
@@ -526,8 +559,17 @@ func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (string,
 	return strings.TrimSpace(string(lastOut)), lastErr
 }
 
-func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (string, error) {
-	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
+func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (output string, err error) {
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.close(ctx, target))
+		}
+	}()
+	remote = prepared.command
 	remote = wrapRemoteForTargetWithWaitTimeout(target, remote, waitTimeout)
 	var lastOut []byte
 	var lastErr error
@@ -550,8 +592,17 @@ func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, re
 	return strings.TrimSpace(string(lastOut)), lastErr
 }
 
-func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
-	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
+func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) (output string, err error) {
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.close(ctx, target))
+		}
+	}()
+	remote = prepared.command
 	remote = wrapRemoteForTarget(target, remote)
 	var lastOut []byte
 	var lastErr error
@@ -596,7 +647,16 @@ func runIdempotentSSHCombinedOutput(ctx context.Context, target SSHTarget, remot
 }
 
 func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (output string, err error) {
-	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.close(ctx, target))
+		}
+	}()
+	remote = prepared.command
 	command := wsl2StdinScriptCommandWithWaitTimeout(waitTimeout)
 	input, err := newReplayableSSHInput([]byte(remote))
 	if err != nil {
@@ -634,9 +694,55 @@ func runSSHInputQuiet(ctx context.Context, target SSHTarget, remote, input strin
 	return runSSHInput(ctx, target, remote, strings.NewReader(input), io.Discard, io.Discard)
 }
 
+func runSSHInputCombinedOutput(ctx context.Context, target SSHTarget, remote string, input io.Reader) (output string, err error) {
+	if input == nil {
+		input = strings.NewReader("")
+	}
+	data, err := io.ReadAll(input)
+	if err != nil {
+		return "", err
+	}
+	inputSize := int64(len(data))
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.close(ctx, target))
+		}
+	}()
+	remote = wrapRemoteForTarget(target, prepared.command)
+	replayableInput, err := newReplayableSSHInput(data)
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = errors.Join(err, replayableInput.close()) }()
+	var lastOutput string
+	var lastErr error
+	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
+		probe := target
+		probe.Port = port
+		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
+		cmd.Stdin, err = replayableInput.reset()
+		if err != nil {
+			return "", err
+		}
+		var attempt synchronizedBuffer
+		err = runSSHCommand(cmd, &attempt, &attempt)
+		lastOutput = strings.TrimSpace(attempt.String())
+		if err == nil {
+			return lastOutput, nil
+		}
+		lastErr = err
+		if !shouldRetrySSHPort(err) {
+			return lastOutput, err
+		}
+	}
+	return lastOutput, lastErr
+}
+
 func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.Reader, stdout, stderr io.Writer) (err error) {
-	remote = wrapWorkspaceOwnerRemote(ctx, remote, true)
-	remote = wrapRemoteForTarget(target, remote)
 	if input == nil {
 		input = strings.NewReader("")
 	}
@@ -644,6 +750,17 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 	if err != nil {
 		return err
 	}
+	inputSize := int64(len(data))
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.close(ctx, target))
+		}
+	}()
+	remote = wrapRemoteForTarget(target, prepared.command)
 	replayableInput, err := newReplayableSSHInput(data)
 	if err != nil {
 		return err
@@ -672,12 +789,27 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 	return lastErr
 }
 
-func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, input io.ReadSeeker, stdout, stderr io.Writer) error {
-	remote = wrapWorkspaceOwnerRemote(ctx, remote, true)
-	remote = wrapRemoteForTarget(target, remote)
+func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, input io.ReadSeeker, stdout, stderr io.Writer) (err error) {
 	if input == nil {
 		input = strings.NewReader("")
 	}
+	inputSize, err := input.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	if _, err := input.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.close(ctx, target))
+		}
+	}()
+	remote = wrapRemoteForTarget(target, prepared.command)
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		if _, err := input.Seek(0, io.SeekStart); err != nil {
@@ -705,7 +837,11 @@ func runSSHStream(ctx context.Context, target SSHTarget, remote string, stdout, 
 }
 
 func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) (int, error) {
-	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
+	if err != nil {
+		return 7, err
+	}
+	remote = prepared.command
 	remote = wrapRemoteForTarget(target, remote)
 	lastCode := 7
 	var lastErr error
@@ -720,10 +856,10 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 		lastErr = err
 		lastCode = exitCode(err)
 		if !shouldRetrySSHPort(err) {
-			return lastCode, err
+			return lastCode, errors.Join(err, prepared.close(ctx, target))
 		}
 	}
-	return lastCode, lastErr
+	return lastCode, errors.Join(lastErr, prepared.close(ctx, target))
 }
 
 func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {
@@ -963,7 +1099,7 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		if err := runSSHQuiet(rawCtx, target, owner.rsyncPrepareCommand()); err != nil {
 			return exit(7, "prepare rsync workspace witness: %v", err)
 		}
-		if _, err := runSSHOutput(rawCtx, target, owner.WrapBackgroundCommand(owner.rsyncGuardPayload(dst))); err != nil {
+		if _, err := runSSHOutput(rawCtx, target, owner.wrapPOSIXBackgroundCommand(owner.rsyncGuardPayload(dst))); err != nil {
 			return exit(7, "start rsync workspace witness: %v", err)
 		}
 		if err := owner.WaitForChild(rawCtx, 10*time.Second); err != nil {
@@ -1446,6 +1582,42 @@ func powershellCommand(script string) string {
 	script = `$ProgressPreference = "SilentlyContinue"` + "\n" + script
 	encoded := base64.StdEncoding.EncodeToString(utf16LE([]byte(script)))
 	return "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded
+}
+
+func windowsPowerShellCopyExactInput(destination string, inputSize int64) string {
+	return `$stdin = [Console]::OpenStandardInput()
+$remaining = [Int64]` + strconv.FormatInt(inputSize, 10) + `
+$buffer = New-Object byte[] 65536
+while ($remaining -gt 0) {
+	$readSize = [int][Math]::Min([Int64]$buffer.Length, $remaining)
+	$read = $stdin.Read($buffer, 0, $readSize)
+	if ($read -le 0) { throw "SSH stdin ended before the framed payload" }
+	` + destination + `.Write($buffer, 0, $read)
+	$remaining -= $read
+}
+`
+}
+
+func windowsPowerShellStdinScriptCommand(inputSize int) string {
+	return powershellCommand(`$ErrorActionPreference = "Stop"
+$path = Join-Path $env:TEMP ("crabbox-stdin-command-" + [Guid]::NewGuid().ToString("N") + ".ps1")
+try {
+	$scriptFile = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+	try {
+		$bom = [byte[]](0xEF, 0xBB, 0xBF)
+		$scriptFile.Write($bom, 0, $bom.Length)
+` + windowsPowerShellCopyExactInput("$scriptFile", int64(inputSize)) + `		$scriptFile.Flush($true)
+	} finally {
+		$scriptFile.Dispose()
+	}
+	& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path
+	$code = $LASTEXITCODE
+} finally {
+	Remove-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue
+}
+if ($null -eq $code) { $code = 0 }
+exit $code
+`)
 }
 
 func utf16LE(input []byte) []byte {
