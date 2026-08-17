@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofrs/flock"
 )
@@ -87,6 +89,14 @@ type leaseClaimsSnapshot struct {
 	invalid map[string]error
 }
 
+type leaseClaimFileError struct {
+	code string
+	err  error
+}
+
+func (e *leaseClaimFileError) Error() string { return e.err.Error() }
+func (e *leaseClaimFileError) Unwrap() error { return e.err }
+
 func snapshotLeaseClaims() (leaseClaimsSnapshot, error) {
 	dir, err := crabboxStateDir()
 	if err != nil {
@@ -101,13 +111,95 @@ func snapshotLeaseClaims() (leaseClaimsSnapshot, error) {
 	}
 	snapshot := leaseClaimsSnapshot{invalid: make(map[string]error)}
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+		if filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
 		leaseID := strings.TrimSuffix(entry.Name(), ".json")
-		claim, err := readLeaseClaim(leaseID)
+		if !validLeaseClaimPathID(leaseID) {
+			snapshot.invalid[leaseID] = &leaseClaimFileError{
+				code: "invalid_filename",
+				err:  exit(2, "claim filename is not a valid lease id"),
+			}
+			continue
+		}
+		claim, exists, err := readLeaseClaimSnapshotLockedWithPresence(leaseID)
 		if err != nil {
 			snapshot.invalid[leaseID] = err
+			continue
+		}
+		if exists {
+			snapshot.claims = append(snapshot.claims, claim)
+		}
+	}
+	return snapshot, nil
+}
+
+type leaseClaimSnapshotReader func(path, leaseID string, expected os.FileInfo) (leaseClaim, bool, error)
+
+// snapshotLeaseClaimsReadOnly is the public inventory reader. It intentionally
+// bypasses claim locks so scanning a readable store never creates lock state or
+// requires write access. Runtime paths continue to use snapshotLeaseClaims.
+func snapshotLeaseClaimsReadOnly() (leaseClaimsSnapshot, error) {
+	snapshot, err := snapshotLeaseClaimsReadOnlyWithReader(readLeaseClaimSnapshotWithPresence)
+	if err != nil {
+		return leaseClaimsSnapshot{}, exit(1, "%v", err)
+	}
+	return snapshot, nil
+}
+
+func snapshotLeaseClaimsReadOnlyWithReader(read leaseClaimSnapshotReader) (leaseClaimsSnapshot, error) {
+	dir, err := crabboxStateDir()
+	if err != nil {
+		return leaseClaimsSnapshot{}, err
+	}
+	claimsDir := filepath.Join(dir, "claims")
+	entries, err := os.ReadDir(claimsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return leaseClaimsSnapshot{}, nil
+	}
+	if err != nil {
+		return leaseClaimsSnapshot{}, exit(2, "read claims directory: %v", err)
+	}
+
+	snapshot := leaseClaimsSnapshot{invalid: make(map[string]error)}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		leaseID := strings.TrimSuffix(entry.Name(), ".json")
+		if !validLeaseClaimPathID(leaseID) {
+			snapshot.invalid[leaseID] = &leaseClaimFileError{
+				code: "invalid_filename",
+				err:  exit(2, "claim filename is not a valid lease id"),
+			}
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			snapshot.invalid[leaseID] = leaseClaimSnapshotReadError(leaseID, "inspect", err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			snapshot.invalid[leaseID] = &leaseClaimFileError{
+				code: "non_regular_file",
+				err:  exit(2, "claim file %s is not a regular file", leaseID),
+			}
+			continue
+		}
+
+		claim, exists, err := read(filepath.Join(claimsDir, entry.Name()), leaseID, info)
+		if err != nil {
+			snapshot.invalid[leaseID] = err
+			continue
+		}
+		if !exists {
+			continue
+		}
+		if claim.LeaseID == "" {
+			snapshot.invalid[leaseID] = &leaseClaimFileError{
+				code: "empty_lease_id",
+				err:  exit(2, "claim file %s has an empty lease id", leaseID),
+			}
 			continue
 		}
 		snapshot.claims = append(snapshot.claims, claim)
@@ -1828,9 +1920,113 @@ func readLeaseClaimWithPresence(leaseID string) (leaseClaim, bool, error) {
 	return claim, exists, nil
 }
 
+func readLeaseClaimSnapshotLockedWithPresence(leaseID string) (leaseClaim, bool, error) {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		var invalid invalidLeaseClaimIDError
+		if errors.As(err, &invalid) {
+			return leaseClaim{}, false, nil
+		}
+		return leaseClaim{}, false, err
+	}
+	var claim leaseClaim
+	var exists bool
+	err = withLeaseClaimLock(path, func() error {
+		info, statErr := os.Lstat(path)
+		if errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		if statErr != nil {
+			exists = true
+			return leaseClaimSnapshotReadError(leaseID, "inspect", statErr)
+		}
+		exists = true
+		if !info.Mode().IsRegular() {
+			return &leaseClaimFileError{
+				code: "non_regular_file",
+				err:  exit(2, "claim file %s is not a regular file", leaseID),
+			}
+		}
+		var readErr error
+		claim, exists, readErr = readLeaseClaimPathWithPresence(path)
+		return readErr
+	})
+	if err != nil {
+		return leaseClaim{}, exists, err
+	}
+	if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+		return leaseClaim{}, exists, err
+	}
+	if exists && claim.LeaseID == "" {
+		return leaseClaim{}, true, &leaseClaimFileError{
+			code: "empty_lease_id",
+			err:  exit(2, "claim file %s has an empty lease id", leaseID),
+		}
+	}
+	return claim, exists, nil
+}
+
+func readLeaseClaimSnapshotWithPresence(path, leaseID string, expected os.FileInfo) (leaseClaim, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "open", err)
+	}
+	defer file.Close()
+
+	opened, err := file.Stat()
+	if err != nil {
+		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "inspect opened", err)
+	}
+	if !opened.Mode().IsRegular() {
+		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "verify regular", errors.New("claim path changed during scan"))
+	}
+	if !sameLeaseClaimSnapshotFile(expected, opened) {
+		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "verify opened", errors.New("claim file changed during scan"))
+	}
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "read", err)
+	}
+	afterRead, err := file.Stat()
+	if err != nil {
+		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "inspect read", err)
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "verify current", err)
+	}
+	if !sameLeaseClaimSnapshotFile(opened, afterRead) || !sameLeaseClaimSnapshotFile(afterRead, current) {
+		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "verify stable", errors.New("claim file changed during scan"))
+	}
+
+	claim, err := decodeLeaseClaim(path, data)
+	if err != nil {
+		return leaseClaim{}, true, err
+	}
+	if err := validateLeaseClaimFileIdentity(leaseID, claim, true); err != nil {
+		return leaseClaim{}, true, err
+	}
+	return claim, true, nil
+}
+
+func sameLeaseClaimSnapshotFile(a, b os.FileInfo) bool {
+	return a != nil && b != nil && os.SameFile(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
+}
+
+func leaseClaimSnapshotReadError(leaseID, action string, err error) error {
+	return &leaseClaimFileError{
+		code: "read_error",
+		err:  exit(2, "%s claim file %s: %v", action, leaseID, err),
+	}
+}
+
 func validateLeaseClaimFileIdentity(leaseID string, claim leaseClaim, exists bool) error {
 	if exists && claim.LeaseID != "" && claim.LeaseID != leaseID {
-		return exit(2, "claim file %s contains lease id %s; refusing misfiled claim", leaseID, claim.LeaseID)
+		return &leaseClaimFileError{
+			code: "lease_id_mismatch",
+			err:  exit(2, "claim file %s contains lease id %s; refusing misfiled claim", leaseID, claim.LeaseID),
+		}
 	}
 	return nil
 }
@@ -1858,20 +2054,34 @@ func readLeaseClaimPathWithPresence(path string) (leaseClaim, bool, error) {
 		return leaseClaim{}, false, nil
 	}
 	if err != nil {
-		return leaseClaim{}, true, exit(2, "read claim %s: %v", path, err)
+		return leaseClaim{}, true, &leaseClaimFileError{
+			code: "read_error",
+			err:  exit(2, "read claim %s: %v", path, err),
+		}
+	}
+	claim, err := decodeLeaseClaim(path, data)
+	return claim, true, err
+}
+
+func decodeLeaseClaim(path string, data []byte) (leaseClaim, error) {
+	if !utf8.Valid(data) {
+		return leaseClaim{}, &leaseClaimFileError{
+			code: "invalid_json",
+			err:  exit(2, "parse claim %s: invalid UTF-8", path),
+		}
 	}
 	var claim leaseClaim
 	if err := json.Unmarshal(data, &claim); err != nil {
-		return leaseClaim{}, true, exit(2, "parse claim %s: %v", path, err)
+		return leaseClaim{}, &leaseClaimFileError{
+			code: "invalid_json",
+			err:  exit(2, "parse claim %s: %v", path, err),
+		}
 	}
-	return claim, true, nil
+	return claim, nil
 }
 
 func leaseClaimPath(leaseID string) (string, error) {
-	if leaseID != strings.TrimSpace(leaseID) {
-		return "", invalidLeaseClaimIDError{id: leaseID}
-	}
-	if !validLeaseClaimID(leaseID) {
+	if !validLeaseClaimPathID(leaseID) {
 		return "", invalidLeaseClaimIDError{id: leaseID}
 	}
 	dir, err := crabboxStateDir()
@@ -1879,6 +2089,10 @@ func leaseClaimPath(leaseID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "claims", leaseID+".json"), nil
+}
+
+func validLeaseClaimPathID(leaseID string) bool {
+	return leaseID == strings.TrimSpace(leaseID) && validLeaseClaimID(leaseID)
 }
 
 func validLeaseClaimID(leaseID string) bool {
