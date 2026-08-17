@@ -630,6 +630,7 @@ var runEnvProfileTestReleaseRequestHook func(ReleaseLeaseRequest) error
 var runEnvProfileTestConnectionCleanupSafe = true
 var runEnvProfileTestAcquireHook func(AcquireRequest)
 var runEnvProfileTestAcquireLease func(AcquireRequest) (LeaseTarget, error)
+var runEnvProfileTestTouchHook func(TouchRequest) error
 
 func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runEnvProfileTestBackend) Acquire(_ context.Context, req AcquireRequest) (LeaseTarget, error) {
@@ -674,6 +675,11 @@ func (b runEnvProfileTestBackend) ReleaseLease(ctx context.Context, req ReleaseL
 	return runEnvProfileTestReleaseErr
 }
 func (b runEnvProfileTestBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+	if runEnvProfileTestTouchHook != nil {
+		if err := runEnvProfileTestTouchHook(req); err != nil {
+			return Server{}, err
+		}
+	}
 	server := req.Lease.Server
 	server.Provider = b.spec.Name
 	return server, nil
@@ -1645,6 +1651,570 @@ func TestRunCommandAcceptsE2BLeaseOutput(t *testing.T) {
 	}
 	if session.Provider != "e2b" || session.LeaseID != "tbx_test" || !session.Kept || session.CleanupCommand == "" {
 		t.Fatalf("session=%#v", session)
+	}
+}
+
+const localContainerRunSessionTestLeaseID = "cbx_1260abc12345"
+
+func setupLocalContainerRunSessionTest(t *testing.T, commandScript string) (string, LeaseTarget) {
+	t.Helper()
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	if strings.TrimSpace(commandScript) == "" {
+		commandScript = "#!/bin/sh\nexit 0\n"
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, commandScript)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+	lease := LeaseTarget{
+		LeaseID: localContainerRunSessionTestLeaseID,
+		Server: Server{
+			CloudID:  "container-secret-id",
+			Provider: "local-container",
+			Labels: map[string]string{
+				"lease":             localContainerRunSessionTestLeaseID,
+				"provider":          "local-container",
+				"slug":              "session-slug",
+				"state":             "ready",
+				"target":            targetLinux,
+				"provider_metadata": "provider-metadata-secret",
+			},
+		},
+		SSH: SSHTarget{
+			User:           "crabbox",
+			Host:           "secret-host.invalid",
+			Port:           "22",
+			Key:            "/tmp/private-secret-key",
+			TargetOS:       targetLinux,
+			SSHConfigProxy: true,
+		},
+	}
+	runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) { return lease, nil }
+	runEnvProfileTestAcquireHook = nil
+	runEnvProfileTestReleaseHook = nil
+	runEnvProfileTestReleaseRequestHook = nil
+	runEnvProfileTestTouchHook = nil
+	runEnvProfileTestReleaseErr = nil
+	t.Cleanup(func() {
+		runEnvProfileTestAcquireLease = nil
+		runEnvProfileTestAcquireHook = nil
+		runEnvProfileTestReleaseHook = nil
+		runEnvProfileTestReleaseRequestHook = nil
+		runEnvProfileTestTouchHook = nil
+		runEnvProfileTestReleaseErr = nil
+		removeLeaseClaim(localContainerRunSessionTestLeaseID)
+	})
+	return dir, lease
+}
+
+func readRunSessionHandleTest(t *testing.T, path string) (RunSessionHandle, map[string]json.RawMessage, []byte) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read lease output: %v", err)
+	}
+	var session RunSessionHandle
+	if err := json.Unmarshal(data, &session); err != nil {
+		t.Fatalf("parse lease output: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("parse lease output fields: %v", err)
+	}
+	return session, fields, data
+}
+
+func installRunSessionValidationFailureMarkers(t *testing.T, dir string) (string, string) {
+	t.Helper()
+	commandMarker := filepath.Join(dir, "command-ran")
+	syncMarker := filepath.Join(dir, "sync-ran")
+	t.Setenv("CRABBOX_COMMAND_MARKER", commandMarker)
+	t.Setenv("CRABBOX_SYNC_MARKER", syncMarker)
+	if err := os.WriteFile(filepath.Join(dir, "rsync"), []byte("#!/bin/sh\n: > \"$CRABBOX_SYNC_MARKER\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return commandMarker, syncMarker
+}
+
+func assertRunSessionValidationStoppedBeforeWork(t *testing.T, sessionPath, commandMarker, syncMarker string) {
+	t.Helper()
+	for label, path := range map[string]string{
+		"lease output": sessionPath,
+		"user command": commandMarker,
+		"sync":         syncMarker,
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s unexpectedly exists after validation failure: %v", label, err)
+		}
+	}
+}
+
+func TestRunCommandWritesFreshLocalContainerLeaseOutputAfterClaim(t *testing.T) {
+	dir, _ := setupLocalContainerRunSessionTest(t, "")
+	path := filepath.Join(dir, "session.json")
+	releases := 0
+	runEnvProfileTestReleaseHook = func() error {
+		releases++
+		return nil
+	}
+	touchObserved := false
+	runEnvProfileTestTouchHook = func(req TouchRequest) error {
+		if _, exists, err := readLeaseClaimWithPresence(req.Lease.LeaseID); err != nil || !exists {
+			return fmt.Errorf("touch observed before exact claim: exists=%t err=%v", exists, err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			return fmt.Errorf("touch observed before lease output: %w", err)
+		}
+		touchObserved = true
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", "local-container",
+		"--keep",
+		"--no-sync",
+		"--no-hydrate",
+		"--lease-output", path,
+		"--", "true",
+	})
+	if err != nil {
+		t.Fatalf("runCommand: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if !touchObserved {
+		t.Fatal("post-claim touch did not observe the lease output")
+	}
+	if releases != 0 {
+		t.Fatalf("retained run released lease %d time(s)", releases)
+	}
+
+	session, fields, data := readRunSessionHandleTest(t, path)
+	if session.Provider != "local-container" || session.LeaseID != localContainerRunSessionTestLeaseID || session.Slug != "session-slug" || session.Reused || !session.Kept {
+		t.Fatalf("session=%#v", session)
+	}
+	if !regexp.MustCompile(`^run_[a-f0-9]{12}$`).MatchString(session.RunID) {
+		t.Fatalf("runId=%q", session.RunID)
+	}
+	if want := "crabbox stop --provider local-container --target linux --id " + localContainerRunSessionTestLeaseID; session.CleanupCommand != want {
+		t.Fatalf("cleanupCommand=%q want %q", session.CleanupCommand, want)
+	}
+	wantFields := map[string]bool{"provider": true, "leaseId": true, "slug": true, "reused": true, "kept": true, "runId": true, "cleanupCommand": true}
+	if len(fields) != len(wantFields) {
+		t.Fatalf("lease output fields=%v", fields)
+	}
+	for key := range fields {
+		if !wantFields[key] {
+			t.Fatalf("unexpected lease output field %q", key)
+		}
+	}
+	for _, secret := range []string{"container-secret-id", "secret-host.invalid", "/tmp/private-secret-key", "provider-metadata-secret", "workdir", "keyPath", "claim"} {
+		if bytes.Contains(data, []byte(secret)) {
+			t.Fatalf("lease output contains forbidden value %q: %s", secret, data)
+		}
+	}
+}
+
+func TestRunCommandWritesReusedLocalContainerLeaseOutput(t *testing.T) {
+	for _, stopAfter := range []string{"", "never"} {
+		name := blank(stopAfter, "default")
+		t.Run(name, func(t *testing.T) {
+			dir, _ := setupLocalContainerRunSessionTest(t, "")
+			path := filepath.Join(dir, "session.json")
+			releases := 0
+			runEnvProfileTestReleaseHook = func() error {
+				releases++
+				return nil
+			}
+			args := []string{
+				"--provider", "local-container",
+				"--id", localContainerRunSessionTestLeaseID,
+				"--no-sync",
+				"--no-hydrate",
+				"--lease-output", path,
+			}
+			if stopAfter != "" {
+				args = append(args, "--stop-after", stopAfter)
+			}
+			args = append(args, "--", "true")
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), args); err != nil {
+				t.Fatalf("runCommand: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			session, _, _ := readRunSessionHandleTest(t, path)
+			if !session.Reused || !session.Kept || session.LeaseID != localContainerRunSessionTestLeaseID {
+				t.Fatalf("session=%#v", session)
+			}
+			if releases != 0 {
+				t.Fatalf("reused run released lease %d time(s)", releases)
+			}
+		})
+	}
+}
+
+func TestRunCommandLocalContainerLeaseOutputValidationFailureReleasesFreshLease(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		configure   func(*testing.T, string)
+		mutateLease func(*LeaseTarget)
+		want        string
+	}{
+		{
+			name: "managed capability",
+			args: []string{"--desktop"},
+			want: "was not created with desktop=true",
+		},
+		{
+			name: "target",
+			args: []string{"--artifact-glob", "artifacts/**"},
+			mutateLease: func(lease *LeaseTarget) {
+				lease.SSH.TargetOS = targetMacOS
+			},
+			want: "--artifact-glob is not supported for macOS targets",
+		},
+		{
+			name: "required artifact target",
+			args: []string{"--require-artifact", "reports/data/manifest.json"},
+			mutateLease: func(lease *LeaseTarget) {
+				lease.SSH.TargetOS = targetMacOS
+			},
+			want: "--require-artifact is not supported for macOS targets",
+		},
+		{
+			name: "native Windows profile doctor",
+			args: []string{"--profile", "qa"},
+			configure: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, "missing.yaml"), []byte(`
+profiles:
+  qa:
+    doctor:
+      enabled: true
+      tools: [node]
+`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			mutateLease: func(lease *LeaseTarget) {
+				lease.SSH.TargetOS = targetWindows
+				lease.SSH.WindowsMode = windowsModeNormal
+			},
+			want: "profile doctor is not supported for native Windows targets",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, lease := setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *session-should-not-run*) : > \"$CRABBOX_COMMAND_MARKER\" ;; esac\nexit 0\n")
+			if tc.configure != nil {
+				tc.configure(t, dir)
+			}
+			if tc.mutateLease != nil {
+				tc.mutateLease(&lease)
+				runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) { return lease, nil }
+			}
+			path := filepath.Join(dir, "session.json")
+			commandMarker, syncMarker := installRunSessionValidationFailureMarkers(t, dir)
+			releases := 0
+			runEnvProfileTestReleaseRequestHook = func(req ReleaseLeaseRequest) error {
+				releases++
+				if req.Lease.LeaseID != localContainerRunSessionTestLeaseID || req.Lease.Server.CloudID != "container-secret-id" {
+					t.Errorf("released unexpected lease: %#v", req.Lease)
+				}
+				return nil
+			}
+
+			args := []string{
+				"--provider", "local-container",
+				"--keep",
+				"--lease-output", path,
+			}
+			args = append(args, tc.args...)
+			args = append(args, "--", "session-should-not-run")
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v want %q\nstdout=%s\nstderr=%s", err, tc.want, stdout.String(), stderr.String())
+			}
+			if releases != 1 {
+				t.Fatalf("fresh unreported lease released %d time(s), want 1", releases)
+			}
+			assertRunSessionValidationStoppedBeforeWork(t, path, commandMarker, syncMarker)
+			if _, exists, readErr := readLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
+				t.Fatalf("claim after validation failure exists=%t err=%v", exists, readErr)
+			}
+		})
+	}
+}
+
+func TestRunCommandLocalContainerLeaseOutputValidationFailureDoesNotReleaseReusedLease(t *testing.T) {
+	dir, _ := setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *session-should-not-run*) : > \"$CRABBOX_COMMAND_MARKER\" ;; esac\nexit 0\n")
+	path := filepath.Join(dir, "session.json")
+	commandMarker, syncMarker := installRunSessionValidationFailureMarkers(t, dir)
+	releases := 0
+	runEnvProfileTestReleaseHook = func() error {
+		releases++
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", "local-container",
+		"--id", localContainerRunSessionTestLeaseID,
+		"--lease-output", path,
+		"--desktop",
+		"--", "session-should-not-run",
+	})
+	if err == nil || !strings.Contains(err.Error(), "was not created with desktop=true") {
+		t.Fatalf("error=%v want managed-capability validation failure\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if releases != 0 {
+		t.Fatalf("reused lease released %d time(s), want 0", releases)
+	}
+	assertRunSessionValidationStoppedBeforeWork(t, path, commandMarker, syncMarker)
+}
+
+func TestRunCommandLocalContainerLeaseOutputCleanupFailurePreservesValidationError(t *testing.T) {
+	dir, _ := setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *session-should-not-run*) : > \"$CRABBOX_COMMAND_MARKER\" ;; esac\nexit 0\n")
+	path := filepath.Join(dir, "session.json")
+	commandMarker, syncMarker := installRunSessionValidationFailureMarkers(t, dir)
+	releases := 0
+	runEnvProfileTestReleaseHook = func() error {
+		releases++
+		return errors.New("release failure sentinel")
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", "local-container",
+		"--keep",
+		"--lease-output", path,
+		"--desktop",
+		"--", "session-should-not-run",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "was not created with desktop=true") {
+		t.Fatalf("error=%v want original exit 2 managed-capability failure", err)
+	}
+	if strings.Contains(err.Error(), "release failure sentinel") {
+		t.Fatalf("cleanup failure replaced original validation error: %v", err)
+	}
+	if releases != 1 {
+		t.Fatalf("fresh unreported lease release attempts=%d, want 1", releases)
+	}
+	if got := stderr.String(); !strings.Contains(got, "lease cleanup stopped=false") || !strings.Contains(got, `error="release failure sentinel"`) {
+		t.Fatalf("cleanup failure not reported with lifecycle convention: %q", got)
+	}
+	assertRunSessionValidationStoppedBeforeWork(t, path, commandMarker, syncMarker)
+}
+
+func TestRunCommandRejectsLocalContainerLeaseOutputStopPoliciesBeforeAcquisition(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "fresh auto", args: nil, want: "requires --keep"},
+		{name: "fresh keep on failure", args: []string{"--keep-on-failure"}, want: "requires --keep"},
+		{name: "fresh stop success", args: []string{"--keep", "--stop-after", "success"}, want: "may release it"},
+		{name: "fresh stop failure", args: []string{"--keep", "--stop-after", "failure"}, want: "may release it"},
+		{name: "fresh stop always", args: []string{"--keep", "--stop-after", "always"}, want: "may release it"},
+		{name: "reused stop success", args: []string{"--id", localContainerRunSessionTestLeaseID, "--stop-after", "success"}, want: "may release it"},
+		{name: "reused stop failure", args: []string{"--id", localContainerRunSessionTestLeaseID, "--stop-after", "failure"}, want: "may release it"},
+		{name: "reused stop always", args: []string{"--id", localContainerRunSessionTestLeaseID, "--stop-after", "always"}, want: "may release it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			calls := 0
+			runEnvProfileTestAcquireHook = func(AcquireRequest) { calls++ }
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+			args := []string{"--provider", "local-container", "--lease-output", filepath.Join(dir, "session.json")}
+			args = append(args, tc.args...)
+			args = append(args, "--", "true")
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(t.Context(), args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, tc.want) {
+				t.Fatalf("error=%v want exit 2 containing %q", err, tc.want)
+			}
+			if calls != 0 {
+				t.Fatalf("backend acquisition/resolution calls=%d, want 0", calls)
+			}
+		})
+	}
+}
+
+func TestRunCommandRejectsReadyPoolLeaseOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "without keep", want: "requires --keep"},
+		{name: "with keep", args: []string{"--keep"}, want: "--pool uses --pool-return for lifecycle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			acquireCalls := 0
+			runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+
+			args := []string{
+				"--provider", "local-container",
+				"--pool", "shared-linux",
+				"--pool-return", "drain",
+				"--lease-output", filepath.Join(dir, "session.json"),
+			}
+			args = append(args, tc.args...)
+			args = append(args, "--", "true")
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(t.Context(), args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, tc.want) {
+				t.Fatalf("error=%v, want exit 2 containing %q", err, tc.want)
+			}
+			if acquireCalls != 0 {
+				t.Fatalf("backend acquisition calls=%d, want 0", acquireCalls)
+			}
+		})
+	}
+}
+
+func TestRunCommandLocalContainerLeaseOutputSurvivesCommandAndSyncFailure(t *testing.T) {
+	for _, phase := range []string{"command", "sync"} {
+		t.Run(phase, func(t *testing.T) {
+			commandScript := "#!/bin/sh\ncase \"$1\" in *session-command-fail*) test -f \"$CRABBOX_SESSION_PATH\" || exit 98; exit 19 ;; esac\nexit 0\n"
+			dir, _ := setupLocalContainerRunSessionTest(t, commandScript)
+			path := filepath.Join(dir, "session.json")
+			t.Setenv("CRABBOX_SESSION_PATH", path)
+			releases := 0
+			runEnvProfileTestReleaseHook = func() error {
+				releases++
+				return nil
+			}
+			args := []string{
+				"--provider", "local-container",
+				"--keep",
+				"--no-hydrate",
+				"--lease-output", path,
+			}
+			if phase == "command" {
+				args = append(args, "--no-sync", "--", "session-command-fail")
+			} else {
+				rsyncPath := filepath.Join(dir, "rsync")
+				rsyncScript := "#!/bin/sh\ntest -f \"$CRABBOX_SESSION_PATH\" || exit 98\nexit 23\n"
+				if err := os.WriteFile(rsyncPath, []byte(rsyncScript), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "--", "true")
+			}
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), args); err == nil {
+				t.Fatalf("%s failure unexpectedly succeeded\nstdout=%s\nstderr=%s", phase, stdout.String(), stderr.String())
+			}
+			session, _, _ := readRunSessionHandleTest(t, path)
+			if session.LeaseID != localContainerRunSessionTestLeaseID || !session.Kept {
+				t.Fatalf("session after %s failure=%#v", phase, session)
+			}
+			if releases != 0 {
+				t.Fatalf("reported retained lease released %d time(s) after %s failure", releases, phase)
+			}
+		})
+	}
+}
+
+func TestRunCommandLocalContainerLeaseOutputClaimFailureReleasesFreshLease(t *testing.T) {
+	dir, _ := setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *session-should-not-run*) : > \"$CRABBOX_COMMAND_MARKER\" ;; esac\nexit 0\n")
+	path := filepath.Join(dir, "session.json")
+	marker := filepath.Join(dir, "command-ran")
+	t.Setenv("CRABBOX_COMMAND_MARKER", marker)
+	runEnvProfileTestAcquireHook = func(AcquireRequest) {
+		if err := claimLeaseForRepoProvider(
+			localContainerRunSessionTestLeaseID,
+			"session-slug",
+			"local-container",
+			filepath.Join(dir, "other-repo"),
+			time.Minute,
+			false,
+		); err != nil {
+			t.Errorf("install conflicting claim: %v", err)
+		}
+	}
+	releases := 0
+	runEnvProfileTestReleaseHook = func() error {
+		releases++
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", "local-container",
+		"--keep",
+		"--no-sync",
+		"--no-hydrate",
+		"--lease-output", path,
+		"--", "session-should-not-run",
+	})
+	if err == nil || !strings.Contains(err.Error(), "use --reclaim") {
+		t.Fatalf("error=%v want claim failure\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if releases != 1 {
+		t.Fatalf("fresh unreported lease released %d time(s), want 1", releases)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("lease output exists after claim failure: %v", statErr)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("user command ran after claim failure: %v", statErr)
+	}
+}
+
+func TestRunCommandLocalContainerLeaseOutputWriteFailureReleasesFreshLease(t *testing.T) {
+	dir, _ := setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *session-should-not-run*) : > \"$CRABBOX_COMMAND_MARKER\" ;; esac\nexit 0\n")
+	path := filepath.Join(dir, "session.json")
+	marker := filepath.Join(dir, "command-ran")
+	t.Setenv("CRABBOX_COMMAND_MARKER", marker)
+	runEnvProfileTestAcquireHook = func(AcquireRequest) {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Errorf("replace lease output with directory: %v", err)
+		}
+	}
+	releasedID := ""
+	runEnvProfileTestReleaseRequestHook = func(req ReleaseLeaseRequest) error {
+		releasedID = req.Lease.LeaseID
+		claim, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
+		if !set || !exists {
+			return errors.New("release did not receive the exact recorded claim")
+		}
+		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, nil)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", "local-container",
+		"--keep",
+		"--no-sync",
+		"--no-hydrate",
+		"--lease-output", path,
+		"--", "session-should-not-run",
+	})
+	if err == nil || !strings.Contains(err.Error(), "write "+path) {
+		t.Fatalf("error=%v want lease output write failure\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if releasedID != localContainerRunSessionTestLeaseID {
+		t.Fatalf("released lease=%q want %q", releasedID, localContainerRunSessionTestLeaseID)
+	}
+	if _, exists, readErr := readLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
+		t.Fatalf("claim residue exists=%t err=%v", exists, readErr)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("user command ran before output failure cleanup: %v", statErr)
 	}
 }
 
