@@ -3654,34 +3654,290 @@ func TestResolvePendingClaimDoesNotRequirePublishedSSHPort(t *testing.T) {
 	}
 }
 
-func TestTouchPreservesLocalContainerLabels(t *testing.T) {
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
-	bootstrapDir := filepath.Join(os.TempDir(), "crabbox-bootstrap-touchtest")
-	lease := core.LeaseTarget{
-		LeaseID: "cbx_touch",
-		Server: core.Server{
-			Labels: map[string]string{
-				"bootstrap_dir":  bootstrapDir,
-				"docker_socket":  "1",
-				"host_work_root": "/tmp/crabbox-local-container-work",
-				"work_root":      "/tmp/crabbox-local-container-work",
-				"ssh_user":       "runner",
-			},
-		},
-	}
-	server, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"})
+type localContainerTouchClock struct{ now time.Time }
+
+func (c localContainerTouchClock) Now() time.Time { return c.now }
+
+func TestTouchPersistsLocalContainerLifecycleForFreshResolve(t *testing.T) {
+	b, lease, initial, touchedAt := newLocalContainerTouchFixture(t, 30*time.Minute)
+	override := 45 * time.Minute
+	server, err := b.Touch(context.Background(), core.TouchRequest{
+		Lease:               lease,
+		State:               "running",
+		IdleTimeout:         override,
+		IdleTimeoutOverride: &override,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if server.Labels["work_root"] != lease.Server.Labels["work_root"] || server.Labels["host_work_root"] != lease.Server.Labels["host_work_root"] || server.Labels["docker_socket"] != "1" || server.Labels["ssh_user"] != "runner" {
-		t.Fatalf("provider labels not preserved: %#v", server.Labels)
+	committed, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists {
+		t.Fatalf("read committed touch exists=%t err=%v", exists, err)
 	}
-	if server.Labels["bootstrap_dir"] != bootstrapDir {
-		t.Fatalf("bootstrap_dir not preserved through touch: got %q want %q", server.Labels["bootstrap_dir"], bootstrapDir)
+	if committed.Revision == initial.Revision || committed.LastUsedAt != touchedAt.Format(time.RFC3339) || committed.IdleTimeoutSeconds != 2700 {
+		t.Fatalf("committed touch=%#v initial=%#v", committed, initial)
 	}
-	if server.Labels["state"] != "running" {
-		t.Fatalf("state not touched: %#v", server.Labels)
+	for _, key := range []string{"bootstrap_dir", "docker_socket", "host_work_root", "work_root", "ssh_user"} {
+		if server.Labels[key] != initial.Labels[key] || committed.Labels[key] != initial.Labels[key] {
+			t.Fatalf("provider label %s was not preserved: response=%q claim=%q want=%q", key, server.Labels[key], committed.Labels[key], initial.Labels[key])
+		}
 	}
+	if server.Labels["state"] != "running" || server.Labels["idle_timeout_secs"] != "2700" || server.Labels["last_touched_at"] != core.LeaseLabelTime(touchedAt) {
+		t.Fatalf("touch response labels=%#v", server.Labels)
+	}
+	if got := unixTouchLabelTime(t, committed.Labels["expires_at"]); !got.Equal(touchedAt.Add(override)) {
+		t.Fatalf("expires=%s want=%s", got, touchedAt.Add(override))
+	}
+
+	fresh := freshResolveLocalContainerTouchClaim(t, committed)
+	if fresh.Server.Labels["last_touched_at"] != server.Labels["last_touched_at"] || fresh.Server.Labels["expires_at"] != server.Labels["expires_at"] || fresh.Server.Labels["idle_timeout_secs"] != "2700" {
+		t.Fatalf("fresh resolve=%#v touched=%#v", fresh.Server.Labels, server.Labels)
+	}
+}
+
+func TestTouchWithoutOverridePreservesLocalContainerTimeout(t *testing.T) {
+	b, lease, _, touchedAt := newLocalContainerTouchFixture(t, 37*time.Minute)
+	server, err := b.Touch(context.Background(), core.TouchRequest{
+		Lease: lease, State: "ready", IdleTimeout: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists {
+		t.Fatalf("read committed touch exists=%t err=%v", exists, err)
+	}
+	if committed.IdleTimeoutSeconds != 2220 || server.Labels["idle_timeout_secs"] != "2220" {
+		t.Fatalf("omitted override replaced timeout: response=%q claim=%d", server.Labels["idle_timeout_secs"], committed.IdleTimeoutSeconds)
+	}
+	if got := unixTouchLabelTime(t, committed.Labels["expires_at"]); !got.Equal(touchedAt.Add(37 * time.Minute)) {
+		t.Fatalf("expires=%s want=%s", got, touchedAt.Add(37*time.Minute))
+	}
+}
+
+func TestAuthorizeStatusTouchClaimHydratesCapturedRuntimeScope(t *testing.T) {
+	b, lease, initial, _ := newLocalContainerTouchFixture(t, 30*time.Minute)
+	b.cfg.LocalContainer.CheckpointMetadata = nil
+	if err := b.AuthorizeStatusTouchClaim(context.Background(), lease, initial); err != nil {
+		t.Fatalf("authorization error=%v", err)
+	}
+	if !hasCompleteCapturedRuntimeScope(b.cfg.LocalContainer.CheckpointMetadata) {
+		t.Fatalf("authorizer did not hydrate captured runtime scope: %#v", b.cfg.LocalContainer.CheckpointMetadata)
+	}
+	after, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || !reflect.DeepEqual(after, initial) {
+		t.Fatalf("authorization mutated claim: initial=%#v after=%#v exists=%t err=%v", initial, after, exists, err)
+	}
+}
+
+func TestAuthorizeStatusTouchClaimFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*backend, *core.LeaseTarget, *core.LeaseClaim)
+	}{
+		{name: "missing resolved snapshot", mutate: func(_ *backend, lease *core.LeaseTarget, _ *core.LeaseClaim) {
+			lease.Server = core.Server{Provider: providerName, CloudID: "touch-container"}
+		}},
+		{name: "wrong provider", mutate: func(_ *backend, lease *core.LeaseTarget, claim *core.LeaseClaim) {
+			claim.Provider = "aws"
+			core.SetServerLeaseClaimSnapshot(&lease.Server, *claim, true)
+		}},
+		{name: "wrong resource", mutate: func(_ *backend, lease *core.LeaseTarget, _ *core.LeaseClaim) {
+			lease.Server.CloudID = "replacement-container"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, lease, initial, _ := newLocalContainerTouchFixture(t, 30*time.Minute)
+			candidate := initial
+			test.mutate(b, &lease, &candidate)
+			if err := b.AuthorizeStatusTouchClaim(context.Background(), lease, candidate); err == nil {
+				t.Fatal("authorization unexpectedly succeeded")
+			}
+			after, exists, readErr := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+			if readErr != nil || !exists || !reflect.DeepEqual(after, initial) {
+				t.Fatalf("authorization mutated claim: initial=%#v after=%#v exists=%t err=%v", initial, after, exists, readErr)
+			}
+		})
+	}
+}
+
+func TestAuthorizeStatusTouchClaimRejectsPersistedScopeMetadataMismatch(t *testing.T) {
+	b, lease, initial, _ := newLocalContainerTouchFixture(t, 30*time.Minute)
+	labels := cloneLabels(initial.Labels)
+	for key, value := range checkpointScopeMetadata(checkpointScope{
+		Runtime: "docker", Context: "other", Endpoint: "unix:///other.sock", DaemonID: "daemon-other",
+	}) {
+		labels[key] = value
+	}
+	mismatched, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, initial, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, mismatched, true)
+	b.cfg.LocalContainer.CheckpointMetadata = nil
+
+	if err := b.AuthorizeStatusTouchClaim(context.Background(), lease, mismatched); err == nil {
+		t.Fatal("persisted scope/metadata mismatch unexpectedly authorized")
+	}
+	after, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || !reflect.DeepEqual(after, mismatched) {
+		t.Fatalf("rejected authorization mutated claim: mismatched=%#v after=%#v exists=%t err=%v", mismatched, after, exists, err)
+	}
+}
+
+func TestTouchRejectsInvalidLocalContainerOwnershipWithoutMutation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*backend, *core.LeaseTarget, *core.LeaseClaim)
+	}{
+		{name: "missing snapshot", mutate: func(_ *backend, lease *core.LeaseTarget, _ *core.LeaseClaim) {
+			lease.Server = core.Server{Provider: providerName, CloudID: "touch-container"}
+		}},
+		{name: "wrong provider", mutate: func(_ *backend, lease *core.LeaseTarget, claim *core.LeaseClaim) {
+			claim.Provider = "aws"
+			core.SetServerLeaseClaimSnapshot(&lease.Server, *claim, true)
+		}},
+		{name: "wrong runtime context", mutate: func(b *backend, _ *core.LeaseTarget, _ *core.LeaseClaim) {
+			scope := checkpointScope{Runtime: "docker", Context: "other", Endpoint: "unix:///other.sock", DaemonID: "daemon-other"}
+			b.cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(scope)
+		}},
+		{name: "wrong container", mutate: func(_ *backend, lease *core.LeaseTarget, _ *core.LeaseClaim) {
+			lease.Server.CloudID = "replacement-container"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, lease, initial, _ := newLocalContainerTouchFixture(t, 30*time.Minute)
+			candidate := initial
+			test.mutate(b, &lease, &candidate)
+			if _, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "ready"}); err == nil {
+				t.Fatal("touch unexpectedly succeeded")
+			}
+			after, exists, readErr := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+			if readErr != nil || !exists || !reflect.DeepEqual(after, initial) {
+				t.Fatalf("rejected touch mutated claim: initial=%#v after=%#v exists=%t err=%v", initial, after, exists, readErr)
+			}
+		})
+	}
+}
+
+func TestTouchDoesNotRecreateMissingLocalContainerClaim(t *testing.T) {
+	b, lease, _, _ := newLocalContainerTouchFixture(t, 30*time.Minute)
+	core.RemoveLeaseClaim(lease.LeaseID)
+	if _, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "ready"}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("touch error=%v want claim changed", err)
+	}
+	if claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+		t.Fatalf("missing claim was recreated: claim=%#v exists=%t err=%v", claim, exists, err)
+	}
+}
+
+func TestTouchRejectsLocalContainerClaimReplacement(t *testing.T) {
+	b, lease, initial, _ := newLocalContainerTouchFixture(t, 30*time.Minute)
+	labels := cloneLabels(initial.Labels)
+	labels["replacement"] = "true"
+	replacement, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, initial, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "ready"}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("touch error=%v want claim changed", err)
+	}
+	after, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || !reflect.DeepEqual(after, replacement) {
+		t.Fatalf("replacement was overwritten: replacement=%#v after=%#v exists=%t err=%v", replacement, after, exists, err)
+	}
+}
+
+func TestTouchRejectsStaleResolvedLocalContainerSnapshot(t *testing.T) {
+	b, lease, _, _ := newLocalContainerTouchFixture(t, 30*time.Minute)
+	if _, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	committed, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists {
+		t.Fatalf("read first touch exists=%t err=%v", exists, err)
+	}
+	if _, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "ready"}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("stale touch error=%v want claim changed", err)
+	}
+	after, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || !reflect.DeepEqual(after, committed) {
+		t.Fatalf("stale snapshot changed claim: committed=%#v after=%#v exists=%t err=%v", committed, after, exists, err)
+	}
+}
+
+func newLocalContainerTouchFixture(t *testing.T, idleTimeout time.Duration) (*backend, core.LeaseTarget, core.LeaseClaim, time.Time) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_touch"
+	containerID := "touch-container"
+	createdAt := time.Date(2026, 8, 17, 8, 0, 0, 0, time.UTC)
+	touchedAt := createdAt.Add(2 * time.Minute)
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.IdleTimeout = idleTimeout
+	labels := core.DirectLeaseLabels(cfg, leaseID, "touch", providerName, "", true, createdAt)
+	labels["bootstrap_dir"] = filepath.Join(os.TempDir(), "crabbox-bootstrap-touchtest")
+	labels["docker_socket"] = "1"
+	labels["host_work_root"] = "/tmp/crabbox-local-container-work"
+	labels["work_root"] = "/tmp/crabbox-local-container-work"
+	labels["ssh_user"] = "runner"
+	labels = testCapturedScopeLabels(labels)
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+		leaseID, "touch", providerName, "runtime:docker/context:default", "", t.TempDir(), idleTimeout, false,
+		core.Server{Provider: providerName, CloudID: containerID, Status: "ready", Labels: labels}, core.SSHTarget{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("read touch fixture claim exists=%t err=%v", exists, err)
+	}
+	server := core.Server{Provider: providerName, CloudID: containerID, Status: "ready", Labels: publicLocalContainerClaimLabels(claim.Labels)}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	lease := core.LeaseTarget{LeaseID: leaseID, Server: server}
+	b := testBackend(&recordingRunner{})
+	b.cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(checkpointScope{
+		Runtime: "docker", Context: "default", Endpoint: "unix:///tmp/docker-test.sock", DaemonID: "daemon-test",
+	})
+	b.rt.Clock = localContainerTouchClock{now: touchedAt}
+	return b, lease, claim, touchedAt
+}
+
+func freshResolveLocalContainerTouchClaim(t *testing.T, claim core.LeaseClaim) core.LeaseTarget {
+	t.Helper()
+	container := inspectContainer{
+		ID: claim.CloudID, Name: "/crabbox-touch",
+		Config: inspectConfig{Image: "ubuntu:24.04", Labels: cloneLabels(claim.Labels)},
+		State:  inspectState{Status: "running", Running: true},
+		NetworkSettings: inspectNetworking{Ports: map[string][]inspectPort{
+			sshPort + "/tcp": {{HostIP: "127.0.0.1", HostPort: "49153"}},
+		}},
+	}
+	inspectJSON, err := json.Marshal([]inspectContainer{container})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: claim.CloudID + "\n"},
+		commandKey([]string{"inspect", claim.CloudID}): {Stdout: string(inspectJSON)},
+	}}
+	addDefaultLocalContainerScopeResponses(runner)
+	fresh := testBackend(runner)
+	lease, err := fresh.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return lease
+}
+
+func unixTouchLabelTime(t *testing.T, value string) time.Time {
+	t.Helper()
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		t.Fatalf("parse timestamp label %q: %v", value, err)
+	}
+	return time.Unix(seconds, 0).UTC()
 }
 
 func TestHostLeaseWorkRootRequiresTrustedLabels(t *testing.T) {

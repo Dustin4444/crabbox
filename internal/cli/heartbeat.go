@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -90,7 +91,7 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	if statusTerminalState(state) {
 		return exit(5, "lease %s is in terminal state %s", *id, state)
 	}
-	claimed, err := statusLeaseHasExactClaim(backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
+	claimed, err := heartbeatLeaseHasExactClaim(ctx, backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
 	if err != nil {
 		return err
 	}
@@ -101,14 +102,16 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	if !idleTimeoutSet {
 		if current, ok := directLeaseIdleTimeout(lease.Server.Labels); ok {
 			cfg.IdleTimeout = current
-			backend, err = loadBackend(cfg, runtimeForApp(a))
-			if err != nil {
-				return err
-			}
-			var supportsTouch bool
-			sshBackend, supportsTouch = backend.(SSHLeaseBackend)
-			if !supportsTouch {
-				return exit(2, "provider=%s does not support lease heartbeat", backend.Spec().Name)
+			if _, authorizes := backend.(StatusTouchClaimAuthorizer); !authorizes {
+				backend, err = loadBackend(cfg, runtimeForApp(a))
+				if err != nil {
+					return err
+				}
+				var supportsTouch bool
+				sshBackend, supportsTouch = backend.(SSHLeaseBackend)
+				if !supportsTouch {
+					return exit(2, "provider=%s does not support lease heartbeat", backend.Spec().Name)
+				}
 			}
 		}
 	}
@@ -140,6 +143,34 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 		return writeLeaseHeartbeatView(a.Stdout, heartbeatViewFromCoordinatorLease(*registeredLease), *jsonOut)
 	}
 	return writeLeaseHeartbeatView(a.Stdout, heartbeatViewFromServer(lease.LeaseID, touched), *jsonOut)
+}
+
+func heartbeatLeaseHasExactClaim(ctx context.Context, backend Backend, lease LeaseTarget, fallbackProvider, providerScope string) (bool, error) {
+	provider := canonicalClaimProvider(blank(lease.Server.Provider, fallbackProvider))
+	if lease.LeaseID == "" || provider == "" {
+		return false, nil
+	}
+	claim, claimed, exact, err := resolveLeaseClaimForProviderWithExact(lease.LeaseID, provider)
+	if err != nil {
+		return false, fmt.Errorf("read exact %s lease claim: %w", provider, err)
+	}
+	resourceID := strings.TrimSpace(lease.Server.CloudID)
+	if !claimed || !exact || resourceID == "" || claim.CloudID != resourceID {
+		return false, nil
+	}
+	if authorizer, ok := backend.(StatusTouchClaimAuthorizer); ok {
+		if err := authorizer.AuthorizeStatusTouchClaim(ctx, lease, claim); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if claim.ProviderScope != providerScope {
+		return false, nil
+	}
+	if validator, ok := backend.(StatusTouchClaimValidator); ok && !validator.StatusTouchClaimMatches(lease, claim) {
+		return false, nil
+	}
+	return true, nil
 }
 
 func directLeaseIdleTimeout(labels map[string]string) (time.Duration, bool) {

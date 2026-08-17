@@ -148,6 +148,28 @@ type CleanupBackend interface {
 }
 ```
 
+Exact heartbeat claim authorization may be provider-owned when claim scope or
+identity comes from live provider state:
+
+```go
+type StatusTouchClaimAuthorizer interface {
+	AuthorizeStatusTouchClaim(ctx context.Context, lease LeaseTarget, claim LeaseClaim) error
+}
+```
+
+Core first requires the exact canonical provider claim and an exact, non-empty
+live resource ID match. If the backend implements this interface, core then
+delegates the complete remaining authorization decision to it on every call;
+only a nil error authorizes the touch. An equal-looking config-derived scope
+does not bypass the hook. The authorizer may hydrate in-memory provider context
+from the exact claim, but it must not mutate durable claim state or provider
+resources. The subsequent `Touch` must revalidate ownership and durably
+compare-and-swap the resolved claim snapshot so a disappeared or replaced claim
+cannot be recreated or overwritten.
+
+Backends without this interface use the generic exact config-scope comparison,
+followed by the additive `StatusTouchClaimValidator` check when implemented.
+
 Pause and resume are optional:
 
 ```go

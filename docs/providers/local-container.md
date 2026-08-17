@@ -245,6 +245,14 @@ metadata updates.
    `crabbox stop --provider docker <lease-or-slug>` removes the stale claim and
    stored SSH key.
 
+`crabbox heartbeat` durably advances the exact claim's last-touch and expiry
+timestamps. An explicit `--idle-timeout` replacement is stored in that claim;
+omitting the flag preserves the stored timeout across later CLI processes.
+Heartbeat authorization is fenced to the Resolve-carried exact claim, captured
+runtime/context identity, and exact container ID. Missing, stale, replaced, or
+scope-mismatched claims are rejected before durable mutation and are never
+recreated by a touch.
+
 When `warmup` or `run --keep` creates the container but SSH readiness is
 canceled, fails, or times out, Crabbox keeps the exact pending claim, container,
 key, and bootstrap directory. The failed command prints copyable, runtime-scoped

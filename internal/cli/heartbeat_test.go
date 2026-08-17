@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -195,7 +196,7 @@ func configureHeartbeatCoordinatorTest(t *testing.T, serverURL string) {
 
 const heartbeatDirectProviderName = "heartbeat-direct-test"
 
-var heartbeatDirectBackendForTest *heartbeatDirectBackend
+var heartbeatDirectBackendForTest Backend
 
 func init() {
 	RegisterProvider(heartbeatDirectProvider{})
@@ -256,6 +257,20 @@ func (*heartbeatDirectBackend) ReleaseLease(context.Context, ReleaseLeaseRequest
 	return nil
 }
 
+type heartbeatAuthorizingBackend struct {
+	*heartbeatDirectBackend
+	authorize func(context.Context, LeaseTarget, LeaseClaim) error
+	calls     int
+}
+
+func (b *heartbeatAuthorizingBackend) AuthorizeStatusTouchClaim(ctx context.Context, lease LeaseTarget, claim LeaseClaim) error {
+	b.calls++
+	if b.authorize == nil {
+		return errors.New("status touch claim is not authorized")
+	}
+	return b.authorize(ctx, lease, claim)
+}
+
 func TestHeartbeatDirectProviderUsesTouchForExactClaim(t *testing.T) {
 	backend := configureHeartbeatDirectTest(t, true)
 	var stdout bytes.Buffer
@@ -298,6 +313,163 @@ func TestHeartbeatDirectProviderRejectsClaimlessLease(t *testing.T) {
 	}
 	if len(backend.touches) != 0 {
 		t.Fatalf("claimless heartbeat touched lease: %#v", backend.touches)
+	}
+}
+
+func TestHeartbeatStatusTouchClaimAuthorization(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		claim            bool
+		claimProvider    string
+		claimScope       string
+		claimResource    string
+		resolvedResource string
+		authorize        func(context.Context, LeaseTarget, LeaseClaim) error
+		wantSuccess      bool
+		wantAuthCalls    int
+	}{
+		{
+			name: "matching non-empty dynamic scope", claim: true,
+			claimProvider: heartbeatDirectProviderName, claimScope: "runtime:docker/context:desktop-linux",
+			claimResource: "direct-resource", resolvedResource: "direct-resource",
+			authorize:   func(context.Context, LeaseTarget, LeaseClaim) error { return nil },
+			wantSuccess: true, wantAuthCalls: 1,
+		},
+		{
+			name: "equal static scope still delegates and rejects", claim: true,
+			claimProvider: heartbeatDirectProviderName, claimScope: "",
+			claimResource: "direct-resource", resolvedResource: "direct-resource",
+			authorize:     func(context.Context, LeaseTarget, LeaseClaim) error { return errors.New("equal scope rejected") },
+			wantAuthCalls: 1,
+		},
+		{
+			name: "missing claim", resolvedResource: "direct-resource",
+		},
+		{
+			name: "wrong provider", claim: true,
+			claimProvider: "aws", claimScope: "runtime:docker/context:desktop-linux",
+			claimResource: "direct-resource", resolvedResource: "direct-resource",
+		},
+		{
+			name: "wrong resource", claim: true,
+			claimProvider: heartbeatDirectProviderName, claimScope: "runtime:docker/context:desktop-linux",
+			claimResource: "replacement-resource", resolvedResource: "direct-resource",
+		},
+		{
+			name: "provider rejects dynamic scope", claim: true,
+			claimProvider: heartbeatDirectProviderName, claimScope: "runtime:docker/context:other",
+			claimResource: "direct-resource", resolvedResource: "direct-resource",
+			authorize:     func(context.Context, LeaseTarget, LeaseClaim) error { return errors.New("dynamic scope mismatch") },
+			wantAuthCalls: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := configureHeartbeatDirectTest(t, false)
+			base.lease.Server.CloudID = test.resolvedResource
+			backend := &heartbeatAuthorizingBackend{heartbeatDirectBackend: base, authorize: test.authorize}
+			heartbeatDirectBackendForTest = backend
+			if test.claim {
+				if err := claimLeaseForRepoProviderScopePondEndpoint(
+					base.lease.LeaseID,
+					serverSlug(base.lease.Server),
+					test.claimProvider,
+					test.claimScope,
+					"",
+					"/repo",
+					30*time.Minute,
+					false,
+					Server{Provider: test.claimProvider, CloudID: test.claimResource},
+					SSHTarget{},
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, beforeExists, err := readLeaseClaimWithPresence(base.lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).heartbeat(context.Background(), []string{
+				"--provider", heartbeatDirectProviderName, "--id", base.lease.LeaseID,
+			})
+			if test.wantSuccess && err != nil {
+				t.Fatalf("heartbeat error=%v", err)
+			}
+			if !test.wantSuccess && err == nil {
+				t.Fatal("heartbeat unexpectedly succeeded")
+			}
+			if backend.calls != test.wantAuthCalls {
+				t.Fatalf("authorization calls=%d want=%d", backend.calls, test.wantAuthCalls)
+			}
+			wantTouches := 0
+			if test.wantSuccess {
+				wantTouches = 1
+			}
+			if len(base.touches) != wantTouches {
+				t.Fatalf("touch calls=%d want=%d", len(base.touches), wantTouches)
+			}
+			after, afterExists, readErr := readLeaseClaimWithPresence(base.lease.LeaseID)
+			if readErr != nil || beforeExists != afterExists || !reflect.DeepEqual(before, after) {
+				t.Fatalf("heartbeat gate mutated claim: before=%#v exists=%t after=%#v exists=%t err=%v", before, beforeExists, after, afterExists, readErr)
+			}
+		})
+	}
+}
+
+func TestHeartbeatGenericStaticClaimValidation(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		claimScope  string
+		wantSuccess bool
+	}{
+		{name: "matching static scope", claimScope: "", wantSuccess: true},
+		{name: "mismatched static scope", claimScope: "region:other"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := configureHeartbeatDirectTest(t, false)
+			if _, ok := any(backend).(StatusTouchClaimAuthorizer); ok {
+				t.Fatal("generic static backend unexpectedly implements StatusTouchClaimAuthorizer")
+			}
+			if err := claimLeaseForRepoProviderScopePondEndpoint(
+				backend.lease.LeaseID,
+				serverSlug(backend.lease.Server),
+				heartbeatDirectProviderName,
+				test.claimScope,
+				"",
+				"/repo",
+				30*time.Minute,
+				false,
+				backend.lease.Server,
+				SSHTarget{},
+			); err != nil {
+				t.Fatal(err)
+			}
+			before, exists, err := readLeaseClaimWithPresence(backend.lease.LeaseID)
+			if err != nil || !exists {
+				t.Fatalf("read claim exists=%t err=%v", exists, err)
+			}
+
+			err = (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).heartbeat(context.Background(), []string{
+				"--provider", heartbeatDirectProviderName, "--id", backend.lease.LeaseID,
+			})
+			if test.wantSuccess && err != nil {
+				t.Fatalf("heartbeat error=%v", err)
+			}
+			if !test.wantSuccess && err == nil {
+				t.Fatal("heartbeat unexpectedly succeeded")
+			}
+			wantTouches := 0
+			if test.wantSuccess {
+				wantTouches = 1
+			}
+			if len(backend.touches) != wantTouches {
+				t.Fatalf("touch calls=%d want=%d", len(backend.touches), wantTouches)
+			}
+			after, afterExists, readErr := readLeaseClaimWithPresence(backend.lease.LeaseID)
+			if readErr != nil || !afterExists || !reflect.DeepEqual(after, before) {
+				t.Fatalf("static authorization mutated claim: before=%#v after=%#v exists=%t err=%v", before, after, afterExists, readErr)
+			}
+		})
 	}
 }
 

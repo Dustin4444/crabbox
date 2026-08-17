@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -51,6 +52,7 @@ type backend struct {
 }
 
 var _ core.ExclusiveOneShotAcquireBackend = (*backend)(nil)
+var _ core.StatusTouchClaimAuthorizer = (*backend)(nil)
 
 type inspectContainer struct {
 	ID              string            `json:"Id"`
@@ -1405,20 +1407,56 @@ func (b *backend) cleanupContainerSidecars(leaseID string, labels map[string]str
 	return nil
 }
 
-func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
-	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
+func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	expected, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !set || !exists {
+		return localContainerOwnershipError(lease.LeaseID, lease.Server.CloudID)
 	}
-	original := server.Labels
-	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
+	if !reflect.DeepEqual(expected, claim) {
+		return core.Exit(2, "lease %s claim changed; retry", lease.LeaseID)
+	}
+	applied, err := b.applyCheckpointScopeLabels(ctx, claim.Labels)
+	if err != nil || !applied {
+		return localContainerOwnershipError(lease.LeaseID, lease.Server.CloudID)
+	}
+	return b.validateExactLocalContainerClaim(ctx, claim, lease.LeaseID, lease.Server.CloudID)
+}
+
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
+	if !set || !exists {
+		return core.Server{}, localContainerOwnershipError(req.Lease.LeaseID, req.Lease.Server.CloudID)
+	}
+	if err := b.validateExactLocalContainerClaim(ctx, expected, req.Lease.LeaseID, req.Lease.Server.CloudID); err != nil {
+		return core.Server{}, err
+	}
+	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
+		return core.Server{}, core.Exit(2, "local-container lease %s idle timeout override must be positive", req.Lease.LeaseID)
+	}
+
+	now := time.Now().UTC()
+	if b.rt.Clock != nil {
+		now = b.rt.Clock.Now().UTC()
+	}
+	cfg := b.configForRun()
+	if expected.IdleTimeoutSeconds > 0 {
+		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+	}
+	labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(expected.Labels, cfg, req.State, now, req.IdleTimeoutOverride)
 	preservedKeys := []string{"bootstrap_dir", "container_id", "docker_socket", "host_work_root", "image", "runtime", "runtime_context", "ssh_port", "ssh_user", "work_root"}
 	preservedKeys = append(preservedKeys, checkpointScopeMetadataKeys...)
 	for _, key := range preservedKeys {
-		if value := strings.TrimSpace(original[key]); value != "" {
-			server.Labels[key] = value
+		if value := strings.TrimSpace(expected.Labels[key]); value != "" {
+			labels[key] = value
 		}
 	}
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	if err != nil {
+		return core.Server{}, err
+	}
+	server := mergeLocalContainerClaim(req.Lease.Server, updated)
+	server.Labels = publicLocalContainerClaimLabels(server.Labels)
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 

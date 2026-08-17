@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Made local-container heartbeats validate exact dynamic runtime claims and durably persist touches and timeout replacements without weakening claim ownership fences. Thanks @coygeek. https://github.com/openclaw/crabbox/issues/1367
 - Made AWS image deletion resume from owner-level durable snapshot claims after AMI deregistration or catalog cleanup failures, preventing stale ordinary and capability-variant records from remaining selectable.
 - Made static SSH heartbeats persist touched timestamps and explicit idle-timeout replacements across fresh CLI processes, while omitted overrides preserve the stored timeout. Thanks @coygeek.
 - Bounded Lambda MicroVM runner response-header waits without limiting uploads or streamed executions, while preserving injected HTTP clients. Thanks @SebTardif.

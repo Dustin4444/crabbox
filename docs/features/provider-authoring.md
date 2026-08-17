@@ -338,6 +338,18 @@ claim under its claim lock after revalidating provider, scope, resource, and
 host identity. Updating only the returned in-memory `Server` makes heartbeat
 success disappear in a fresh process and is not sufficient.
 
+Providers whose exact claim scope is derived from live runtime state rather
+than static config may additionally implement
+`StatusTouchClaimAuthorizer`. After core resolves the exact canonical provider
+claim and matches its non-empty resource identity, this hook fully owns claim
+authorization on every call, even when the persisted scope happens to equal
+the config-derived scope. The hook must validate the resolved claim snapshot
+and live provider scope without mutating durable claim state or provider
+resources. `Touch` must still compare-and-swap that snapshot so a missing or
+replaced claim cannot be recreated or overwritten. Providers without this
+capability retain the static config-scope check followed by the additive
+`StatusTouchClaimValidator` check.
+
 `ReleaseLease` is called when a lease ends or expires. Make it idempotent; treat
 "not found" as success. Remove local claims and the per-lease key directory
 after the provider release succeeds.

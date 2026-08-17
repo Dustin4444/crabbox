@@ -34,12 +34,20 @@ claim that matches the provider scope and live resource identity, and it
 rejects terminal leases before touching them. Providers without lease-touch
 support fail with `provider=<name> does not support lease heartbeat`.
 
+For providers such as `local-container`, whose scope includes a dynamically
+resolved runtime and context, the exact persisted claim supplies that scope.
+Crabbox validates the live runtime, context, and resource against the resolved
+claim before committing the touch; a missing, stale, replaced, or mismatched
+claim is rejected without recreating or changing it.
+
 ## Idle timeout
 
 `--idle-timeout <duration>` optionally replaces the lease's idle window while
 refreshing it. The value must be positive. Omitting the flag preserves the
 current direct-provider timeout when it is available in lease metadata and
-omits the coordinator heartbeat override.
+omits the coordinator heartbeat override. Exact local-container claims store
+both explicit replacements and touched timestamps durably, so a later CLI
+process observes the same timeout and refreshed expiry.
 
 ## Output
 
