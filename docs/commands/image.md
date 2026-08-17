@@ -14,6 +14,7 @@ crabbox image promote ami-1234567890abcdef0 --target macos --region us-east-1 --
 crabbox image promote snapshot-devtools --provider azure --target linux --region westeurope
 crabbox image fsr-status ami-1234567890abcdef0 --region us-west-2 --fsr-az us-west-2a
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
+crabbox image delete ami-external --catalog-only
 crabbox image delete my-managed-image --provider azure --region westeurope
 crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
 crabbox image delete 123456789 --provider hetzner --region fsn1
@@ -118,9 +119,12 @@ Flags:
 --os-version <version>   numeric OS version present in the image
 --sdk <name=version>     SDK present in the image (repeatable)
 --runtime <name=version> runtime present in the image (repeatable)
+--variant-sdk <name=version>     SDK that explicitly activates a catalog-only image (repeatable)
+--variant-runtime <name=version> runtime that explicitly activates a catalog-only image (repeatable)
 --browser                image includes browser support
 --webview2               image includes Microsoft WebView2
 --desktop                image includes desktop support
+--catalog-only           publish an AWS capability variant without changing the default image
 --fast-snapshot-restore  enable AWS Fast Snapshot Restore for the backing snapshots
 --fsr-az <az>            availability zone for Fast Snapshot Restore (repeatable)
 --json                   print the promoted image record as JSON
@@ -143,6 +147,17 @@ Capability declarations make the AMI eligible for capability-aware selection.
 Versions use numeric dot notation, for example `--os-version 15.5`,
 `--sdk xcode=16.4`, or `--runtime node=24.2`. Omitted capabilities remain
 unknown and do not satisfy an explicit image requirement.
+
+AWS catalog-only images keep specialized variants out of the scoped default.
+Each promotion requires at least one `--variant-sdk` or `--variant-runtime`;
+the variant flag both declares the capability and records it as an activation
+selector. Ordinary `--sdk` and `--runtime` flags remain capability inventory
+only. For example, an image promoted with `--catalog-only --variant-sdk
+toolkit=2.0 --runtime node=24` is activated by an exactly matching `--image-sdk
+toolkit=2.0` request, not by a Node-only request. After activation, every
+requested capability must still match. Catalog-only promotion uses the
+dedicated `POST /v1/images/<id>/promote-catalog` route and fails closed against
+older coordinators.
 
 Add `--fast-snapshot-restore` plus one or more `--fsr-az` values when the
 promoted image backs hot lanes that need immediate EBS snapshot reads:
@@ -227,6 +242,7 @@ Delete a Crabbox-created provider image.
 
 ```sh
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
+crabbox image delete ami-external --catalog-only
 crabbox image delete my-managed-image --provider azure --region westeurope
 crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
 crabbox image delete 123456789 --provider hetzner --region fsn1
@@ -238,11 +254,30 @@ Flags:
 --provider <name>   image provider: aws, azure, gcp, or hetzner (default aws)
 --region <name>     region, location, or zone containing the image
 --project <name>    GCP project containing the image
+--catalog-only      unpublish every AWS catalog-only role without deleting the AMI
 ```
 
 AWS deletion deregisters the AMI and then deletes the EBS snapshots referenced by
 its block-device mappings. Azure deletion removes the managed image or disk
 snapshot. GCP deletion removes the machine image or disk snapshot.
+
+For an externally sourced AWS variant, use `--catalog-only` to remove every
+catalog-only role for the AMI while leaving the provider-owned AMI untouched.
+The command uses the dedicated `DELETE /v1/images/<id>/promote-catalog` route,
+never falls back to provider deletion, and fails with an upgrade error when the
+coordinator does not support safe retirement.
+
+Because AWS AMI IDs are regional, `--catalog-only --region <region>` retires
+only variant roles in that Region. Omitting `--region` is the explicit
+convenience form that retires every regional variant role with the same AMI ID.
+Its text output is:
+
+```text
+retired catalog-only image=ami-external provider=aws variants=1
+```
+
+Without `--catalog-only`, `image delete` keeps the existing provider deletion
+and ownership checks.
 
 Hetzner deletion runs directly without coordinator admin auth. It rejects
 `--project`, requires any supplied `--region` to match the recorded source

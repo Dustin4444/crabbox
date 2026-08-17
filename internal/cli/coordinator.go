@@ -286,6 +286,8 @@ type CoordinatorImage struct {
 	PromotedAt           string                           `json:"promotedAt,omitempty"`
 	FastSnapshotRestores []CoordinatorFastSnapshotRestore `json:"fastSnapshotRestores,omitempty"`
 	Capabilities         *imageCapabilities               `json:"capabilities,omitempty"`
+	CatalogOnly          bool                             `json:"catalogOnly,omitempty"`
+	VariantSelectors     *imageVariantSelectors           `json:"variantSelectors,omitempty"`
 }
 
 type CoordinatorFastSnapshotRestore struct {
@@ -357,6 +359,13 @@ type CoordinatorImageRef struct {
 	FastSnapshotRestore    bool
 	FastSnapshotRestoreAZs []string
 	Capabilities           imageCapabilities
+	CatalogOnly            bool
+	VariantSelectors       imageVariantSelectors
+}
+
+type CoordinatorCatalogImageRetirement struct {
+	ImageID string `json:"imageID"`
+	Retired int    `json:"retired"`
 }
 
 type CoordinatorGitHubLoginStart struct {
@@ -1822,8 +1831,30 @@ func (c *CoordinatorClient) PromoteImage(ctx context.Context, imageID string, re
 	var res struct {
 		Image CoordinatorImage `json:"image"`
 	}
-	err := c.do(ctx, http.MethodPost, imagePath(imageID, "promote", refs...), map[string]any{}, &res)
-	return res.Image, err
+	action := "promote"
+	if len(refs) > 0 && refs[0].CatalogOnly {
+		action = "promote-catalog"
+	}
+	req := map[string]any{}
+	if action == "promote-catalog" {
+		req["variantSelectors"] = refs[0].VariantSelectors
+	}
+	err := c.do(ctx, http.MethodPost, imagePath(imageID, action, refs...), req, &res)
+	if err != nil {
+		if action == "promote-catalog" && isCoordinatorNotFound(err) {
+			return CoordinatorImage{}, fmt.Errorf("coordinator does not support catalog-only image promotion; upgrade the coordinator before publishing variant images (%w)", err)
+		}
+		return CoordinatorImage{}, err
+	}
+	if action == "promote-catalog" {
+		if !res.Image.CatalogOnly {
+			return CoordinatorImage{}, fmt.Errorf("coordinator did not confirm catalog-only promotion for %s", imageID)
+		}
+		if res.Image.VariantSelectors == nil || !imageVariantSelectorsEqual(*res.Image.VariantSelectors, refs[0].VariantSelectors) {
+			return CoordinatorImage{}, fmt.Errorf("coordinator did not confirm variant selectors for %s", imageID)
+		}
+	}
+	return res.Image, nil
 }
 
 func (c *CoordinatorClient) FastSnapshotRestoreStatus(ctx context.Context, imageID string, refs ...CoordinatorImageRef) (CoordinatorImage, error) {
@@ -1840,6 +1871,18 @@ func (c *CoordinatorClient) FastSnapshotRestoreStatus(ctx context.Context, image
 
 func (c *CoordinatorClient) DeleteImage(ctx context.Context, imageID string, refs ...CoordinatorImageRef) error {
 	return c.do(ctx, http.MethodDelete, imagePath(imageID, "", refs...), nil, nil)
+}
+
+func (c *CoordinatorClient) RetireCatalogImage(ctx context.Context, imageID string, refs ...CoordinatorImageRef) (CoordinatorCatalogImageRetirement, error) {
+	var res CoordinatorCatalogImageRetirement
+	err := c.do(ctx, http.MethodDelete, imagePath(imageID, "promote-catalog", refs...), nil, &res)
+	if err != nil {
+		if isCoordinatorNotFound(err) {
+			return CoordinatorCatalogImageRetirement{}, fmt.Errorf("coordinator does not support catalog-only image retirement; upgrade the coordinator before unpublishing variant images (%w)", err)
+		}
+		return CoordinatorCatalogImageRetirement{}, err
+	}
+	return res, nil
 }
 
 func imagePath(imageID, action string, refs ...CoordinatorImageRef) string {
