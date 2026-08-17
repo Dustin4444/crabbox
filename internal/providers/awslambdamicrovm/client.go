@@ -174,6 +174,8 @@ type runnerClient struct {
 	region  string
 }
 
+const runnerResponseHeaderTimeout = 60 * time.Second
+
 type runnerExecRequest struct {
 	Command string            `json:"command"`
 	Workdir string            `json:"workdir,omitempty"`
@@ -189,7 +191,7 @@ type runnerEvent struct {
 
 func newRunnerClient(control controlPlane, source *http.Client, region string) *runnerClient {
 	if source == nil {
-		source = &http.Client{}
+		source = defaultRunnerHTTPClient(runnerResponseHeaderTimeout)
 	}
 	cloned := *source
 	originalRedirect := source.CheckRedirect
@@ -200,9 +202,18 @@ func newRunnerClient(control controlPlane, source *http.Client, region string) *
 		if originalRedirect != nil {
 			return originalRedirect(req, via)
 		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
 		return nil
 	}
 	return &runnerClient{control: control, http: &cloned, region: region}
+}
+
+func defaultRunnerHTTPClient(responseHeaderTimeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
+	return &http.Client{Transport: transport}
 }
 
 func (c *runnerClient) Health(ctx context.Context, vm microVM) error {
@@ -315,7 +326,7 @@ func endpointURL(endpoint, region string) (*url.URL, error) {
 }
 
 func sameOrigin(left, right *url.URL) bool {
-	return strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
+	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
 }
 
 func responseError(action string, resp *http.Response) error {

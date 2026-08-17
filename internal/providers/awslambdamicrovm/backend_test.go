@@ -3,16 +3,22 @@ package awslambdamicrovm
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -265,6 +271,283 @@ func TestRunnerClientExecPreservesBinaryOutput(t *testing.T) {
 	}
 	if gotExit != 0 || !bytes.Equal(stdout.Bytes(), want) {
 		t.Fatalf("exit=%d stdout=%x want=%x", gotExit, stdout.Bytes(), want)
+	}
+}
+
+func TestNewRunnerClientDefaultsResponseHeaderTimeout(t *testing.T) {
+	client := newRunnerClient(&fakeControlPlane{}, nil, "eu-west-1")
+	if client.http == nil {
+		t.Fatal("expected default HTTP client")
+	}
+	if client.http.Timeout != 0 {
+		t.Fatalf("client timeout=%s, want no whole-request timeout", client.http.Timeout)
+	}
+	transport, ok := client.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport=%T, want *http.Transport", client.http.Transport)
+	}
+	if transport == http.DefaultTransport {
+		t.Fatal("fallback client reused the shared default transport")
+	}
+	if transport.ResponseHeaderTimeout != runnerResponseHeaderTimeout {
+		t.Fatalf("response header timeout=%s want %s", transport.ResponseHeaderTimeout, runnerResponseHeaderTimeout)
+	}
+}
+
+func TestDefaultRunnerHTTPClientTimesOutBeforeResponseHeaders(t *testing.T) {
+	const bound = 40 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		time.Sleep(5 * bound)
+	}))
+	defer server.Close()
+
+	started := time.Now()
+	_, err := defaultRunnerHTTPClient(bound).Get(server.URL)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("request with withheld response headers unexpectedly succeeded")
+	}
+	var timeoutError interface{ Timeout() bool }
+	if !errors.As(err, &timeoutError) || !timeoutError.Timeout() {
+		t.Fatalf("error=%v, want timeout", err)
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("withheld response headers failed after %s, want near %s", elapsed, bound)
+	}
+	t.Logf("withheld response headers failed after %s (configured bound %s)", elapsed.Round(time.Millisecond), bound)
+}
+
+func TestDefaultRunnerHTTPClientStreamsPastResponseHeaderTimeout(t *testing.T) {
+	const bound = 30 * time.Millisecond
+	const streamDelay = 3 * bound
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(streamDelay)
+		_, _ = io.WriteString(w, "stream-complete")
+	}))
+	defer server.Close()
+
+	started := time.Now()
+	resp, err := defaultRunnerHTTPClient(bound).Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "stream-complete" {
+		t.Fatalf("body=%q want stream-complete", body)
+	}
+	if elapsed <= bound {
+		t.Fatalf("stream completed in %s, want it readable beyond %s", elapsed, bound)
+	}
+	t.Logf("response headers flushed promptly; body remained readable through %s, past the %s header bound", elapsed.Round(time.Millisecond), bound)
+}
+
+func TestDefaultRunnerHTTPClientUploadsPastResponseHeaderTimeout(t *testing.T) {
+	const bound = 30 * time.Millisecond
+	const uploadDelay = 3 * bound
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Errorf("read upload: %v", err)
+			return
+		}
+		if string(body) != "upload-complete" {
+			t.Errorf("upload body=%q want upload-complete", body)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	reader, writer := io.Pipe()
+	go func() {
+		_, _ = io.WriteString(writer, "upload-")
+		time.Sleep(uploadDelay)
+		_, _ = io.WriteString(writer, "complete")
+		_ = writer.Close()
+	}()
+	started := time.Now()
+	resp, err := defaultRunnerHTTPClient(bound).Post(server.URL, "application/gzip", reader)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status=%d want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if elapsed <= bound {
+		t.Fatalf("upload completed in %s, want it to outlive %s", elapsed, bound)
+	}
+	t.Logf("upload completed after %s, beyond the %s response-header bound", elapsed.Round(time.Millisecond), bound)
+}
+
+func TestNewRunnerClientPreservesInjectedHTTPSettingsOnClone(t *testing.T) {
+	proxyURL, err := url.Parse("http://proxy.example.test:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), TLSClientConfig: tlsConfig}
+	injected := &http.Client{
+		Transport: transport,
+		Jar:       jar,
+		Timeout:   17 * time.Second,
+	}
+
+	client := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+	if client.http == injected {
+		t.Fatal("runner reused the injected client instead of cloning it")
+	}
+	if client.http.Transport != transport || client.http.Jar != jar || client.http.Timeout != 17*time.Second {
+		t.Fatalf("cloned settings: transport=%p jar=%p timeout=%s", client.http.Transport, client.http.Jar, client.http.Timeout)
+	}
+	if transport.TLSClientConfig != tlsConfig || transport.Proxy == nil {
+		t.Fatal("injected proxy or TLS configuration was not preserved")
+	}
+	if injected.Transport != transport || injected.Jar != jar || injected.Timeout != 17*time.Second || injected.CheckRedirect != nil {
+		t.Fatal("newRunnerClient mutated the injected source client")
+	}
+}
+
+func TestNewRunnerClientPreservesStricterSameOriginRedirectPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, "/redirected", http.StatusFound)
+	}))
+	defer server.Close()
+
+	callerErr := errors.New("injected redirect policy")
+	var callerChecks atomic.Int32
+	injected := server.Client()
+	injected.CheckRedirect = func(*http.Request, []*http.Request) error {
+		callerChecks.Add(1)
+		return callerErr
+	}
+	client := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+
+	_, err := client.http.Get(server.URL)
+	if !errors.Is(err, callerErr) {
+		t.Fatalf("redirect error=%v want injected policy", err)
+	}
+	if callerChecks.Load() != 1 {
+		t.Fatalf("injected redirect checks=%d want 1", callerChecks.Load())
+	}
+	if injected.CheckRedirect == nil {
+		t.Fatal("newRunnerClient cleared the injected redirect policy")
+	}
+}
+
+func TestNewRunnerClientRejectsCrossOriginRedirectBeforeInjectedPolicy(t *testing.T) {
+	origin, err := url.Parse("https://mvm-test.lambda-microvm.eu-west-1.on.aws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := url.Parse("http://127.0.0.1:8080/stolen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		callback bool
+	}{
+		{name: "nil callback"},
+		{name: "permissive callback", callback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var callerChecks atomic.Int32
+			injected := &http.Client{}
+			if tc.callback {
+				injected.CheckRedirect = func(*http.Request, []*http.Request) error {
+					callerChecks.Add(1)
+					return nil
+				}
+			}
+			client := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+			err := client.http.CheckRedirect(&http.Request{URL: target}, []*http.Request{{URL: origin}})
+			if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+				t.Fatalf("redirect error=%v want cross-origin refusal", err)
+			}
+			if callerChecks.Load() != 0 {
+				t.Fatalf("injected policy called %d times before cross-origin refusal", callerChecks.Load())
+			}
+		})
+	}
+}
+
+func TestNewRunnerClientRetainsDefaultSameOriginRedirectLimit(t *testing.T) {
+	origin, err := url.Parse("https://mvm-test.lambda-microvm.eu-west-1.on.aws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := &http.Client{}
+	client := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+	request := &http.Request{URL: origin}
+	via := make([]*http.Request, 10)
+	for i := range via {
+		via[i] = &http.Request{URL: origin}
+	}
+	if err := client.http.CheckRedirect(request, via); err == nil || !strings.Contains(err.Error(), "stopped after 10 redirects") {
+		t.Fatalf("redirect error=%v want default redirect limit", err)
+	}
+	if injected.CheckRedirect != nil {
+		t.Fatal("newRunnerClient mutated the source redirect policy")
+	}
+}
+
+func TestRunnerClientCrossOriginRedirectNeverSendsProxyHeaders(t *testing.T) {
+	var targetRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		targetRequests.Add(1)
+		t.Errorf("cross-origin target received auth=%q port=%q", req.Header.Get("X-aws-proxy-auth"), req.Header.Get("X-aws-proxy-port"))
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer target.Close()
+	targetURL, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var injectedChecks atomic.Int32
+	injected := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host == targetURL.Host {
+				return http.DefaultTransport.RoundTrip(req)
+			}
+			if req.Header.Get("X-aws-proxy-auth") != "token" || req.Header.Get("X-aws-proxy-port") != fmt.Sprint(runnerPort) {
+				t.Fatalf("runner request headers: auth=%q port=%q", req.Header.Get("X-aws-proxy-auth"), req.Header.Get("X-aws-proxy-port"))
+			}
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header:     http.Header{"Location": []string{target.URL + "/stolen"}},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		}),
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			injectedChecks.Add(1)
+			return nil
+		},
+	}
+	client := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+	err = client.Health(context.Background(), microVM{ID: "mvm-test", Endpoint: "mvm-test.lambda-microvm.eu-west-1.on.aws"})
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("Health error=%v want cross-origin refusal", err)
+	}
+	if injectedChecks.Load() != 0 {
+		t.Fatalf("injected redirect checks=%d want 0", injectedChecks.Load())
+	}
+	if targetRequests.Load() != 0 {
+		t.Fatalf("cross-origin target requests=%d want 0", targetRequests.Load())
 	}
 }
 
