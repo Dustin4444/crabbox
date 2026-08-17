@@ -28,6 +28,58 @@ func (fn e2bRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) 
 	return fn(req)
 }
 
+type e2bRewriteTransport struct {
+	target *url.URL
+	base   http.RoundTripper
+}
+
+func (transport e2bRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	endpoint := *req.URL
+	endpoint.Scheme = transport.target.Scheme
+	endpoint.Host = transport.target.Host
+	clone.URL = &endpoint
+	clone.Host = transport.target.Host
+	return transport.base.RoundTrip(clone)
+}
+
+type e2bDelayedReader struct {
+	data    []byte
+	split   int
+	delay   time.Duration
+	offset  int
+	delayed bool
+}
+
+func (reader *e2bDelayedReader) Read(p []byte) (int, error) {
+	if reader.offset >= len(reader.data) {
+		return 0, io.EOF
+	}
+	if reader.offset >= reader.split && !reader.delayed {
+		time.Sleep(reader.delay)
+		reader.delayed = true
+	}
+	limit := len(reader.data)
+	if !reader.delayed && limit > reader.split {
+		limit = reader.split
+	}
+	n := copy(p, reader.data[reader.offset:limit])
+	reader.offset += n
+	return n, nil
+}
+
+func e2bLoopbackClient(t *testing.T, server *httptest.Server, timeout time.Duration) *http.Client {
+	t.Helper()
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &http.Client{
+		Transport: e2bRewriteTransport{target: target, base: server.Client().Transport},
+		Timeout:   timeout,
+	}
+}
+
 func TestE2BClientRedactsReflectedCredentials(t *testing.T) {
 	t.Run("API key", func(t *testing.T) {
 		const secret = "e2b-api-secret"
@@ -52,7 +104,7 @@ func TestE2BClientRedactsReflectedCredentials(t *testing.T) {
 				Request:    req,
 			}, nil
 		})}
-		client := &e2bClient{httpClient: httpClient}
+		client := &e2bClient{envdClient: httpClient}
 		_, err := client.StartProcess(context.Background(), e2bSession{SandboxID: "sbx_1", Domain: "example.test", EnvdAccessToken: secret}, e2bProcessRequest{Command: "true"})
 		assertE2BRedactedError(t, err, secret)
 	})
@@ -100,6 +152,181 @@ func TestParseE2BProcessStream(t *testing.T) {
 	if code != 7 || stdout.String() != "hello" || stderr.String() != "warn" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
+}
+
+func TestE2BDefaultHTTPClientsSeparateControlAndDataPlanes(t *testing.T) {
+	api, err := newE2BClient(Config{E2B: E2BConfig{APIKey: "e2b_test"}}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ok := api.(*e2bClient)
+	if !ok {
+		t.Fatalf("api=%T, want *e2bClient", api)
+	}
+	if client.httpClient.Timeout != e2bControlTimeout {
+		t.Fatalf("control Timeout=%s, want %s", client.httpClient.Timeout, e2bControlTimeout)
+	}
+	if client.envdClient.Timeout != 0 {
+		t.Fatalf("envd Timeout=%s, want caller-owned lifetime", client.envdClient.Timeout)
+	}
+	if client.httpClient == client.envdClient {
+		t.Fatal("control and envd fallbacks share one client")
+	}
+	if client.httpClient.Transport != nil || client.envdClient.Transport != nil {
+		t.Fatalf("fallback transports=control:%T envd:%T, want process default transport", client.httpClient.Transport, client.envdClient.Transport)
+	}
+}
+
+func TestE2BInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
+	injected := &http.Client{
+		Transport: e2bRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("test transport")
+		}),
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Timeout:       17 * time.Second,
+	}
+	api, err := newE2BClient(Config{E2B: E2BConfig{APIKey: "e2b_test"}}, Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*e2bClient)
+	if client.httpClient != injected || client.envdClient != injected {
+		t.Fatalf("clients=control:%p envd:%p, want injected %p", client.httpClient, client.envdClient, injected)
+	}
+}
+
+func TestE2BControlClientBoundsStalledResponseBody(t *testing.T) {
+	const controlTimeout = 40 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"sandboxID":`)
+		w.(http.Flusher).Flush()
+		<-req.Context().Done()
+	}))
+	defer server.Close()
+
+	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
+	started := time.Now()
+	_, err := client.GetSandbox(context.Background(), "sbx_1")
+	elapsed := time.Since(started)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetSandbox error=%v, want whole-request deadline", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("stalled response body bounded after %s, want under 1s", elapsed)
+	}
+	t.Logf("control response-body stall bounded: elapsed=%s timeout=%s", elapsed.Round(time.Millisecond), controlTimeout)
+}
+
+func TestE2BControlClientBoundsWithheldHeaders(t *testing.T) {
+	const controlTimeout = 40 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+		<-req.Context().Done()
+	}))
+	defer server.Close()
+
+	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
+	started := time.Now()
+	_, err := client.GetSandbox(context.Background(), "sbx_1")
+	elapsed := time.Since(started)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetSandbox error=%v, want whole-request deadline", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("withheld headers bounded after %s, want under 1s", elapsed)
+	}
+	t.Logf("control withheld headers bounded: elapsed=%s timeout=%s", elapsed.Round(time.Millisecond), controlTimeout)
+}
+
+func TestE2BDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
+	const controlTimeout = 30 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.Copy(io.Discard, req.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(e2bTestEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}))
+		w.(http.Flusher).Flush()
+		time.Sleep(3 * controlTimeout)
+		_, _ = w.Write(e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": true}}}))
+		_, _ = w.Write(e2bTestEnvelope(2, map[string]any{}))
+	}))
+	defer server.Close()
+
+	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	client := &e2bClient{
+		domain:     "e2b.test",
+		httpClient: controlClient,
+		envdClient: e2bLoopbackClient(t, server, 0),
+	}
+	started := time.Now()
+	code, err := client.StartProcess(context.Background(), e2bSession{SandboxID: "sbx_1", Domain: "e2b.test"}, e2bProcessRequest{Command: "true"})
+	elapsed := time.Since(started)
+	if err != nil || code != 0 {
+		t.Fatalf("StartProcess code=%d err=%v", code, err)
+	}
+	if elapsed <= controlTimeout {
+		t.Fatalf("stream completed in %s, want it active beyond %s", elapsed, controlTimeout)
+	}
+	t.Logf("envd stream survived control deadline: elapsed=%s control_timeout=%s", elapsed.Round(time.Millisecond), controlTimeout)
+}
+
+func TestE2BDataPlaneUploadOutlivesControlTimeout(t *testing.T) {
+	const controlTimeout = 30 * time.Millisecond
+	type uploadResult struct {
+		data []byte
+		err  error
+	}
+	uploaded := make(chan uploadResult, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		reader, err := req.MultipartReader()
+		if err != nil {
+			uploaded <- uploadResult{err: err}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		part, err := reader.NextPart()
+		if err != nil {
+			uploaded <- uploadResult{err: err}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		data, err := io.ReadAll(part)
+		uploaded <- uploadResult{data: data, err: err}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	payload := []byte("before-after")
+	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	client := &e2bClient{
+		domain:     "e2b.test",
+		httpClient: controlClient,
+		envdClient: e2bLoopbackClient(t, server, 0),
+	}
+	reader := &e2bDelayedReader{data: payload, split: len("before-"), delay: 3 * controlTimeout}
+	started := time.Now()
+	err := client.UploadFile(context.Background(), e2bSession{SandboxID: "sbx_1", Domain: "e2b.test"}, "/tmp/archive.tgz", reader)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := <-uploaded
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if !bytes.Equal(result.data, payload) {
+		t.Fatalf("uploaded=%q, want %q", result.data, payload)
+	}
+	if elapsed <= controlTimeout {
+		t.Fatalf("upload completed in %s, want it active beyond %s", elapsed, controlTimeout)
+	}
+	t.Logf("envd upload completed without truncation: bytes=%d elapsed=%s control_timeout=%s", len(result.data), elapsed.Round(time.Millisecond), controlTimeout)
 }
 
 func TestValidateE2BAPIURL(t *testing.T) {

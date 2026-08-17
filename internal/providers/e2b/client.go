@@ -35,7 +35,10 @@ type e2bClient struct {
 	domain     string
 	user       string
 	httpClient *http.Client
+	envdClient *http.Client
 }
+
+const e2bControlTimeout = 60 * time.Second
 
 type e2bCreateSandboxRequest struct {
 	TemplateID          string
@@ -97,16 +100,20 @@ var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=e2b requires E2B_API_KEY")
 	}
-	httpClient := rt.HTTP
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	httpClient, envdClient := e2bHTTPClients(rt.HTTP, e2bControlTimeout)
 	apiURL, err := validateE2BAPIURL(blank(cfg.E2B.APIURL, "https://api.e2b.app"))
 	if err != nil {
 		return nil, err
 	}
 	domain := strings.TrimSpace(blank(cfg.E2B.Domain, "e2b.app"))
-	return &e2bClient{apiKey: apiKey, apiURL: apiURL, domain: domain, user: cfg.E2B.User, httpClient: httpClient}, nil
+	return &e2bClient{
+		apiKey:     apiKey,
+		apiURL:     apiURL,
+		domain:     domain,
+		user:       cfg.E2B.User,
+		httpClient: httpClient,
+		envdClient: envdClient,
+	}, nil
 }
 
 func validateE2BAPIURL(raw string) (string, error) {
@@ -144,6 +151,13 @@ func isE2BLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func e2bHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
+	if injected != nil {
+		return injected, injected
+	}
+	return &http.Client{Timeout: controlTimeout}, &http.Client{Timeout: 0}
 }
 
 func secureE2BHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
@@ -305,7 +319,7 @@ func (c *e2bClient) UploadFile(ctx context.Context, session e2bSession, targetPa
 		}
 		_ = pw.Close()
 	}()
-	resp, err := secureE2BHTTPClient(c.httpClient, req.URL).Do(req)
+	resp, err := secureE2BHTTPClient(c.dataPlaneHTTPClient(), req.URL).Do(req)
 	if err != nil {
 		_ = pr.CloseWithError(err)
 		_ = pw.CloseWithError(err)
@@ -359,7 +373,7 @@ func (c *e2bClient) StartProcess(ctx context.Context, session e2bSession, req e2
 	if timeoutMs := durationMillisCeil(req.Timeout); timeoutMs > 0 {
 		httpReq.Header.Set("Connect-Timeout-Ms", fmt.Sprint(timeoutMs))
 	}
-	resp, err := secureE2BHTTPClient(c.httpClient, httpReq.URL).Do(httpReq)
+	resp, err := secureE2BHTTPClient(c.dataPlaneHTTPClient(), httpReq.URL).Do(httpReq)
 	if err != nil {
 		return 1, err
 	}
@@ -443,6 +457,13 @@ func (c *e2bClient) setEnvdHeaders(req *http.Request, session e2bSession) {
 	req.Header.Set("X-Access-Token", session.EnvdAccessToken)
 	req.Header.Set("E2b-Sandbox-Id", session.SandboxID)
 	req.Header.Set("E2b-Sandbox-Port", "49983")
+}
+
+func (c *e2bClient) dataPlaneHTTPClient() *http.Client {
+	if c.envdClient != nil {
+		return c.envdClient
+	}
+	return &http.Client{Timeout: 0}
 }
 
 type e2bStartResponse struct {
