@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -83,10 +84,13 @@ type orgoActionResponse struct {
 }
 
 type orgoHTTPClient struct {
-	baseURL string
-	apiKey  string
-	http    *http.Client
+	baseURL  string
+	apiKey   string
+	http     *http.Client
+	dataHTTP *http.Client
 }
+
+const orgoControlTimeout = 60 * time.Second
 
 type orgoHTTPError struct {
 	StatusCode int
@@ -150,15 +154,20 @@ func newOrgoClient(cfg Config, rt Runtime) (orgoAPI, error) {
 	if parsed.Scheme != "https" && !isOrgoLoopbackHTTP(parsed) {
 		return nil, exit(2, "provider=%s API base URL %q must use https unless it targets localhost", providerName, baseURL)
 	}
-	client := rt.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client, dataClient := orgoHTTPClients(rt.HTTP, orgoControlTimeout)
 	return &orgoHTTPClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
-		http:    client,
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		apiKey:   apiKey,
+		http:     client,
+		dataHTTP: dataClient,
 	}, nil
+}
+
+func orgoHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
+	if injected != nil {
+		return injected, injected
+	}
+	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func isOrgoLoopbackHTTP(parsed *url.URL) bool {
@@ -261,7 +270,7 @@ func (c *orgoHTTPClient) deleteResource(ctx context.Context, path, kind, id stri
 
 func (c *orgoHTTPClient) RunBash(ctx context.Context, id, command string, stdout, stderr io.Writer) (int, error) {
 	var res orgoBashResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/computers/"+url.PathEscape(id)+"/bash", map[string]string{"command": command}, &res); err != nil {
+	if err := c.doDataJSON(ctx, http.MethodPost, "/computers/"+url.PathEscape(id)+"/bash", map[string]string{"command": command}, &res); err != nil {
 		return 1, err
 	}
 	if res.Stdout != "" {
@@ -291,6 +300,18 @@ func (c *orgoHTTPClient) RunBash(ctx context.Context, id, command string, stdout
 }
 
 func (c *orgoHTTPClient) doJSON(ctx context.Context, method, path string, body any, out any) error {
+	return c.doJSONWithClient(ctx, c.http, method, path, body, out)
+}
+
+func (c *orgoHTTPClient) doDataJSON(ctx context.Context, method, path string, body any, out any) error {
+	httpClient := c.dataHTTP
+	if httpClient == nil {
+		httpClient = c.http
+	}
+	return c.doJSONWithClient(ctx, httpClient, method, path, body, out)
+}
+
+func (c *orgoHTTPClient) doJSONWithClient(ctx context.Context, httpClient *http.Client, method, path string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {
 		var buf bytes.Buffer
@@ -309,7 +330,7 @@ func (c *orgoHTTPClient) doJSON(ctx context.Context, method, path string, body a
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	res, err := c.http.Do(req)
+	res, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

@@ -10,7 +10,78 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestBridgeFallbackBoundsControlAndPreservesExecStream(t *testing.T) {
+	const controlTimeout = 30 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/sandbox/sb_123":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"id":`)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		case "/v1/sandbox/sb_123/exec":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "event: stdout\n"+`data: {"chunk":"started"}`+"\n\n")
+			w.(http.Flusher).Flush()
+			time.Sleep(3 * controlTimeout)
+			_, _ = io.WriteString(w, "event: exit\n"+`data: {"exitCode":0}`+"\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control, data := cloudflareSandboxHTTPClients(nil, controlTimeout)
+	client := &client{
+		baseURL:  server.URL,
+		token:    "test-token",
+		http:     secureCloudflareSandboxHTTPClient(control, server.URL),
+		dataHTTP: secureCloudflareSandboxHTTPClient(data, server.URL),
+	}
+	started := time.Now()
+	_, err := client.GetSandbox(context.Background(), "sb_123")
+	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("GetSandbox error=%v, want whole-request deadline", err)
+	}
+	controlElapsed := time.Since(started)
+	if controlElapsed >= time.Second {
+		t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
+	}
+
+	started = time.Now()
+	result, err := client.Exec(context.Background(), "sb_123", execRequest{Command: "true"}, io.Discard, io.Discard)
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("Exec result=%#v err=%v", result, err)
+	}
+	dataElapsed := time.Since(started)
+	if dataElapsed <= controlTimeout {
+		t.Fatalf("exec stream completed in %s, want beyond %s", dataElapsed, controlTimeout)
+	}
+	t.Logf("Cloudflare Sandbox control body bounded in %s; SSE exec completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+}
+
+func TestBridgeInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {
+	transport := &http.Transport{DisableKeepAlives: true}
+	injected := &http.Client{Transport: transport, Timeout: 17 * time.Second}
+	cfg := testConfig()
+	cfg.CloudflareSandbox.BridgeURL = "http://127.0.0.1:8787"
+	api, err := newBridgeClient(cfg, Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*client)
+	if client.http.Transport != transport || client.dataHTTP.Transport != transport || client.http.Timeout != injected.Timeout || client.dataHTTP.Timeout != injected.Timeout {
+		t.Fatalf("settings=control:(%T,%s) data:(%T,%s)", client.http.Transport, client.http.Timeout, client.dataHTTP.Transport, client.dataHTTP.Timeout)
+	}
+	if injected.CheckRedirect != nil {
+		t.Fatal("constructor mutated injected redirect policy")
+	}
+}
 
 func TestBridgeClientHealthOpenAPIAuthAndNonMutatingDoctorRoutes(t *testing.T) {
 	var requests []struct {

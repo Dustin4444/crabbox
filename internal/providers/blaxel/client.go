@@ -114,7 +114,10 @@ type restClient struct {
 	workspace string
 	version   string
 	http      *http.Client
+	dataHTTP  *http.Client
 }
+
+const blaxelControlTimeout = 60 * time.Second
 
 func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 	baseURL := strings.TrimSpace(cfg.Blaxel.APIURL)
@@ -130,17 +133,22 @@ func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 		return nil, exit(2, "provider=blaxel needs an API key; load CRABBOX_BLAXEL_API_KEY or BL_API_KEY from a secret manager")
 	}
 	workspace := strings.TrimSpace(cfg.Blaxel.Workspace)
-	httpClient := rt.HTTP
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	httpClient, dataHTTPClient := blaxelHTTPClients(rt.HTTP, blaxelControlTimeout)
 	return &restClient{
 		base:      baseURL,
 		apiKey:    apiKey,
 		workspace: workspace,
 		version:   defaultAPIVersion,
 		http:      secureHTTPClient(httpClient),
+		dataHTTP:  secureHTTPClient(dataHTTPClient),
 	}, nil
+}
+
+func blaxelHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
+	if injected != nil {
+		return injected, injected
+	}
+	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func BlaxelAPIKey(cfg Config) string {
@@ -485,11 +493,18 @@ func (c *restClient) doSandbox(ctx context.Context, sandbox, method, endpoint st
 	if err != nil {
 		return nil, err
 	}
-	return c.doAt(ctx, base, method, endpoint, values, request, response)
+	return c.doAt(ctx, c.dataPlaneHTTPClient(), base, method, endpoint, values, request, response)
 }
 
 func (c *restClient) do(ctx context.Context, method, endpoint string, values url.Values, request any, response any) ([]byte, error) {
-	return c.doAt(ctx, c.base, method, endpoint, values, request, response)
+	return c.doAt(ctx, c.http, c.base, method, endpoint, values, request, response)
+}
+
+func (c *restClient) dataPlaneHTTPClient() *http.Client {
+	if c.dataHTTP != nil {
+		return c.dataHTTP
+	}
+	return c.http
 }
 
 // blaxelWorkloadRetryDelays follows Blaxel's own WORKLOAD_UNAVAILABLE guidance:
@@ -535,7 +550,7 @@ func (c *restClient) doSandboxRetry(ctx context.Context, sandbox, method, endpoi
 	return body, err
 }
 
-func (c *restClient) doAt(ctx context.Context, baseURL, method, endpoint string, values url.Values, request any, response any) ([]byte, error) {
+func (c *restClient) doAt(ctx context.Context, httpClient *http.Client, baseURL, method, endpoint string, values url.Values, request any, response any) ([]byte, error) {
 	var body io.Reader
 	if request != nil {
 		data, err := json.Marshal(request)
@@ -565,7 +580,7 @@ func (c *restClient) doAt(ctx context.Context, baseURL, method, endpoint string,
 	if request != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.http.Do(httpReq)
+	resp, err := httpClient.Do(httpReq)
 	if err != nil {
 		return nil, redactError(err)
 	}
@@ -651,7 +666,7 @@ func (c *restClient) doMultipartAt(ctx context.Context, baseURL, method, endpoin
 		httpReq.Header.Set("X-Blaxel-Workspace", c.workspace)
 	}
 	httpReq.Header.Set("Content-Type", contentType)
-	resp, err := c.http.Do(httpReq)
+	resp, err := c.dataPlaneHTTPClient().Do(httpReq)
 	if err != nil {
 		return nil, redactError(err)
 	}

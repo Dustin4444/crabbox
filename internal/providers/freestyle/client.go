@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type freestyleAPI interface {
@@ -76,12 +77,14 @@ type freestyleReadFileResponse struct {
 }
 
 type freestyleHTTPClient struct {
-	apiKey     string
-	apiURL     string
-	httpClient *http.Client
+	apiKey         string
+	apiURL         string
+	httpClient     *http.Client
+	dataHTTPClient *http.Client
 }
 
 const freestyleListPageSize = 100
+const freestyleControlTimeout = 60 * time.Second
 
 var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
 	apiKey := strings.TrimSpace(cfg.Freestyle.APIKey)
@@ -92,15 +95,20 @@ var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpClient := rt.HTTP
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	httpClient, dataHTTPClient := freestyleHTTPClients(rt.HTTP, freestyleControlTimeout)
 	return &freestyleHTTPClient{
-		apiKey:     apiKey,
-		apiURL:     apiURL,
-		httpClient: secureFreestyleHTTPClient(httpClient, apiURL),
+		apiKey:         apiKey,
+		apiURL:         apiURL,
+		httpClient:     secureFreestyleHTTPClient(httpClient, apiURL),
+		dataHTTPClient: secureFreestyleHTTPClient(dataHTTPClient, apiURL),
 	}, nil
+}
+
+func freestyleHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
+	if injected != nil {
+		return injected, injected
+	}
+	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func validateFreestyleAPIURL(raw string) (string, error) {
@@ -181,6 +189,18 @@ func effectiveFreestylePort(value *url.URL) string {
 }
 
 func (c *freestyleHTTPClient) do(ctx context.Context, method, urlPath string, body io.Reader) (*http.Response, error) {
+	return c.doWithClient(ctx, c.httpClient, method, urlPath, body)
+}
+
+func (c *freestyleHTTPClient) doData(ctx context.Context, method, urlPath string, body io.Reader) (*http.Response, error) {
+	httpClient := c.dataHTTPClient
+	if httpClient == nil {
+		httpClient = c.httpClient
+	}
+	return c.doWithClient(ctx, httpClient, method, urlPath, body)
+}
+
+func (c *freestyleHTTPClient) doWithClient(ctx context.Context, httpClient *http.Client, method, urlPath string, body io.Reader) (*http.Response, error) {
 	u, err := url.Parse(c.apiURL + urlPath)
 	if err != nil {
 		return nil, err
@@ -194,7 +214,7 @@ func (c *freestyleHTTPClient) do(ctx context.Context, method, urlPath string, bo
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return c.httpClient.Do(req)
+	return httpClient.Do(req)
 }
 
 func (c *freestyleHTTPClient) CreateVM(ctx context.Context, req freestyleCreateVMRequest) (freestyleVM, error) {
@@ -285,7 +305,7 @@ func (c *freestyleHTTPClient) Exec(ctx context.Context, id string, command strin
 	if err != nil {
 		return 1, err
 	}
-	resp, err := c.do(ctx, http.MethodPost, "/v1/vms/"+url.PathEscape(id)+"/exec-await", bytes.NewReader(payload))
+	resp, err := c.doData(ctx, http.MethodPost, "/v1/vms/"+url.PathEscape(id)+"/exec-await", bytes.NewReader(payload))
 	if err != nil {
 		return 1, freestyleError("exec", err)
 	}
@@ -314,7 +334,7 @@ func (c *freestyleHTTPClient) WriteFile(ctx context.Context, id, path string, co
 	if err != nil {
 		return err
 	}
-	resp, err := c.do(ctx, http.MethodPut, freestyleFileURLPath(id, path), bytes.NewReader(payload))
+	resp, err := c.doData(ctx, http.MethodPut, freestyleFileURLPath(id, path), bytes.NewReader(payload))
 	if err != nil {
 		return freestyleError("write file", err)
 	}
@@ -329,7 +349,7 @@ func (c *freestyleHTTPClient) ReadFile(ctx context.Context, id, path string) (st
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	resp, err := c.do(ctx, http.MethodGet, freestyleFileURLPath(id, path), nil)
+	resp, err := c.doData(ctx, http.MethodGet, freestyleFileURLPath(id, path), nil)
 	if err != nil {
 		return "", freestyleError("read file", err)
 	}

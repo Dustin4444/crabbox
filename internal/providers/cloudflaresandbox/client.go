@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 type bridgeClient interface {
@@ -31,10 +32,13 @@ type bridgeClient interface {
 }
 
 type client struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	baseURL  string
+	token    string
+	http     *http.Client
+	dataHTTP *http.Client
 }
+
+const cloudflareSandboxControlTimeout = 60 * time.Second
 
 type healthResponse struct {
 	OK      bool   `json:"ok"`
@@ -104,15 +108,20 @@ func newBridgeClient(cfg Config, rt Runtime) (bridgeClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpClient := rt.HTTP
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	httpClient, dataHTTPClient := cloudflareSandboxHTTPClients(rt.HTTP, cloudflareSandboxControlTimeout)
 	return &client{
-		baseURL: baseURL,
-		token:   strings.TrimSpace(cfg.CloudflareSandbox.Token),
-		http:    secureCloudflareSandboxHTTPClient(httpClient, baseURL),
+		baseURL:  baseURL,
+		token:    strings.TrimSpace(cfg.CloudflareSandbox.Token),
+		http:     secureCloudflareSandboxHTTPClient(httpClient, baseURL),
+		dataHTTP: secureCloudflareSandboxHTTPClient(dataHTTPClient, baseURL),
 	}, nil
+}
+
+func cloudflareSandboxHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
+	if injected != nil {
+		return injected, injected
+	}
+	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func secureCloudflareSandboxHTTPClient(source *http.Client, baseURL string) *http.Client {
@@ -218,7 +227,7 @@ func (c *client) DeleteSandbox(ctx context.Context, id string) error {
 }
 
 func (c *client) Exec(ctx context.Context, id string, req execRequest, stdout, stderr io.Writer) (execResult, error) {
-	resp, err := c.doRequest(ctx, http.MethodPost, "/v1/sandbox/"+url.PathEscape(id)+"/exec", true, req, "application/json")
+	resp, err := c.doRequest(ctx, c.dataHTTP, http.MethodPost, "/v1/sandbox/"+url.PathEscape(id)+"/exec", true, req, "application/json")
 	if err != nil {
 		return execResult{}, err
 	}
@@ -387,7 +396,7 @@ func firstNonEmpty(values ...string) string {
 
 func (c *client) UploadFile(ctx context.Context, id, remotePath string, content io.Reader) error {
 	route := "/v1/sandbox/" + url.PathEscape(id) + "/files/write?path=" + url.QueryEscape(remotePath) + "&encoding=raw"
-	resp, err := c.doRequest(ctx, http.MethodPost, route, true, content, "application/octet-stream")
+	resp, err := c.doRequest(ctx, c.dataHTTP, http.MethodPost, route, true, content, "application/octet-stream")
 	if err != nil {
 		return err
 	}
@@ -404,14 +413,14 @@ func (c *client) UploadFile(ctx context.Context, id, remotePath string, content 
 
 func (c *client) Persist(ctx context.Context, id string, req persistRequest) (persistResponse, error) {
 	var out persistResponse
-	if err := c.do(ctx, http.MethodPost, "/v1/sandbox/"+url.PathEscape(id)+"/persist", true, req, &out); err != nil {
+	if err := c.doData(ctx, http.MethodPost, "/v1/sandbox/"+url.PathEscape(id)+"/persist", true, req, &out); err != nil {
 		return persistResponse{}, err
 	}
 	return out, nil
 }
 
 func (c *client) Hydrate(ctx context.Context, id string, req hydrateRequest) error {
-	return c.do(ctx, http.MethodPost, "/v1/sandbox/"+url.PathEscape(id)+"/hydrate", true, req, nil)
+	return c.doData(ctx, http.MethodPost, "/v1/sandbox/"+url.PathEscape(id)+"/hydrate", true, req, nil)
 }
 
 func (c *client) WarmPool(ctx context.Context) (warmPoolResponse, error) {
@@ -423,7 +432,15 @@ func (c *client) WarmPool(ctx context.Context) (warmPoolResponse, error) {
 }
 
 func (c *client) do(ctx context.Context, method, route string, authenticated bool, body any, out any) error {
-	resp, err := c.doRequest(ctx, method, route, authenticated, body, "application/json")
+	return c.doWithClient(ctx, c.http, method, route, authenticated, body, out)
+}
+
+func (c *client) doData(ctx context.Context, method, route string, authenticated bool, body any, out any) error {
+	return c.doWithClient(ctx, c.dataHTTP, method, route, authenticated, body, out)
+}
+
+func (c *client) doWithClient(ctx context.Context, httpClient *http.Client, method, route string, authenticated bool, body any, out any) error {
+	resp, err := c.doRequest(ctx, httpClient, method, route, authenticated, body, "application/json")
 	if err != nil {
 		return err
 	}
@@ -452,7 +469,7 @@ func (c *client) responseError(method, route string, resp *http.Response, data [
 	return err
 }
 
-func (c *client) doRequest(ctx context.Context, method, route string, authenticated bool, body any, contentType string) (*http.Response, error) {
+func (c *client) doRequest(ctx context.Context, httpClient *http.Client, method, route string, authenticated bool, body any, contentType string) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		if existing, ok := body.(io.Reader); ok {
@@ -476,7 +493,7 @@ func (c *client) doRequest(ctx context.Context, method, route string, authentica
 	if authenticated && c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		requestErr := err
 		var urlErr *url.Error

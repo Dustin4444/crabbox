@@ -15,7 +15,76 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestAzureDynamicSessionsFallbackBoundsControlAndPreservesExecStream(t *testing.T) {
+	const controlTimeout = 30 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.management/getSession":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"identifier":`)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		case "/v1/exec":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"type":"heartbeat"}`+"\n")
+			w.(http.Flusher).Flush()
+			time.Sleep(3 * controlTimeout)
+			_, _ = io.WriteString(w, `{"type":"complete","exitCode":0}`+"\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control, data := azureDynamicSessionsHTTPClients(nil, controlTimeout)
+	client := &azureDynamicSessionsClient{
+		endpoint:             server.URL,
+		managementAPIVersion: "2025-02-02-preview",
+		token:                "test-token",
+		httpClient:           control,
+		dataHTTPClient:       data,
+	}
+	started := time.Now()
+	_, err := client.GetSession(context.Background(), "azds-test")
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetSession error=%v, want whole-request deadline", err)
+	}
+	controlElapsed := time.Since(started)
+	if controlElapsed >= time.Second {
+		t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
+	}
+
+	started = time.Now()
+	code, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{Command: "true"}, io.Discard, io.Discard)
+	if err != nil || code != 0 {
+		t.Fatalf("ExecStream code=%d err=%v", code, err)
+	}
+	dataElapsed := time.Since(started)
+	if dataElapsed <= controlTimeout {
+		t.Fatalf("exec stream completed in %s, want beyond %s", dataElapsed, controlTimeout)
+	}
+	t.Logf("Azure Dynamic Sessions control body bounded in %s; exec stream completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+}
+
+func TestAzureDynamicSessionsInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
+	t.Setenv(tokenEnvName, "test-token")
+	injected := &http.Client{Timeout: 17 * time.Second}
+	api, err := newAzureDynamicSessionsClient(context.Background(), Config{AzureDynamicSessions: AzureDynamicSessionsConfig{
+		Endpoint: "http://127.0.0.1:8787",
+	}}, Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*azureDynamicSessionsClient)
+	if client.httpClient != injected || client.dataHTTPClient != injected {
+		t.Fatalf("clients=control:%p data:%p, want injected %p", client.httpClient, client.dataHTTPClient, injected)
+	}
+}
 
 func TestAzureDynamicSessionsEndpointRequiresPoolManagementEndpoint(t *testing.T) {
 	cfg := Config{}

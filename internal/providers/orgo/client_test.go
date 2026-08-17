@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunBashExitCodeFieldPresence(t *testing.T) {
@@ -414,7 +415,90 @@ func TestNewOrgoClientUsesResolvedConfigBeforeAmbientAPIBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := client.(*orgoHTTPClient).baseURL; got != "https://flag-selected.example.test" {
-		t.Fatalf("base URL=%q", got)
+	got := client.(*orgoHTTPClient)
+	if got.baseURL != "https://flag-selected.example.test" {
+		t.Fatalf("base URL=%q", got.baseURL)
+	}
+	if got.http == nil || got.dataHTTP == nil || got.http == got.dataHTTP {
+		t.Fatalf("fallback clients=control:%p data:%p, want separate clients", got.http, got.dataHTTP)
+	}
+	if got.http.Timeout != orgoControlTimeout || got.dataHTTP.Timeout != 0 {
+		t.Fatalf("timeouts=control:%s data:%s", got.http.Timeout, got.dataHTTP.Timeout)
+	}
+}
+
+func TestOrgoFallbackBoundsControlAndPreservesCommand(t *testing.T) {
+	const controlTimeout = 30 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/computers/computer-1":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"id":`)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		case "/computers/computer-1/bash":
+			time.Sleep(3 * controlTimeout)
+			_ = json.NewEncoder(w).Encode(map[string]any{"stdout": "ok", "exit_code": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	control, data := orgoHTTPClients(nil, controlTimeout)
+	client := &orgoHTTPClient{baseURL: server.URL, apiKey: "test-key", http: control, dataHTTP: data}
+	started := time.Now()
+	_, err := client.GetComputer(context.Background(), "computer-1")
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetComputer error=%v, want whole-request deadline", err)
+	}
+	controlElapsed := time.Since(started)
+	if controlElapsed >= time.Second {
+		t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
+	}
+
+	started = time.Now()
+	code, err := client.RunBash(context.Background(), "computer-1", "true", io.Discard, io.Discard)
+	if err != nil || code != 0 {
+		t.Fatalf("RunBash code=%d err=%v", code, err)
+	}
+	dataElapsed := time.Since(started)
+	if dataElapsed <= controlTimeout {
+		t.Fatalf("command completed in %s, want beyond %s", dataElapsed, controlTimeout)
+	}
+	t.Logf("Orgo control body bounded in %s; synchronous command completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+}
+
+func TestOrgoInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
+	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
+	injected := &http.Client{Timeout: 17 * time.Second}
+	api, err := newOrgoClient(Config{Orgo: OrgoConfig{APIBase: "http://127.0.0.1:8787"}}, Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*orgoHTTPClient)
+	if client.http != injected || client.dataHTTP != injected {
+		t.Fatalf("clients=control:%p data:%p, want injected %p", client.http, client.dataHTTP, injected)
+	}
+}
+
+func TestOrgoCrossHostRedirectDoesNotForwardAuthorization(t *testing.T) {
+	var targetAuthorization string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetAuthorization = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	defer target.Close()
+	targetURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetURL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+	client := &orgoHTTPClient{baseURL: origin.URL, apiKey: "test-key", http: &http.Client{}}
+	if _, err := client.ListWorkspaces(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if targetAuthorization != "" {
+		t.Fatalf("redirect target Authorization=%q, want empty", targetAuthorization)
 	}
 }

@@ -32,7 +32,10 @@ type azureDynamicSessionsClient struct {
 	managementAPIVersion string
 	token                string
 	httpClient           *http.Client
+	dataHTTPClient       *http.Client
 }
+
+const azureDynamicSessionsControlTimeout = 60 * time.Second
 
 type azureDynamicSessionsExecRequest struct {
 	Command   string            `json:"command"`
@@ -103,16 +106,21 @@ var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Run
 	if err != nil {
 		return nil, err
 	}
-	httpClient := rt.HTTP
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	httpClient, dataHTTPClient := azureDynamicSessionsHTTPClients(rt.HTTP, azureDynamicSessionsControlTimeout)
 	return &azureDynamicSessionsClient{
 		endpoint:             endpoint,
 		managementAPIVersion: blank(strings.TrimSpace(cfg.AzureDynamicSessions.APIVersion), "2025-02-02-preview"),
 		token:                token,
 		httpClient:           httpClient,
+		dataHTTPClient:       dataHTTPClient,
 	}, nil
+}
+
+func azureDynamicSessionsHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
+	if injected != nil {
+		return injected, injected
+	}
+	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func azureDynamicSessionsEndpoint(cfg Config) (string, error) {
@@ -237,7 +245,7 @@ func (c *azureDynamicSessionsClient) UploadFile(ctx context.Context, identifier,
 	c.setHeaders(req)
 	req.ContentLength = info.Size()
 	req.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := c.secureHTTPClient().Do(req)
+	resp, err := c.secureHTTPClient(c.dataPlaneHTTPClient()).Do(req)
 	if err != nil {
 		return err
 	}
@@ -260,7 +268,7 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 	}
 	c.setHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.secureHTTPClient().Do(req)
+	resp, err := c.secureHTTPClient(c.dataPlaneHTTPClient()).Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -403,7 +411,7 @@ func (c *azureDynamicSessionsClient) doJSONURL(ctx context.Context, method, endp
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.secureHTTPClient().Do(req)
+	resp, err := c.secureHTTPClient(c.controlPlaneHTTPClient()).Do(req)
 	if err != nil {
 		return err
 	}
@@ -428,8 +436,24 @@ func (c *azureDynamicSessionsClient) responseError(resp *http.Response) error {
 	return &azureDynamicSessionsAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.token)}
 }
 
-func (c *azureDynamicSessionsClient) secureHTTPClient() *http.Client {
-	source := c.httpClient
+func (c *azureDynamicSessionsClient) controlPlaneHTTPClient() *http.Client {
+	if c.httpClient != nil {
+		return c.httpClient
+	}
+	return &http.Client{Timeout: azureDynamicSessionsControlTimeout}
+}
+
+func (c *azureDynamicSessionsClient) dataPlaneHTTPClient() *http.Client {
+	if c.dataHTTPClient != nil {
+		return c.dataHTTPClient
+	}
+	if c.httpClient != nil {
+		return c.httpClient
+	}
+	return &http.Client{}
+}
+
+func (c *azureDynamicSessionsClient) secureHTTPClient(source *http.Client) *http.Client {
 	if source == nil {
 		source = http.DefaultClient
 	}

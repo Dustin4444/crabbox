@@ -228,8 +228,80 @@ func TestNewAPINormalizesBaseURL(t *testing.T) {
 	if !ok {
 		t.Fatalf("api client=%T, want *client", apiClient)
 	}
+	if c.http == nil || c.dataHTTP == nil || c.http == c.dataHTTP {
+		t.Fatalf("fallback clients=control:%p data:%p, want separate clients", c.http, c.dataHTTP)
+	}
+	if c.http.Timeout != smolvmControlTimeout || c.dataHTTP.Timeout != 0 {
+		t.Fatalf("timeouts=control:%s data:%s", c.http.Timeout, c.dataHTTP.Timeout)
+	}
 	if c.base != "https://eu.smolmachines.com/base" {
 		t.Fatalf("base = %q, want normalized base URL", c.base)
+	}
+}
+
+func TestSmolVMFallbackBoundsControlAndPreservesCommand(t *testing.T) {
+	const controlTimeout = 30 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/machines/mach_1":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"id":`)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		case "/v1/machines/mach_1/exec":
+			time.Sleep(3 * controlTimeout)
+			_ = json.NewEncoder(w).Encode(map[string]any{"stdout": "ok", "exitCode": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	control, data := smolvmHTTPClients(nil, controlTimeout)
+	client := &client{
+		apiKey:   "smk_key",
+		base:     server.URL,
+		http:     secureSmolvmHTTPClient(control, server.URL),
+		dataHTTP: secureSmolvmHTTPClient(data, server.URL),
+	}
+	started := time.Now()
+	_, err := client.GetMachine(context.Background(), "mach_1")
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetMachine error=%v, want whole-request deadline", err)
+	}
+	controlElapsed := time.Since(started)
+	if controlElapsed >= time.Second {
+		t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
+	}
+
+	started = time.Now()
+	result, err := client.Exec(context.Background(), "mach_1", "true", "/workspace")
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("Exec result=%#v err=%v", result, err)
+	}
+	dataElapsed := time.Since(started)
+	if dataElapsed <= controlTimeout {
+		t.Fatalf("command completed in %s, want beyond %s", dataElapsed, controlTimeout)
+	}
+	t.Logf("SmolVM control body bounded in %s; synchronous command completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+}
+
+func TestSmolVMInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {
+	transport := &http.Transport{DisableKeepAlives: true}
+	injected := &http.Client{Transport: transport, Timeout: 17 * time.Second}
+	cfg := Config{}
+	cfg.Smolvm.APIKey = "smk_key"
+	cfg.Smolvm.BaseURL = "http://127.0.0.1:8787"
+	api, err := newAPI(cfg, Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*client)
+	if client.http.Transport != transport || client.dataHTTP.Transport != transport || client.http.Timeout != injected.Timeout || client.dataHTTP.Timeout != injected.Timeout {
+		t.Fatalf("settings=control:(%T,%s) data:(%T,%s)", client.http.Transport, client.http.Timeout, client.dataHTTP.Transport, client.dataHTTP.Timeout)
+	}
+	if injected.CheckRedirect != nil {
+		t.Fatal("constructor mutated injected redirect policy")
 	}
 }
 

@@ -9,11 +9,112 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestBlaxelFallbackBoundsControlAndPreservesUpload(t *testing.T) {
+	const controlTimeout = 30 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/sandboxes":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `[{"metadata":`)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/sandboxes/sbx-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{
+				"name": "sbx-1",
+				"url":  serverURL(r) + "/sandbox/sbx-1",
+			}})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/filesystem-multipart/initiate/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"uploadId": "upload-1"})
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/filesystem-multipart/upload-1/part"):
+			if err := r.ParseMultipartForm(1024); err != nil {
+				t.Error(err)
+			}
+			time.Sleep(3 * controlTimeout)
+			_ = json.NewEncoder(w).Encode(map[string]any{"etag": "etag-1", "partNumber": 1})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/filesystem-multipart/upload-1/complete"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control, data := blaxelHTTPClients(nil, controlTimeout)
+	client := &restClient{
+		base:     server.URL,
+		apiKey:   "test-key",
+		version:  defaultAPIVersion,
+		http:     secureHTTPClient(control),
+		dataHTTP: secureHTTPClient(data),
+	}
+	started := time.Now()
+	err := client.Probe(context.Background())
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Probe error=%v, want whole-request deadline", err)
+	}
+	controlElapsed := time.Since(started)
+	if controlElapsed >= time.Second {
+		t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
+	}
+
+	started = time.Now()
+	if err := client.UploadFile(context.Background(), "sbx-1", "/tmp/archive.tgz", strings.NewReader("archive")); err != nil {
+		t.Fatal(err)
+	}
+	dataElapsed := time.Since(started)
+	if dataElapsed <= controlTimeout {
+		t.Fatalf("upload completed in %s, want beyond %s", dataElapsed, controlTimeout)
+	}
+	t.Logf("Blaxel control body bounded in %s; multipart upload completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+}
+
+func TestBlaxelInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {
+	transport := &http.Transport{DisableKeepAlives: true}
+	injected := &http.Client{Transport: transport, Timeout: 17 * time.Second}
+	api, err := newBlaxelClient(core.Config{Blaxel: core.BlaxelConfig{APIKey: "test-key"}}, core.Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*restClient)
+	if client.http.Transport != transport || client.dataHTTP.Transport != transport || client.http.Timeout != injected.Timeout || client.dataHTTP.Timeout != injected.Timeout {
+		t.Fatalf("settings=control:(%T,%s) data:(%T,%s)", client.http.Transport, client.http.Timeout, client.dataHTTP.Transport, client.dataHTTP.Timeout)
+	}
+	if injected.CheckRedirect != nil {
+		t.Fatal("constructor mutated injected redirect policy")
+	}
+}
+
+func TestBlaxelControlRedirectDoesNotLeakCredentials(t *testing.T) {
+	var targetRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		targetRequests.Add(1)
+	}))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Errorf("Authorization=%q", got)
+		}
+		http.Redirect(w, r, target.URL+"/capture", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+	api, err := newBlaxelClient(core.Config{Blaxel: core.BlaxelConfig{APIURL: origin.URL, APIKey: "test-key"}}, core.Runtime{HTTP: origin.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Probe(context.Background()); err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("Probe error=%v, want redirect rejection", err)
+	}
+	if targetRequests.Load() != 0 {
+		t.Fatalf("redirect target requests=%d, want 0", targetRequests.Load())
+	}
+}
 
 func TestValidateAPIURLCanonicalizesAndRejectsUnsafe(t *testing.T) {
 	got, err := ValidateAPIURL("https://API.BLAXEL.AI:443/v1/")

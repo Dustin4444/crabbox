@@ -3,12 +3,80 @@ package freestyle
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestFreestyleFallbackBoundsControlAndPreservesCommand(t *testing.T) {
+	const controlTimeout = 30 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/vms/vm123":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"id":`)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		case "/v1/vms/vm123/exec-await":
+			time.Sleep(3 * controlTimeout)
+			_ = json.NewEncoder(w).Encode(map[string]any{"stdout": "ok", "statusCode": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	control, data := freestyleHTTPClients(nil, controlTimeout)
+	client := &freestyleHTTPClient{
+		apiKey:         "test-key",
+		apiURL:         server.URL,
+		httpClient:     secureFreestyleHTTPClient(control, server.URL),
+		dataHTTPClient: secureFreestyleHTTPClient(data, server.URL),
+	}
+	started := time.Now()
+	_, err := client.GetVM(context.Background(), "vm123")
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetVM error=%v, want whole-request deadline", err)
+	}
+	controlElapsed := time.Since(started)
+	if controlElapsed >= time.Second {
+		t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
+	}
+
+	started = time.Now()
+	code, err := client.Exec(context.Background(), "vm123", "true", io.Discard, io.Discard)
+	if err != nil || code != 0 {
+		t.Fatalf("Exec code=%d err=%v", code, err)
+	}
+	dataElapsed := time.Since(started)
+	if dataElapsed <= controlTimeout {
+		t.Fatalf("command completed in %s, want beyond %s", dataElapsed, controlTimeout)
+	}
+	t.Logf("Freestyle control body bounded in %s; synchronous command completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+}
+
+func TestFreestyleInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {
+	transport := &http.Transport{DisableKeepAlives: true}
+	injected := &http.Client{Transport: transport, Timeout: 17 * time.Second}
+	api, err := newFreestyleClient(Config{Freestyle: FreestyleConfig{
+		APIKey: "test-key",
+		APIURL: "http://127.0.0.1:8787",
+	}}, Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*freestyleHTTPClient)
+	if client.httpClient.Transport != transport || client.dataHTTPClient.Transport != transport || client.httpClient.Timeout != injected.Timeout || client.dataHTTPClient.Timeout != injected.Timeout {
+		t.Fatalf("settings=control:(%T,%s) data:(%T,%s)", client.httpClient.Transport, client.httpClient.Timeout, client.dataHTTPClient.Transport, client.dataHTTPClient.Timeout)
+	}
+	if injected.CheckRedirect != nil {
+		t.Fatal("constructor mutated injected redirect policy")
+	}
+}
 
 func TestFreestyleClientRedactsAPIKeyFromAllResponseErrors(t *testing.T) {
 	const apiKey = "fs_test_response_secret"

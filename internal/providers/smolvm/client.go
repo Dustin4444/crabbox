@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -32,10 +33,13 @@ type api interface {
 }
 
 type client struct {
-	apiKey string
-	base   string
-	http   *http.Client
+	apiKey   string
+	base     string
+	http     *http.Client
+	dataHTTP *http.Client
 }
+
+const smolvmControlTimeout = 60 * time.Second
 
 type createRequest struct {
 	Name       string                 `json:"name,omitempty"`
@@ -141,10 +145,7 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	// server), so this client talks net/http directly to the documented
 	// OpenAPI, like other direct-API providers. If an official Go client
 	// appears, the transport can be swapped behind the api interface.
-	httpClient := rt.HTTP
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	httpClient, dataHTTPClient := smolvmHTTPClients(rt.HTTP, smolvmControlTimeout)
 	base := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), "https://api.smolmachines.com")
 	parsed, err := url.Parse(base)
 	if err != nil {
@@ -166,7 +167,19 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 		return nil, exit(2, "%s url host %q is not an official Smol Machines endpoint; set CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL=1 to send credentials to a custom control plane", providerName, parsed.Hostname())
 	}
 	base = strings.TrimRight(parsed.String(), "/")
-	return &client{apiKey: apiKey, base: base, http: secureSmolvmHTTPClient(httpClient, base)}, nil
+	return &client{
+		apiKey:   apiKey,
+		base:     base,
+		http:     secureSmolvmHTTPClient(httpClient, base),
+		dataHTTP: secureSmolvmHTTPClient(dataHTTPClient, base),
+	}, nil
+}
+
+func smolvmHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
+	if injected != nil {
+		return injected, injected
+	}
+	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func secureSmolvmHTTPClient(source *http.Client, apiURL string) *http.Client {
@@ -303,7 +316,7 @@ func (c *client) Exec(ctx context.Context, machineID, command, folder string) (e
 		}
 		execReq.CWD = f
 	}
-	if err := c.doJSON(ctx, http.MethodPost, "/v1/machines/"+url.PathEscape(machineID)+"/exec", nil, execReq, &result); err != nil {
+	if err := c.doDataJSON(ctx, http.MethodPost, "/v1/machines/"+url.PathEscape(machineID)+"/exec", nil, execReq, &result); err != nil {
 		return execResult{}, err
 	}
 	// Hosted API uses exitCode; the local smolvm serve variant uses exit_code.
@@ -410,6 +423,18 @@ echo "smolvm-direct-write: ok"
 }
 
 func (c *client) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
+	return c.doJSONWithClient(ctx, c.http, method, path, query, body, out)
+}
+
+func (c *client) doDataJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
+	httpClient := c.dataHTTP
+	if httpClient == nil {
+		httpClient = c.http
+	}
+	return c.doJSONWithClient(ctx, httpClient, method, path, query, body, out)
+}
+
+func (c *client) doJSONWithClient(ctx context.Context, httpClient *http.Client, method, path string, query url.Values, body any, out any) error {
 	var input io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -430,7 +455,7 @@ func (c *client) doJSON(ctx context.Context, method, path string, query url.Valu
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.http.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
