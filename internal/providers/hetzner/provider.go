@@ -14,6 +14,20 @@ func init() {
 
 type Provider struct{}
 
+var _ core.ProviderClassSpecProvider = Provider{}
+
+// Hetzner publishes these dedicated-vCPU shapes in its General Purpose plan:
+// https://www.hetzner.com/cloud/general-purpose/
+var serverShapes = map[string]struct {
+	vcpus    int
+	memoryGB int
+}{
+	"ccx33": {vcpus: 8, memoryGB: 32},
+	"ccx43": {vcpus: 16, memoryGB: 64},
+	"ccx53": {vcpus: 32, memoryGB: 128},
+	"ccx63": {vcpus: 48, memoryGB: 192},
+}
+
 func (Provider) Name() string      { return "hetzner" }
 func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
@@ -83,6 +97,26 @@ func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoPr
 func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 	return nil
 }
+
+func (Provider) ClassSpecs() []core.ClassSpec {
+	classes := []string{"standard", "fast", "large", "beast"}
+	specs := make([]core.ClassSpec, 0, len(classes))
+	for _, class := range classes {
+		serverType := core.HetznerServerTypeCandidatesForClass(class)[0]
+		vcpus, memoryGB := serverShape(serverType)
+		specs = append(specs, core.ClassSpec{Class: class, Type: serverType, VCPUs: vcpus, MemoryGB: memoryGB})
+	}
+	return specs
+}
+
+func serverShape(serverType string) (int, int) {
+	shape, ok := serverShapes[strings.ToLower(strings.TrimSpace(serverType))]
+	if !ok {
+		return 0, 0
+	}
+	return shape.vcpus, shape.memoryGB
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewHetznerLeaseBackend(p.Spec(), cfg, rt), nil
 }

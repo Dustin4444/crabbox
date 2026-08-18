@@ -2,6 +2,8 @@ package gcp
 
 import (
 	"flag"
+	"strconv"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -11,6 +13,17 @@ func init() {
 }
 
 type Provider struct{}
+
+var _ core.ProviderClassSpecProvider = Provider{}
+
+// Google publishes these standard machine-family ratios in the Compute Engine
+// machine-family tables: https://cloud.google.com/compute/docs/general-purpose-machines
+var memoryQuarterGBPerVCPU = map[string]int{
+	"c4-standard":  15,
+	"c3-standard":  16,
+	"n2-standard":  16,
+	"n2d-standard": 16,
+}
 
 func (Provider) Name() string { return "gcp" }
 func (Provider) Aliases() []string {
@@ -75,6 +88,38 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 
 func (Provider) ServerTypeForClass(class string) string {
 	return core.GCPMachineTypeCandidatesForClass(class)[0]
+}
+
+func (Provider) ClassSpecs() []core.ClassSpec {
+	classes := []string{"standard", "fast", "large", "beast"}
+	specs := make([]core.ClassSpec, 0, len(classes))
+	for _, class := range classes {
+		machineType := core.GCPMachineTypeCandidatesForClass(class)[0]
+		vcpus, memoryGB := machineShape(machineType)
+		specs = append(specs, core.ClassSpec{Class: class, Type: machineType, VCPUs: vcpus, MemoryGB: memoryGB})
+	}
+	return specs
+}
+
+func machineShape(machineType string) (int, int) {
+	normalized := strings.ToLower(strings.TrimSpace(machineType))
+	separator := strings.LastIndexByte(normalized, '-')
+	if separator < 0 || separator == len(normalized)-1 {
+		return 0, 0
+	}
+	vcpus, err := strconv.Atoi(normalized[separator+1:])
+	if err != nil || vcpus <= 0 {
+		return 0, 0
+	}
+	memoryQuartersPerVCPU, ok := memoryQuarterGBPerVCPU[normalized[:separator]]
+	if !ok {
+		return vcpus, 0
+	}
+	memoryQuarters := vcpus * memoryQuartersPerVCPU
+	if memoryQuarters%4 != 0 {
+		return vcpus, 0
+	}
+	return vcpus, memoryQuarters / 4
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

@@ -12,6 +12,9 @@ func init() {
 }
 
 type Provider struct{}
+
+var _ core.ProviderClassSpecProvider = Provider{}
+
 type flagValues struct {
 	Backend     *string
 	OSDisk      *string
@@ -156,6 +159,33 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 
 func (Provider) ServerTypeForClass(class string) string {
 	return core.AzureVMSizeCandidatesForClass(class)[0]
+}
+
+func (Provider) ClassSpecs() []core.ClassSpec {
+	classes := []string{"standard", "fast", "large", "beast"}
+	specs := make([]core.ClassSpec, 0, len(classes))
+	for _, class := range classes {
+		vmSize := core.AzureVMSizeCandidatesForClass(class)[0]
+		vcpus, memoryGB := vmShape(vmSize)
+		specs = append(specs, core.ClassSpec{Class: class, Type: vmSize, VCPUs: vcpus, MemoryGB: memoryGB})
+	}
+	return specs
+}
+
+func vmShape(vmSize string) (int, int) {
+	normalized := strings.ToLower(strings.TrimSpace(vmSize))
+	const prefix = "standard_d"
+	if !strings.HasPrefix(normalized, prefix) || len(normalized) == len(prefix) || normalized[len(prefix)] < '0' || normalized[len(prefix)] > '9' || !strings.HasSuffix(normalized, "_v6") {
+		return 0, 0
+	}
+	vcpus, ok := core.AzureVMSizeVCPUCount(vmSize)
+	if !ok || vcpus <= 0 {
+		return 0, 0
+	}
+	// Azure publishes both Dadsv6 and Ddsv6 at 4 GiB per vCPU:
+	// https://learn.microsoft.com/azure/virtual-machines/sizes/general-purpose/dadsv6-series
+	// https://learn.microsoft.com/azure/virtual-machines/sizes/general-purpose/ddsv6-series
+	return vcpus, vcpus * 4
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

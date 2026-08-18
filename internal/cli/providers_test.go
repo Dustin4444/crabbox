@@ -93,6 +93,16 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if firecracker == nil {
 		t.Fatal("firecracker provider not found")
 	}
+	if len(firecracker.Classes) != 0 {
+		t.Fatalf("firecracker classes=%#v want omitted", firecracker.Classes)
+	}
+	encodedFirecracker, err := json.Marshal(firecracker)
+	if err != nil {
+		t.Fatalf("marshal firecracker matrix entry: %v", err)
+	}
+	if bytes.Contains(encodedFirecracker, []byte(`"classes"`)) {
+		t.Fatalf("firecracker JSON unexpectedly contains classes: %s", encodedFirecracker)
+	}
 	if vast == nil {
 		t.Fatal("vast provider not found")
 	}
@@ -399,6 +409,64 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 	}
 	if !strings.Contains(text, "blacksmith-testbox\n") || !strings.Contains(text, "  lifecycle: run-session\n") {
 		t.Fatalf("providers output missing run-session lifecycle:\n%s", text)
+	}
+}
+
+func TestPrintProviderMatrixClasses(t *testing.T) {
+	var output bytes.Buffer
+	printProviderMatrix(&output, []providerMatrixEntry{{
+		Provider:    "example",
+		Family:      "example",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []string{targetLinux},
+		Features:    FeatureSet{},
+		Coordinator: string(CoordinatorNever),
+		Classes: []ClassSpec{
+			{Class: "standard", Type: "shape-1", VCPUs: 4, MemoryGB: 8},
+			{Class: "fast", Type: "shape-2", VCPUs: 8},
+			{Class: "large", Type: "shape-3", MemoryGB: 32},
+			{Class: "beast", Type: "shape-4"},
+		},
+	}})
+	for _, want := range []string{
+		"  class standard: shape-1 (4 vCPU, 8 GB RAM)\n",
+		"  class fast: shape-2 (8 vCPU)\n",
+		"  class large: shape-3 (32 GB RAM)\n",
+		"  class beast: shape-4\n",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("provider matrix output missing %q:\n%s", want, output.String())
+		}
+	}
+}
+
+func TestClassSpecJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		spec ClassSpec
+		want string
+	}{
+		{
+			name: "known shape",
+			spec: ClassSpec{Class: "standard", Type: "shape-1", VCPUs: 4, MemoryGB: 8},
+			want: `{"class":"standard","type":"shape-1","vcpu":4,"memoryGb":8}`,
+		},
+		{
+			name: "unknown shape",
+			spec: ClassSpec{Class: "standard", Type: "shape-1"},
+			want: `{"class":"standard","type":"shape-1"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := json.Marshal(test.spec)
+			if err != nil {
+				t.Fatalf("marshal ClassSpec: %v", err)
+			}
+			if string(encoded) != test.want {
+				t.Fatalf("ClassSpec JSON=%s want %s", encoded, test.want)
+			}
+		})
 	}
 }
 
@@ -1866,17 +1934,29 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 	}
 
 	var firecracker *providerMatrixEntry
-	var aws *providerMatrixEntry
+	classProviders := map[string]*providerMatrixEntry{}
 	for i := range entries {
 		switch entries[i].Provider {
-		case "aws":
-			aws = &entries[i]
 		case "firecracker":
 			firecracker = &entries[i]
+		case "aws", "azure", "gcp", "hetzner", "namespace-instance":
+			classProviders[entries[i].Provider] = &entries[i]
 		}
 	}
-	if aws == nil {
-		t.Fatal("built binary providers json missing aws")
+	for _, provider := range []string{"aws", "azure", "gcp", "hetzner", "namespace-instance"} {
+		entry := classProviders[provider]
+		if entry == nil {
+			t.Fatalf("built binary providers json missing %s", provider)
+		}
+		if len(entry.Classes) != 4 {
+			t.Fatalf("%s classes=%#v want four entries", provider, entry.Classes)
+		}
+		for classIndex, className := range []string{"standard", "fast", "large", "beast"} {
+			classSpec := entry.Classes[classIndex]
+			if classSpec.Class != className || classSpec.Type == "" || classSpec.VCPUs <= 0 || classSpec.MemoryGB <= 0 {
+				t.Fatalf("%s class[%d]=%#v", provider, classIndex, classSpec)
+			}
+		}
 	}
 	if firecracker == nil {
 		t.Fatal("built binary providers json missing firecracker")

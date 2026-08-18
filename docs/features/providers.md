@@ -69,20 +69,20 @@ checks whether the selected provider is usable from the current environment.
 `--class standard|fast|large|beast` (default `beast`) maps to an ordered list of
 provider machine types. Crabbox tries each in turn, falling back when capacity or
 quota rejects a request. The maps below come from `internal/cli/config.go` and
-`internal/cli/gcp.go`:
+the corresponding provider adapters:
 
 ```text
 Hetzner
-standard  ccx33, cpx62, cx53
-fast      ccx43, cpx62, cx53
-large     ccx53, ccx43, cpx62, cx53
-beast     ccx63, ccx53, ccx43, cpx62, cx53
+standard  ccx33 (8 vCPU, 32 GB RAM), cpx62, cx53
+fast      ccx43 (16 vCPU, 64 GB RAM), cpx62, cx53
+large     ccx53 (32 vCPU, 128 GB RAM), ccx43, cpx62, cx53
+beast     ccx63 (48 vCPU, 192 GB RAM), ccx53, ccx43, cpx62, cx53
 
 AWS (Linux)
-standard  c7a.8xlarge, c7i.8xlarge, m7a.8xlarge, m7i.8xlarge, c7a.4xlarge
-fast      c7a.16xlarge, c7i.16xlarge, m7a.16xlarge, m7i.16xlarge, c7a.12xlarge, c7a.8xlarge
-large     c7a.24xlarge, c7i.24xlarge, m7a.24xlarge, m7i.24xlarge, r7a.24xlarge, c7a.16xlarge, c7a.12xlarge
-beast     c7a.48xlarge, c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, c7i.32xlarge, m7a.32xlarge, c7a.24xlarge, c7a.16xlarge
+standard  c7a.8xlarge (32 vCPU, 64 GB RAM), c7i.8xlarge, m7a.8xlarge, m7i.8xlarge, c7a.4xlarge
+fast      c7a.16xlarge (64 vCPU, 128 GB RAM), c7i.16xlarge, m7a.16xlarge, m7i.16xlarge, c7a.12xlarge, c7a.8xlarge
+large     c7a.24xlarge (96 vCPU, 192 GB RAM), c7i.24xlarge, m7a.24xlarge, m7i.24xlarge, r7a.24xlarge, c7a.16xlarge, c7a.12xlarge
+beast     c7a.48xlarge (192 vCPU, 384 GB RAM), c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, c7i.32xlarge, m7a.32xlarge, c7a.24xlarge, c7a.16xlarge
 
 AWS Windows (normal)
 standard  m7i.large, m7a.large, t3.large
@@ -102,10 +102,22 @@ mac-m4max.metal, mac2-m1ultra.metal, mac-m3ultra.metal, then mac1.metal unless
 `--type` is set
 
 Google Cloud
-standard  c4-standard-32, c3-standard-22, n2-standard-32, n2d-standard-32
-fast      c4-standard-64, c3-standard-44, n2-standard-64, n2d-standard-64, c4-standard-32
-large     c4-standard-96, c3-standard-88, n2-standard-80, n2d-standard-96, c4-standard-64
-beast     c4-standard-192, c4-standard-96, c3-standard-176, c3-standard-88, n2d-standard-224, n2-standard-128
+standard  c4-standard-32 (32 vCPU, 120 GB RAM), c3-standard-22, n2-standard-32, n2d-standard-32
+fast      c4-standard-64 (64 vCPU, 240 GB RAM), c3-standard-44, n2-standard-64, n2d-standard-64, c4-standard-32
+large     c4-standard-96 (96 vCPU, 360 GB RAM), c3-standard-88, n2-standard-80, n2d-standard-96, c4-standard-64
+beast     c4-standard-192 (192 vCPU, 720 GB RAM), c4-standard-96, c3-standard-176, c3-standard-88, n2d-standard-224, n2-standard-128
+
+Azure (Linux)
+standard  Standard_D32ads_v6 (32 vCPU, 128 GB RAM), Standard_D32ds_v6, Standard_F32s_v2, Standard_D32ads_v5, Standard_D32ds_v5, Standard_D16ads_v6, Standard_D16ds_v6, Standard_F16s_v2
+fast      Standard_D64ads_v6 (64 vCPU, 256 GB RAM), Standard_D64ds_v6, Standard_F64s_v2, Standard_D64ads_v5, Standard_D64ds_v5, Standard_D48ads_v6, Standard_D48ds_v6, Standard_F48s_v2, Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2
+large     Standard_D96ads_v6 (96 vCPU, 384 GB RAM), Standard_D96ds_v6, Standard_D96ads_v5, Standard_D96ds_v5, Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2, Standard_D48ads_v6, Standard_D48ds_v6, Standard_F48s_v2
+beast     Standard_D192ds_v6 (192 vCPU, 768 GB RAM), Standard_D128ds_v6, Standard_D96ads_v6, Standard_D96ds_v6, Standard_D96ads_v5, Standard_D96ds_v5, Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2
+
+Namespace Instance
+standard  4x8 (4 vCPU, 8 GB RAM)
+fast      8x16 (8 vCPU, 16 GB RAM)
+large     16x32 (16 vCPU, 32 GB RAM)
+beast     32x64 (32 vCPU, 64 GB RAM)
 
 Namespace Devbox
 standard  S

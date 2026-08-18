@@ -2,6 +2,7 @@ package aws
 
 import (
 	"flag"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -11,6 +12,27 @@ func init() {
 }
 
 type Provider struct{}
+
+var _ core.ProviderClassSpecProvider = Provider{}
+
+// AWS publishes C7 compute-optimized instances at 2 GiB/vCPU, M7/M8
+// general-purpose instances at 4 GiB/vCPU, and R7/R8 memory-optimized instances
+// in its EC2 instance-family tables:
+// https://docs.aws.amazon.com/ec2/latest/instancetypes/co.html
+// https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html
+// https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html
+var memoryGiBPerVCPU = map[string]int{
+	"c7a": 2,
+	"c7g": 2,
+	"c7i": 2,
+	"m7a": 4,
+	"m7g": 4,
+	"m7i": 4,
+	"m8i": 4,
+	"r7a": 8,
+	"r7g": 8,
+	"r8i": 8,
+}
 
 func (Provider) Name() string      { return "aws" }
 func (Provider) Aliases() []string { return nil }
@@ -70,6 +92,29 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 
 func (Provider) ServerTypeForClass(class string) string {
 	return core.AWSInstanceTypeCandidatesForClass(class)[0]
+}
+
+func (Provider) ClassSpecs() []core.ClassSpec {
+	classes := []string{"standard", "fast", "large", "beast"}
+	specs := make([]core.ClassSpec, 0, len(classes))
+	for _, class := range classes {
+		instanceType := core.AWSInstanceTypeCandidatesForClass(class)[0]
+		vcpus, memoryGB := instanceShape(instanceType)
+		specs = append(specs, core.ClassSpec{Class: class, Type: instanceType, VCPUs: vcpus, MemoryGB: memoryGB})
+	}
+	return specs
+}
+
+func instanceShape(instanceType string) (int, int) {
+	vcpus := core.AWSInstanceTypeVCPUs(instanceType)
+	if vcpus == 0 {
+		return 0, 0
+	}
+	family, _, ok := strings.Cut(strings.ToLower(strings.TrimSpace(instanceType)), ".")
+	if !ok {
+		return vcpus, 0
+	}
+	return vcpus, vcpus * memoryGiBPerVCPU[family]
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

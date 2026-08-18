@@ -376,6 +376,10 @@ aws
   runtime: ssh-host,interactive
   reachability: ssh-tunnel
   coordinator: supported
+  class standard: c7a.8xlarge (32 vCPU, 64 GB RAM)
+  class fast: c7a.16xlarge (64 vCPU, 128 GB RAM)
+  class large: c7a.24xlarge (96 vCPU, 192 GB RAM)
+  class beast: c7a.48xlarge (192 vCPU, 384 GB RAM)
 
 parallels
   family: parallels
@@ -460,16 +464,22 @@ Direct self-hosted SSH-lease providers such as `firecracker`, `proxmox`, and
 ```json
 [
   {
-    "provider": "hostinger",
-    "family": "hostinger",
+    "provider": "aws",
+    "family": "aws",
     "kind": "ssh-lease",
-    "category": "direct-cloud",
-    "targets": ["linux"],
-    "features": ["ssh", "crabbox-sync", "cleanup"],
-    "runtime": ["ssh-host"],
+    "category": "brokerable-cloud",
+    "targets": ["linux", "windows/normal", "windows/wsl2", "macos"],
+    "features": ["ssh", "crabbox-sync", "cleanup", "desktop", "browser", "code"],
+    "runtime": ["ssh-host", "interactive"],
     "reachability": ["ssh-tunnel"],
-    "lifecycle": ["cleanup"],
-    "coordinator": "never"
+    "lifecycle": ["coordinator-governed", "cleanup"],
+    "coordinator": "supported",
+    "classes": [
+      {"class": "standard", "type": "c7a.8xlarge", "vcpu": 32, "memoryGb": 64},
+      {"class": "fast", "type": "c7a.16xlarge", "vcpu": 64, "memoryGb": 128},
+      {"class": "large", "type": "c7a.24xlarge", "vcpu": 96, "memoryGb": 192},
+      {"class": "beast", "type": "c7a.48xlarge", "vcpu": 192, "memoryGb": 384}
+    ]
   },
   {
     "provider": "blacksmith-testbox",
@@ -548,6 +558,12 @@ Direct self-hosted SSH-lease providers such as `firecracker`, `proxmox`, and
   - `supported`: the provider can be brokered through the coordinator when a
     broker URL is configured; otherwise it runs direct from the CLI.
   - `never`: the provider always runs direct from the CLI.
+- `classes`: the primary machine type selected for each provider-neutral class
+  on the provider's default Linux/amd64 target, with nominal `vcpu` and
+  `memoryGb` values when known. When present, the array contains `standard`,
+  `fast`, `large`, and `beast` in that order. Providers without a machine-sizing
+  implementation omit the field; unknown shape values are omitted rather than
+  reported as zero.
 
 Recommendation JSON returns ranked objects:
 
