@@ -7,6 +7,7 @@
 - Added artifact globs and required-artifact proof gates for SSH-backed macOS targets with non-following, protected-path-safe matching. Thanks @coygeek.
 - Added `tiny` and `small` machine classes for lower-cost smoke checks and small repositories.
 - Added authoritative, target-aware machine-class catalogs to both JSON provider discovery commands while preserving the initial default-target class summaries.
+- Added a built-in Machine0 SSH-lease provider with live size and GPU pricing, persistent VM lifecycle, explicit suspend/resume, native versioned images, and tunneled Linux desktop support.
 - Added an opt-in `cmake --version` preflight probe for POSIX, WSL2, and native Windows targets. Thanks @coygeek.
 
 ### Fixed
