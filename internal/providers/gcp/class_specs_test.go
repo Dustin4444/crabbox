@@ -1,0 +1,47 @@
+package gcp
+
+import (
+	"reflect"
+	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+)
+
+func TestClassSpecs(t *testing.T) {
+	want := []core.ClassSpec{
+		{Class: "standard", Type: "c4-standard-32", VCPUs: 32, MemoryGB: 120},
+		{Class: "fast", Type: "c4-standard-64", VCPUs: 64, MemoryGB: 240},
+		{Class: "large", Type: "c4-standard-96", VCPUs: 96, MemoryGB: 360},
+		{Class: "beast", Type: "c4-standard-192", VCPUs: 192, MemoryGB: 720},
+	}
+	if got := (Provider{}).ClassSpecs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ClassSpecs()=%#v want %#v", got, want)
+	}
+}
+
+func TestMachineShape(t *testing.T) {
+	tests := []struct {
+		name       string
+		machine    string
+		wantVCPUs  int
+		wantMemory int
+	}{
+		{name: "C4 standard", machine: "c4-standard-32", wantVCPUs: 32, wantMemory: 120},
+		{name: "C3 standard", machine: "c3-standard-22", wantVCPUs: 22, wantMemory: 88},
+		{name: "N2 standard", machine: "n2-standard-32", wantVCPUs: 32, wantMemory: 128},
+		{name: "N2D standard", machine: "n2d-standard-32", wantVCPUs: 32, wantMemory: 128},
+		{name: "known vCPU only", machine: "c4-highcpu-32", wantVCPUs: 32},
+		{name: "unknown standard family", machine: "future-standard-32", wantVCPUs: 32},
+		{name: "fractional whole GB", machine: "c4-standard-1", wantVCPUs: 1},
+		{name: "unparseable vCPU", machine: "c4-standard-many"},
+		{name: "missing suffix", machine: "c4-standard"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotVCPUs, gotMemory := machineShape(test.machine)
+			if gotVCPUs != test.wantVCPUs || gotMemory != test.wantMemory {
+				t.Fatalf("machineShape(%q)=(%d,%d) want (%d,%d)", test.machine, gotVCPUs, gotMemory, test.wantVCPUs, test.wantMemory)
+			}
+		})
+	}
+}

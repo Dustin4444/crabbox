@@ -4,6 +4,7 @@ import (
 	"flag"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -14,6 +15,8 @@ func init() {
 }
 
 type Provider struct{}
+
+var _ core.ProviderClassSpecProvider = Provider{}
 
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return []string{"namespace-compute"} }
@@ -133,4 +136,28 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 
 func (Provider) ServerTypeForClass(class string) string {
 	return machineTypeForClass(class)
+}
+
+func (Provider) ClassSpecs() []core.ClassSpec {
+	classes := []string{"standard", "fast", "large", "beast"}
+	specs := make([]core.ClassSpec, 0, len(classes))
+	for _, class := range classes {
+		machineType := machineTypeForClass(class)
+		vcpus, memoryGB := machineShape(machineType)
+		specs = append(specs, core.ClassSpec{Class: class, Type: machineType, VCPUs: vcpus, MemoryGB: memoryGB})
+	}
+	return specs
+}
+
+func machineShape(machineType string) (int, int) {
+	cpuValue, memoryValue, ok := strings.Cut(strings.ToLower(strings.TrimSpace(machineType)), "x")
+	if !ok || cpuValue == "" || memoryValue == "" || strings.Contains(memoryValue, "x") {
+		return 0, 0
+	}
+	vcpus, cpuErr := strconv.Atoi(cpuValue)
+	memoryGB, memoryErr := strconv.Atoi(memoryValue)
+	if cpuErr != nil || memoryErr != nil || vcpus <= 0 || memoryGB <= 0 {
+		return 0, 0
+	}
+	return vcpus, memoryGB
 }

@@ -55,6 +55,10 @@ func AWSInstanceTypeCandidatesForClass(class string) []string {
 	return awsInstanceTypeCandidatesForClass(class)
 }
 
+func AWSInstanceTypeVCPUs(instanceType string) int {
+	return awsInstanceTypeVCPUs(instanceType)
+}
+
 func AzureVMSizeCandidatesForConfig(cfg Config) []string {
 	return azureVMSizeCandidatesForConfig(cfg)
 }
@@ -63,8 +67,16 @@ func AzureVMSizeCandidatesForClass(class string) []string {
 	return azureVMSizeCandidatesForClass(class)
 }
 
+func AzureVMSizeVCPUCount(vmSize string) (int, bool) {
+	return azureVMSizeVCPUCount(vmSize)
+}
+
 func GCPMachineTypeCandidatesForClass(class string) []string {
 	return gcpMachineTypeCandidatesForClass(class)
+}
+
+func HetznerServerTypeCandidatesForClass(class string) []string {
+	return serverTypeCandidatesForClass(class)
 }
 
 func ProxmoxServerTypeForConfig(cfg Config) string {
