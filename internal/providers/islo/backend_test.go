@@ -696,6 +696,50 @@ func TestIsloClientUsesBoundedDefaultTransport(t *testing.T) {
 	}
 }
 
+type recordingDefaultRoundTripper struct {
+	calls int
+}
+
+func (r *recordingDefaultRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	r.calls++
+	return nil, errors.New("deny all")
+}
+
+func TestNewIsloClientRejectsUnsupportedDefaultTransport(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	recorder := &recordingDefaultRoundTripper{}
+	http.DefaultTransport = recorder
+
+	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, Runtime{})
+	if api != nil || err == nil || !strings.Contains(err.Error(), "non-nil *http.Transport") {
+		t.Fatalf("api=%#v err=%v, want transport setup error", api, err)
+	}
+	if recorder.calls != 0 {
+		t.Fatalf("custom default invoked %d times, want 0", recorder.calls)
+	}
+}
+
+func TestNewIsloClientAcceptsExplicitClientWithUnsupportedDefault(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = &recordingDefaultRoundTripper{}
+	injectedTransport := &recordingDefaultRoundTripper{}
+	injected := &http.Client{Transport: injectedTransport}
+
+	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ok := api.(*isloSDKClient)
+	if !ok {
+		t.Fatalf("api=%T, want *isloSDKClient", api)
+	}
+	if client.httpClient.Transport != injectedTransport {
+		t.Fatal("newIsloClient did not preserve the explicit transport")
+	}
+}
+
 func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}

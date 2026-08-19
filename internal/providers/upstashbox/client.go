@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type api interface {
@@ -71,7 +73,11 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = defaultUpstashBoxHTTPClient()
+		var err error
+		httpClient, err = defaultUpstashBoxHTTPClient()
+		if err != nil {
+			return nil, fmt.Errorf("%s HTTP client setup: %w", providerName, err)
+		}
 	}
 	base := strings.TrimRight(blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com"), "/")
 	return &client{apiKey: apiKey, base: base, http: secureUpstashBoxHTTPClient(httpClient, base)}, nil
@@ -121,10 +127,13 @@ func upstashBoxCleanupContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), upstashBoxCleanupTimeout)
 }
 
-func defaultUpstashBoxHTTPClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+func defaultUpstashBoxHTTPClient() (*http.Client, error) {
+	transport, err := core.CloneDefaultTransport()
+	if err != nil {
+		return nil, err
+	}
 	transport.ResponseHeaderTimeout = upstashBoxDefaultResponseHeaderTimeout
-	return &http.Client{Transport: transport}
+	return &http.Client{Transport: transport}, nil
 }
 
 func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, error) {

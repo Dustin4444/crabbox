@@ -25,7 +25,7 @@ type backend struct {
 	cfg        Config
 	rt         Runtime
 	newControl func(context.Context, Config) (controlPlane, error)
-	newRunner  func(controlPlane, Config, Runtime) runnerAPI
+	newRunner  func(controlPlane, Config, Runtime) (runnerAPI, error)
 }
 
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -34,7 +34,7 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 		cfg:        cfg,
 		rt:         rt,
 		newControl: newControlPlane,
-		newRunner: func(control controlPlane, cfg Config, rt Runtime) runnerAPI {
+		newRunner: func(control controlPlane, cfg Config, rt Runtime) (runnerAPI, error) {
 			return newRunnerClient(control, rt.HTTP, cfg.AWSRegion)
 		},
 	}
@@ -367,7 +367,11 @@ func (b *backend) clients(ctx context.Context) (controlPlane, runnerAPI, error) 
 	if err != nil {
 		return nil, nil, err
 	}
-	return control, b.newRunner(control, b.cfg, b.rt), nil
+	runner, err := b.newRunner(control, b.cfg, b.rt)
+	if err != nil {
+		return nil, nil, err
+	}
+	return control, runner, nil
 }
 
 func (b *backend) create(ctx context.Context, control controlPlane, runner runnerAPI, repo Repo, requestedSlug string, keep, reclaim bool) (string, string, microVM, error) {

@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type loaderAPI interface {
@@ -140,7 +142,10 @@ var newLoaderAPI = func(cfg Config, rt Runtime) (loaderAPI, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = defaultHTTPClient(cfg)
+		httpClient, err = defaultHTTPClient(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("%s HTTP client setup: %w", providerName, err)
+		}
 	}
 	httpClient = noRedirectHTTPClient(httpClient)
 	return &client{
@@ -290,10 +295,13 @@ func isLoopbackHTTPURL(parsed *url.URL) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-func defaultHTTPClient(cfg Config) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+func defaultHTTPClient(cfg Config) (*http.Client, error) {
+	transport, err := core.CloneDefaultTransport()
+	if err != nil {
+		return nil, err
+	}
 	transport.ResponseHeaderTimeout = responseHeaderTimeout(cfg)
-	return &http.Client{Transport: transport}
+	return &http.Client{Transport: transport}, nil
 }
 
 func noRedirectHTTPClient(httpClient *http.Client) *http.Client {

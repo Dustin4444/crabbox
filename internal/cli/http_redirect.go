@@ -7,6 +7,19 @@ import (
 	"strings"
 )
 
+const cloneDefaultTransportError = "http.DefaultTransport must be a non-nil *http.Transport; inject an explicit HTTP client where supported"
+
+// CloneDefaultTransport copies http.DefaultTransport when it is a non-nil
+// *http.Transport. Callers that need to mutate transport settings must not
+// bypass a process-wide custom RoundTripper.
+func CloneDefaultTransport() (*http.Transport, error) {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || transport == nil {
+		return nil, errors.New(cloneDefaultTransportError)
+	}
+	return transport.Clone(), nil
+}
+
 // redirectCheckedHTTPClient clones source so callers can constrain redirects
 // without mutating a shared client or discarding its transport and timeouts.
 func redirectCheckedHTTPClient(source *http.Client, check func(*http.Request) error) *http.Client {

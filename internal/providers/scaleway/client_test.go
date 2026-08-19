@@ -318,6 +318,53 @@ func TestNewClientSanitizesSDKValidationError(t *testing.T) {
 	}
 }
 
+func TestNewClientRejectsUnsupportedDefaultTransport(t *testing.T) {
+	clearScalewayEnv(t)
+	t.Setenv("SCW_ACCESS_KEY", testScalewayAccessKey)
+	t.Setenv("SCW_SECRET_KEY", testScalewaySecretKey)
+	t.Setenv("SCW_DEFAULT_PROJECT_ID", testScalewayProjectID)
+	t.Setenv("SCW_DEFAULT_ORGANIZATION_ID", testScalewayOrganizationID)
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	calls := 0
+	http.DefaultTransport = scalewayRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("deny all")
+	})
+
+	client, err := newClient(core.Config{}, core.Runtime{})
+	if client != nil || err == nil || !strings.Contains(err.Error(), "non-nil *http.Transport") {
+		t.Fatalf("client=%#v err=%v, want transport setup error", client, err)
+	}
+	if calls != 0 {
+		t.Fatalf("custom default invoked %d times, want 0", calls)
+	}
+}
+
+func TestNewClientAcceptsExplicitHTTPClientWithUnsupportedDefault(t *testing.T) {
+	clearScalewayEnv(t)
+	t.Setenv("SCW_ACCESS_KEY", testScalewayAccessKey)
+	t.Setenv("SCW_SECRET_KEY", testScalewaySecretKey)
+	t.Setenv("SCW_DEFAULT_PROJECT_ID", testScalewayProjectID)
+	t.Setenv("SCW_DEFAULT_ORGANIZATION_ID", testScalewayOrganizationID)
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = scalewayRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("deny all")
+	})
+	injected := &http.Client{Transport: scalewayRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("injected")
+	})}
+
+	client, err := newClient(core.Config{}, core.Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client == nil {
+		t.Fatal("newClient returned nil client")
+	}
+}
+
 func TestSanitizeSDKErrorRedactsProfileValues(t *testing.T) {
 	const accessKey = "invalid-profile-access"
 	const secretKey = "invalid-profile-secret"

@@ -19,6 +19,8 @@ import (
 	"github.com/islo-labs/go-sdk/client"
 	"github.com/islo-labs/go-sdk/customauth"
 	"github.com/islo-labs/go-sdk/option"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -66,7 +68,11 @@ var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
 	baseURL := strings.TrimRight(blank(cfg.Islo.BaseURL, "https://api.islo.dev"), "/")
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = defaultIsloHTTPClient()
+		var err error
+		httpClient, err = defaultIsloHTTPClient()
+		if err != nil {
+			return nil, fmt.Errorf("%s HTTP client setup: %w", isloProvider, err)
+		}
 	}
 	httpClient, err := isloHTTPClientWithRedirectGuard(baseURL, httpClient)
 	if err != nil {
@@ -92,10 +98,13 @@ func isloCleanupContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), isloCleanupTimeout)
 }
 
-func defaultIsloHTTPClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+func defaultIsloHTTPClient() (*http.Client, error) {
+	transport, err := core.CloneDefaultTransport()
+	if err != nil {
+		return nil, err
+	}
 	transport.ResponseHeaderTimeout = isloDefaultResponseHeaderTimeout
-	return &http.Client{Transport: transport}
+	return &http.Client{Transport: transport}, nil
 }
 
 func isloHTTPClientWithRedirectGuard(baseURL string, source *http.Client) (*http.Client, error) {

@@ -18,6 +18,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/lambdamicrovms"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambdamicrovms/types"
 	"github.com/aws/smithy-go"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type microVM struct {
@@ -189,9 +191,13 @@ type runnerEvent struct {
 	Error    string `json:"error,omitempty"`
 }
 
-func newRunnerClient(control controlPlane, source *http.Client, region string) *runnerClient {
+func newRunnerClient(control controlPlane, source *http.Client, region string) (*runnerClient, error) {
 	if source == nil {
-		source = defaultRunnerHTTPClient(runnerResponseHeaderTimeout)
+		var err error
+		source, err = defaultRunnerHTTPClient(runnerResponseHeaderTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("%s HTTP client setup: %w", providerName, err)
+		}
 	}
 	cloned := *source
 	originalRedirect := source.CheckRedirect
@@ -207,13 +213,16 @@ func newRunnerClient(control controlPlane, source *http.Client, region string) *
 		}
 		return nil
 	}
-	return &runnerClient{control: control, http: &cloned, region: region}
+	return &runnerClient{control: control, http: &cloned, region: region}, nil
 }
 
-func defaultRunnerHTTPClient(responseHeaderTimeout time.Duration) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+func defaultRunnerHTTPClient(responseHeaderTimeout time.Duration) (*http.Client, error) {
+	transport, err := core.CloneDefaultTransport()
+	if err != nil {
+		return nil, err
+	}
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
-	return &http.Client{Transport: transport}
+	return &http.Client{Transport: transport}, nil
 }
 
 func (c *runnerClient) Health(ctx context.Context, vm microVM) error {

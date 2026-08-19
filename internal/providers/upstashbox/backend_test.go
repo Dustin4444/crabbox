@@ -338,6 +338,48 @@ func TestNewAPIUsesBoundedDefaultHTTPClient(t *testing.T) {
 	}
 }
 
+func TestNewAPIRejectsUnsupportedDefaultTransport(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	calls := 0
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("deny all")
+	})
+
+	api, err := newAPI(testConfig(), Runtime{})
+	if api != nil || err == nil || !strings.Contains(err.Error(), "non-nil *http.Transport") {
+		t.Fatalf("api=%#v err=%v, want transport setup error", api, err)
+	}
+	if calls != 0 {
+		t.Fatalf("custom default invoked %d times, want 0", calls)
+	}
+}
+
+func TestNewAPIAcceptsExplicitClientWithUnsupportedDefault(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("deny all")
+	})
+	injectedTransport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("injected")
+	})
+	injected := &http.Client{Transport: injectedTransport}
+
+	api, err := newAPI(testConfig(), Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ok := api.(*client)
+	if !ok {
+		t.Fatalf("api=%T, want *client", api)
+	}
+	if _, ok := client.http.Transport.(roundTripFunc); !ok {
+		t.Fatalf("transport=%T, want explicit roundTripFunc", client.http.Transport)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

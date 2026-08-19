@@ -263,7 +263,7 @@ func TestRunnerClientExecPreservesBinaryOutput(t *testing.T) {
 			Request:    req,
 		}, nil
 	})}
-	client := newRunnerClient(&fakeControlPlane{}, httpClient, "eu-west-1")
+	client := mustNewRunnerClient(t, &fakeControlPlane{}, httpClient, "eu-west-1")
 	var stdout bytes.Buffer
 	gotExit, err := client.Exec(context.Background(), microVM{ID: "mvm-test", Endpoint: "mvm-test.lambda-microvm.eu-west-1.on.aws"}, "true", "/workspace/crabbox", nil, &stdout, io.Discard)
 	if err != nil {
@@ -275,7 +275,7 @@ func TestRunnerClientExecPreservesBinaryOutput(t *testing.T) {
 }
 
 func TestNewRunnerClientDefaultsResponseHeaderTimeout(t *testing.T) {
-	client := newRunnerClient(&fakeControlPlane{}, nil, "eu-west-1")
+	client := mustNewRunnerClient(t, &fakeControlPlane{}, nil, "eu-west-1")
 	if client.http == nil {
 		t.Fatal("expected default HTTP client")
 	}
@@ -294,6 +294,43 @@ func TestNewRunnerClientDefaultsResponseHeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestNewRunnerClientRejectsUnsupportedDefaultTransport(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	var calls atomic.Int32
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("deny all")
+	})
+
+	client, err := newRunnerClient(&fakeControlPlane{}, nil, "eu-west-1")
+	if client != nil || err == nil || !strings.Contains(err.Error(), "non-nil *http.Transport") {
+		t.Fatalf("client=%#v err=%v, want transport setup error", client, err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("custom default invoked %d times, want 0", calls.Load())
+	}
+}
+
+func TestNewRunnerClientAcceptsExplicitClientWithUnsupportedDefault(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("deny all")
+	})
+	injected := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("injected")
+	})}
+
+	client, err := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := client.http.Transport.(roundTripFunc); !ok {
+		t.Fatalf("transport=%T, want explicit roundTripFunc", client.http.Transport)
+	}
+}
+
 func TestDefaultRunnerHTTPClientTimesOutBeforeResponseHeaders(t *testing.T) {
 	const bound = 40 * time.Millisecond
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -302,7 +339,8 @@ func TestDefaultRunnerHTTPClientTimesOutBeforeResponseHeaders(t *testing.T) {
 	defer server.Close()
 
 	started := time.Now()
-	_, err := defaultRunnerHTTPClient(bound).Get(server.URL)
+	client := mustDefaultRunnerHTTPClient(t, bound)
+	_, err := client.Get(server.URL)
 	elapsed := time.Since(started)
 	if err == nil {
 		t.Fatal("request with withheld response headers unexpectedly succeeded")
@@ -329,7 +367,8 @@ func TestDefaultRunnerHTTPClientStreamsPastResponseHeaderTimeout(t *testing.T) {
 	defer server.Close()
 
 	started := time.Now()
-	resp, err := defaultRunnerHTTPClient(bound).Get(server.URL)
+	client := mustDefaultRunnerHTTPClient(t, bound)
+	resp, err := client.Get(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +412,8 @@ func TestDefaultRunnerHTTPClientUploadsPastResponseHeaderTimeout(t *testing.T) {
 		_ = writer.Close()
 	}()
 	started := time.Now()
-	resp, err := defaultRunnerHTTPClient(bound).Post(server.URL, "application/gzip", reader)
+	client := mustDefaultRunnerHTTPClient(t, bound)
+	resp, err := client.Post(server.URL, "application/gzip", reader)
 	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatal(err)
@@ -405,7 +445,7 @@ func TestNewRunnerClientPreservesInjectedHTTPSettingsOnClone(t *testing.T) {
 		Timeout:   17 * time.Second,
 	}
 
-	client := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+	client := mustNewRunnerClient(t, &fakeControlPlane{}, injected, "eu-west-1")
 	if client.http == injected {
 		t.Fatal("runner reused the injected client instead of cloning it")
 	}
@@ -433,7 +473,7 @@ func TestNewRunnerClientPreservesStricterSameOriginRedirectPolicy(t *testing.T) 
 		callerChecks.Add(1)
 		return callerErr
 	}
-	client := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+	client := mustNewRunnerClient(t, &fakeControlPlane{}, injected, "eu-west-1")
 
 	_, err := client.http.Get(server.URL)
 	if !errors.Is(err, callerErr) {
@@ -472,7 +512,7 @@ func TestNewRunnerClientRejectsCrossOriginRedirectBeforeInjectedPolicy(t *testin
 					return nil
 				}
 			}
-			client := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+			client := mustNewRunnerClient(t, &fakeControlPlane{}, injected, "eu-west-1")
 			err := client.http.CheckRedirect(&http.Request{URL: target}, []*http.Request{{URL: origin}})
 			if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
 				t.Fatalf("redirect error=%v want cross-origin refusal", err)
@@ -490,7 +530,7 @@ func TestNewRunnerClientRetainsDefaultSameOriginRedirectLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	injected := &http.Client{}
-	client := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+	client := mustNewRunnerClient(t, &fakeControlPlane{}, injected, "eu-west-1")
 	request := &http.Request{URL: origin}
 	via := make([]*http.Request, 10)
 	for i := range via {
@@ -538,7 +578,7 @@ func TestRunnerClientCrossOriginRedirectNeverSendsProxyHeaders(t *testing.T) {
 			return nil
 		},
 	}
-	client := newRunnerClient(&fakeControlPlane{}, injected, "eu-west-1")
+	client := mustNewRunnerClient(t, &fakeControlPlane{}, injected, "eu-west-1")
 	err = client.Health(context.Background(), microVM{ID: "mvm-test", Endpoint: "mvm-test.lambda-microvm.eu-west-1.on.aws"})
 	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
 		t.Fatalf("Health error=%v want cross-origin refusal", err)
@@ -684,8 +724,26 @@ func testBackend(control *fakeControlPlane, runner *fakeRunner, stdout io.Writer
 		newControl: func(context.Context, Config) (controlPlane, error) {
 			return control, nil
 		},
-		newRunner: func(controlPlane, Config, Runtime) runnerAPI { return runner },
+		newRunner: func(controlPlane, Config, Runtime) (runnerAPI, error) { return runner, nil },
 	}
+}
+
+func mustNewRunnerClient(t *testing.T, control controlPlane, source *http.Client, region string) *runnerClient {
+	t.Helper()
+	client, err := newRunnerClient(control, source, region)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+func mustDefaultRunnerHTTPClient(t *testing.T, timeout time.Duration) *http.Client {
+	t.Helper()
+	client, err := defaultRunnerHTTPClient(timeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
 }
 
 func testRepo(t *testing.T) string {

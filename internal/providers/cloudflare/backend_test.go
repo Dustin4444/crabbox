@@ -158,6 +158,51 @@ func TestCloudflareClientUsesBoundedDefaultTransport(t *testing.T) {
 	}
 }
 
+type unusedDefaultRoundTripper struct {
+	calls int
+}
+
+func (r *unusedDefaultRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	r.calls++
+	return nil, fmt.Errorf("unused default transport")
+}
+
+func TestNewCloudflareClientRejectsUnsupportedDefaultTransport(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	recorder := &unusedDefaultRoundTripper{}
+	http.DefaultTransport = recorder
+
+	cfg := Config{}
+	cfg.Cloudflare.APIURL = "http://127.0.0.1:8787"
+	cfg.Cloudflare.Token = "token"
+	client, err := newCloudflareClient(cfg, Runtime{})
+	if client != nil || err == nil || !strings.Contains(err.Error(), "non-nil *http.Transport") {
+		t.Fatalf("client=%#v err=%v, want transport setup error", client, err)
+	}
+	if recorder.calls != 0 {
+		t.Fatalf("custom default invoked %d times, want 0", recorder.calls)
+	}
+}
+
+func TestNewCloudflareClientAcceptsExplicitClientWithUnsupportedDefault(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = &unusedDefaultRoundTripper{}
+	injected := &http.Client{Transport: &unusedDefaultRoundTripper{}}
+	cfg := Config{}
+	cfg.Cloudflare.APIURL = "http://127.0.0.1:8787"
+	cfg.Cloudflare.Token = "token"
+
+	client, err := newCloudflareClient(cfg, Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.http.Transport != injected.Transport {
+		t.Fatal("newCloudflareClient did not preserve the explicit transport")
+	}
+}
+
 func TestCloudflareClientRejectsCrossOriginExecRedirectBeforeReplay(t *testing.T) {
 	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
 		t.Run(http.StatusText(status), func(t *testing.T) {

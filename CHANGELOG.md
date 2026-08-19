@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Rejected nil or unsupported process-wide HTTP transports with a clear setup error instead of panicking or bypassing host network policy, while preserving explicitly injected clients. Thanks @SebTardif.
 - Kept explicit Hetzner server-type requests exact instead of continuing through class fallback candidates after capacity errors.
 - Made private draft verification resolve the exact draft by tag and numeric release ID instead of relying on a release-list endpoint that can omit drafts.
 

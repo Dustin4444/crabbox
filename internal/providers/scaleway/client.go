@@ -110,7 +110,10 @@ func newClient(cfg core.Config, rt core.Runtime) (Client, error) {
 
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = defaultScalewayHTTPClient()
+		httpClient, err = defaultScalewayHTTPClient()
+		if err != nil {
+			return nil, fmt.Errorf("%s HTTP client setup: %w", providerName, err)
+		}
 	}
 	trustedAPI, _ := url.Parse(scalewayAPIURL(profile))
 	opts := []scw.ClientOption{
@@ -144,11 +147,15 @@ func scalewayAPIURL(profile *scw.Profile) string {
 	return defaultScalewayAPIURL
 }
 
-func defaultScalewayHTTPClient() *http.Client {
+func defaultScalewayHTTPClient() (*http.Client, error) {
+	transport, err := core.CloneDefaultTransport()
+	if err != nil {
+		return nil, err
+	}
 	return &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: http.DefaultTransport.(*http.Transport).Clone(),
-	}
+		Transport: transport,
+	}, nil
 }
 
 type scalewayRedirectHopKey struct{}

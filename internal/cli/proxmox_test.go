@@ -58,6 +58,46 @@ func TestNewProxmoxClientStripsAPIPathAndUsesTokenAuth(t *testing.T) {
 	}
 }
 
+func TestNewProxmoxClientRejectsUnsupportedDefaultTransportForInsecureTLS(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	recorder := &recordingDefaultRoundTripper{}
+	http.DefaultTransport = recorder
+	cfg := baseConfig()
+	cfg.Proxmox.APIURL = "https://proxmox.example.test"
+	cfg.Proxmox.TokenID = "runner@pve!crabbox"
+	cfg.Proxmox.TokenSecret = "secret"
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.InsecureTLS = true
+
+	client, err := NewProxmoxClient(cfg)
+	if client != nil || err == nil || !strings.Contains(err.Error(), "non-nil *http.Transport") {
+		t.Fatalf("client=%#v err=%v, want transport setup error", client, err)
+	}
+	if recorder.calls != 0 {
+		t.Fatalf("custom default invoked %d times, want 0", recorder.calls)
+	}
+}
+
+func TestNewProxmoxClientAllowsUnsupportedDefaultTransportWithoutTLSMutation(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = &recordingDefaultRoundTripper{}
+	cfg := baseConfig()
+	cfg.Proxmox.APIURL = "https://proxmox.example.test"
+	cfg.Proxmox.TokenID = "runner@pve!crabbox"
+	cfg.Proxmox.TokenSecret = "secret"
+	cfg.Proxmox.Node = "pve1"
+
+	client, err := NewProxmoxClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Client.Transport != nil {
+		t.Fatalf("transport=%T, want nil client transport", client.Client.Transport)
+	}
+}
+
 func TestProxmoxClientRedactsCredentialsFromHTTPErrorBody(t *testing.T) {
 	const (
 		tokenID     = "runner@pve!crabbox"

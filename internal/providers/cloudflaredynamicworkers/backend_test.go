@@ -183,7 +183,10 @@ func TestLoaderURLRedactsOpaqueUserinfo(t *testing.T) {
 func TestDefaultHTTPClientHonorsConfiguredRunTimeout(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.CloudflareDynamicWorkers.TimeoutSecs = 60
-	client := defaultHTTPClient(cfg)
+	client, err := defaultHTTPClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport=%T", client.Transport)
@@ -196,13 +199,60 @@ func TestDefaultHTTPClientHonorsConfiguredRunTimeout(t *testing.T) {
 func TestDefaultHTTPClientDisablesTimeoutWhenRunTimeoutIsDisabled(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.CloudflareDynamicWorkers.TimeoutSecs = 0
-	client := defaultHTTPClient(cfg)
+	client, err := defaultHTTPClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport=%T", client.Transport)
 	}
 	if transport.ResponseHeaderTimeout != 0 {
 		t.Fatalf("response header timeout=%s, want disabled", transport.ResponseHeaderTimeout)
+	}
+}
+
+type recordingDefaultRoundTripper struct {
+	calls int
+}
+
+func (r *recordingDefaultRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	r.calls++
+	return nil, errors.New("deny all")
+}
+
+func TestNewLoaderAPIRejectsUnsupportedDefaultTransport(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	recorder := &recordingDefaultRoundTripper{}
+	http.DefaultTransport = recorder
+
+	client, err := newLoaderAPI(testConfig("http://127.0.0.1:8787"), Runtime{})
+	if client != nil || err == nil || !strings.Contains(err.Error(), "non-nil *http.Transport") {
+		t.Fatalf("client=%#v err=%v, want transport setup error", client, err)
+	}
+	if recorder.calls != 0 {
+		t.Fatalf("custom default invoked %d times, want 0", recorder.calls)
+	}
+}
+
+func TestNewLoaderAPIAcceptsExplicitClientWithUnsupportedDefault(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = &recordingDefaultRoundTripper{}
+	injectedTransport := &recordingDefaultRoundTripper{}
+	injected := &http.Client{Transport: injectedTransport}
+
+	api, err := newLoaderAPI(testConfig("http://127.0.0.1:8787"), Runtime{HTTP: injected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ok := api.(*client)
+	if !ok {
+		t.Fatalf("api=%T, want *client", api)
+	}
+	if client.http.Transport != injectedTransport {
+		t.Fatalf("transport=%T, want explicit transport", client.http.Transport)
 	}
 }
 
