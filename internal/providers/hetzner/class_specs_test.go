@@ -21,6 +21,30 @@ func TestClassSpecs(t *testing.T) {
 	}
 }
 
+func TestClassProfilesCoverCanonicalClasses(t *testing.T) {
+	profiles := (Provider{}).ClassProfiles()
+	if len(profiles) != len(core.CanonicalProviderClasses()) {
+		t.Fatalf("ClassProfiles len=%d want %d", len(profiles), len(core.CanonicalProviderClasses()))
+	}
+	for _, profile := range profiles {
+		if profile.Primary.Type == "" || profile.Fallbacks == nil {
+			t.Fatalf("incomplete profile: %#v", profile)
+		}
+	}
+}
+
+func TestTinyAndSmallCandidateMappings(t *testing.T) {
+	tests := map[string][]string{
+		"tiny":  {"ccx13", "cpx22", "cx23"},
+		"small": {"ccx23", "cpx32", "cx33"},
+	}
+	for class, want := range tests {
+		if got := serverTypeCandidatesForClass(class); !reflect.DeepEqual(got, want) {
+			t.Errorf("class=%s candidates=%v want %v", class, got, want)
+		}
+	}
+}
+
 func TestServerShape(t *testing.T) {
 	tests := []struct {
 		name       string

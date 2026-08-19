@@ -117,7 +117,7 @@ explicit `(none)` in their provider section. Shared flags are command-level
 `run` workflow flags; their presence does not bypass ordinary capability,
 target, provider-kind, or option-combination validation.
 
-### JSON schema v1
+### JSON schema v2
 
 `--json` emits one object. Every array is present, including empty arrays, and
 identity aliases, targets, capability arrays, and flag records are sorted for
@@ -125,7 +125,7 @@ deterministic output:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "provider": {
     "requested": "docker",
     "canonical": "local-container",
@@ -147,6 +147,7 @@ deterministic output:
     "lifecycle": ["cleanup", "run-session", "workspace-state"],
     "coordinator": "never"
   },
+  "classCatalog": {"disposition": "unmapped", "profiles": []},
   "sharedFlags": [],
   "providerFlags": []
 }
@@ -459,7 +460,9 @@ Direct self-hosted SSH-lease providers such as `firecracker`, `proxmox`, and
 `xcp-ng` report `coordinator: never`, `targets: linux`, and features including
 `ssh`, `crabbox-sync`, and `cleanup`.
 
-`--json` returns one object per provider:
+`--json` returns one object per provider. The compatibility `classes` summary
+is complete; the authoritative AWS `classCatalog` below is abbreviated to one
+profile and one fallback to show the richer record shape:
 
 ```json
 [
@@ -479,7 +482,21 @@ Direct self-hosted SSH-lease providers such as `firecracker`, `proxmox`, and
       {"class": "fast", "type": "c7a.16xlarge", "vcpu": 64, "memoryGb": 128},
       {"class": "large", "type": "c7a.24xlarge", "vcpu": 96, "memoryGb": 192},
       {"class": "beast", "type": "c7a.48xlarge", "vcpu": 192, "memoryGb": 384}
-    ]
+    ],
+    "classCatalog": {
+      "disposition": "mapped",
+      "profiles": [
+        {
+          "class": "standard",
+          "target": "linux",
+          "architecture": "amd64",
+          "primary": {"type": "c7a.8xlarge", "architecture": "amd64", "vcpu": 32, "memory": {"value": 64, "unit": "GiB"}},
+          "fallbacks": [
+            {"type": "c7i.8xlarge", "architecture": "amd64", "vcpu": 32, "memory": {"value": 64, "unit": "GiB"}}
+          ]
+        }
+      ]
+    }
   },
   {
     "provider": "blacksmith-testbox",
@@ -492,7 +509,8 @@ Direct self-hosted SSH-lease providers such as `firecracker`, `proxmox`, and
     "runtime": ["delegated-command", "ci-runner"],
     "evidence": ["proof", "artifacts", "session"],
     "lifecycle": ["run-session"],
-    "coordinator": "never"
+    "coordinator": "never",
+    "classCatalog": {"disposition": "unmapped", "profiles": []}
   }
 ]
 ```
@@ -558,12 +576,45 @@ Direct self-hosted SSH-lease providers such as `firecracker`, `proxmox`, and
   - `supported`: the provider can be brokered through the coordinator when a
     broker URL is configured; otherwise it runs direct from the CLI.
   - `never`: the provider always runs direct from the CLI.
-- `classes`: the primary machine type selected for each provider-neutral class
-  on the provider's default Linux/amd64 target, with nominal `vcpu` and
-  `memoryGb` values when known. When present, the array contains `standard`,
-  `fast`, `large`, and `beast` in that order. Providers without a machine-sizing
-  implementation omit the field; unknown shape values are omitted rather than
-  reported as zero.
+- `classes`: compatibility summary of the primary machine selected for each
+  class on the default Linux/amd64 selector. It is present only for the five
+  providers covered by the initial contract: AWS, Azure, GCP, Hetzner, and
+  Namespace Instance. The array remains ordered as `standard`, `fast`, `large`,
+  and `beast`, with nominal integral `vcpu` and `memoryGb` values when known.
+- `classCatalog`: the authoritative provider-owned class catalog. It is always
+  present in JSON and is deeply identical in `providers --json` and
+  `providers describe --json`, including when the requested description used
+  an alias.
+  - `disposition` is `mapped` when an explicitly selected canonical class has
+    a supported provider-owned machine profile. `unmapped` means no supported
+    static class-to-machine profile is exposed; it does not promise uniform
+    rejection across CLI, YAML, and environment inputs, or that legacy metadata
+    can never contain a class string.
+  - `profiles` is always an array. A mapped profile selects one exact canonical
+    class, target, Windows mode (Windows only), and architecture. Windows with
+    an empty mode normalizes to `normal`; architecture and Windows mode do not
+    fall back. An explicit `mixed` profile is the only architecture fallback.
+    Selecting an exact lowercase canonical class without an exact or `mixed`
+    selector match fails with exit 2; it is never treated as a literal provider
+    machine type. Uppercase, padded, and custom class strings retain their
+    provider-specific legacy behavior.
+  - `primary` is tried first and `fallbacks` follows in declared order.
+    `fallbacks` is always an array and is never sorted.
+  - Machine `architecture` is `amd64` or `arm64`. Unknown `vcpu` and `memory`
+    are JSON `null`, never estimates. Non-null memory includes a numeric `value`
+    and explicit provider-native unit: `MB`, `MiB`, `GB`, or `GiB`.
+
+Profile order is deterministic: canonical class order (`standard`, `fast`,
+`large`, `beast`), then target, Windows mode, and architecture. The catalog is
+compiled static data; discovery does not read config or local state, inspect
+credentials, contact a provider, or make network calls. The human-readable
+provider output prints only the compatibility `classes` summary for the same
+five providers; it does not dump authoritative profiles.
+
+Profiles describe explicit canonical class intent. When class is inherited
+rather than explicitly selected, provider-native defaults and overrides may
+take precedence. Blacksmith is `unmapped`: its workflow chooses capacity
+outside a supported static Crabbox class-to-machine catalog.
 
 Recommendation JSON returns ranked objects:
 

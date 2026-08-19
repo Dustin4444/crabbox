@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
+import { awsLaunchCandidates } from "../src/aws";
+import { azureProvisioningCandidatesForConfig } from "../src/azure";
 import {
   awsMacOSInstanceTypeCandidates,
   awsARM64InstanceTypeCandidatesForClass,
@@ -19,6 +21,8 @@ import {
   sshPorts,
   validCIDRs,
 } from "../src/config";
+import { gcpProvisioningCandidatesForConfig } from "../src/gcp";
+import { hetznerProvisioningCandidatesForConfig } from "../src/hetzner";
 
 describe("machine class config", () => {
   it("maps known classes to preferred Hetzner candidates", () => {
@@ -36,6 +40,25 @@ describe("machine class config", () => {
     expect(serverTypeCandidatesForClass("cpx62")).toEqual(["cpx62"]);
   });
 
+  it("preserves uppercase, padded, and unknown class literals", () => {
+    for (const machineClass of ["FAST", " fast ", "custom-shape"]) {
+      expect(serverTypeCandidatesForClass(machineClass)).toEqual([machineClass]);
+      expect(awsInstanceTypeCandidatesForClass(machineClass)).toEqual([machineClass]);
+      expect(azureVMSizeCandidatesForClass(machineClass)).toEqual([machineClass]);
+      expect(gcpMachineTypeCandidatesForClass(machineClass)).toEqual([machineClass]);
+      expect(
+        awsLaunchCandidates({
+          serverType: "",
+          serverTypeExplicit: false,
+          class: machineClass,
+          target: "linux",
+          windowsMode: "normal",
+          architecture: "amd64",
+        }),
+      ).toEqual([machineClass, "t3.small"]);
+    }
+  });
+
   it("maps known classes to preferred AWS candidates", () => {
     expect(serverTypeForProviderClass("aws", "beast")).toBe("c7a.48xlarge");
     expect(awsInstanceTypeCandidatesForClass("beast")).toEqual([
@@ -49,6 +72,7 @@ describe("machine class config", () => {
       "m7a.32xlarge",
       "c7a.24xlarge",
       "c7a.16xlarge",
+      "t3.small",
     ]);
   });
 
@@ -102,17 +126,357 @@ describe("machine class config", () => {
     ]);
   });
 
+  it("rejects unsupported canonical selectors without treating classes as native types", () => {
+    expect(awsInstanceTypeCandidatesForTargetClass("windows", "fast", "normal", "arm64")).toEqual(
+      [],
+    );
+    expect(azureVMSizeCandidatesForTargetClass("windows", "fast", "wsl2", "arm64")).toEqual([]);
+    expect(awsInstanceTypeCandidatesForTargetClass("windows", "FAST", "normal", "arm64")).toEqual([
+      "FAST",
+    ]);
+    expect(azureVMSizeCandidatesForTargetClass("windows", " custom ", "wsl2", "arm64")).toEqual([
+      " custom ",
+    ]);
+  });
+
+  it("uses only concrete stored types for unsupported canonical selectors", () => {
+    const storedType = "stored-native-type";
+    const awsConfig = {
+      serverType: storedType,
+      serverTypeExplicit: false,
+      class: "standard",
+      target: "windows" as const,
+      windowsMode: "normal" as const,
+      architecture: "arm64" as const,
+    };
+    const azureConfig = {
+      serverType: storedType,
+      serverTypeExplicit: false,
+      class: "standard",
+      target: "windows" as const,
+      windowsMode: "wsl2" as const,
+      architecture: "arm64" as const,
+      azureSnapshot: "",
+      azureOSDisk: "managed",
+    };
+    const gcpConfig = {
+      serverType: storedType,
+      serverTypeExplicit: false,
+      class: "standard",
+      target: "linux" as const,
+      architecture: "arm64" as const,
+    };
+    const hetznerConfig = { ...gcpConfig };
+
+    expect(awsLaunchCandidates(awsConfig)).toEqual([storedType]);
+    expect(azureProvisioningCandidatesForConfig(azureConfig)).toEqual([storedType]);
+    expect(gcpProvisioningCandidatesForConfig(gcpConfig)).toEqual([storedType]);
+    expect(hetznerProvisioningCandidatesForConfig(hetznerConfig)).toEqual([storedType]);
+
+    expect(awsLaunchCandidates({ ...awsConfig, serverType: awsConfig.class })).toEqual([]);
+    expect(
+      azureProvisioningCandidatesForConfig({ ...azureConfig, serverType: azureConfig.class }),
+    ).toEqual([]);
+    expect(
+      gcpProvisioningCandidatesForConfig({ ...gcpConfig, serverType: gcpConfig.class }),
+    ).toEqual([]);
+    expect(
+      hetznerProvisioningCandidatesForConfig({
+        ...hetznerConfig,
+        serverType: hetznerConfig.class,
+      }),
+    ).toEqual([]);
+
+    const matchedCandidates = [
+      awsLaunchCandidates({
+        ...awsConfig,
+        target: "linux",
+        windowsMode: "normal",
+        architecture: "amd64",
+      }),
+      azureProvisioningCandidatesForConfig({
+        ...azureConfig,
+        target: "linux",
+        windowsMode: "normal",
+        architecture: "amd64",
+      }),
+      gcpProvisioningCandidatesForConfig({ ...gcpConfig, architecture: "amd64" }),
+      hetznerProvisioningCandidatesForConfig({ ...hetznerConfig, architecture: "amd64" }),
+    ];
+    for (const candidates of matchedCandidates) {
+      expect(candidates[0]).toBe(storedType);
+    }
+
+    const literalMatchedCandidates = [
+      awsLaunchCandidates({
+        ...awsConfig,
+        serverType: awsConfig.class,
+        target: "linux",
+        windowsMode: "normal",
+        architecture: "amd64",
+      }),
+      azureProvisioningCandidatesForConfig({
+        ...azureConfig,
+        serverType: azureConfig.class,
+        target: "linux",
+        windowsMode: "normal",
+        architecture: "amd64",
+      }),
+      gcpProvisioningCandidatesForConfig({
+        ...gcpConfig,
+        serverType: gcpConfig.class,
+        architecture: "amd64",
+      }),
+      hetznerProvisioningCandidatesForConfig({
+        ...hetznerConfig,
+        serverType: hetznerConfig.class,
+        architecture: "amd64",
+      }),
+    ];
+    for (const candidates of literalMatchedCandidates) {
+      expect(candidates).not.toContain("standard");
+    }
+
+    expect(
+      hetznerProvisioningCandidatesForConfig({
+        ...hetznerConfig,
+        serverType: hetznerConfig.class,
+        serverTypeExplicit: true,
+        architecture: "amd64",
+      }),
+    ).toEqual(["standard"]);
+    expect(
+      hetznerProvisioningCandidatesForConfig({
+        ...hetznerConfig,
+        serverType: hetznerConfig.class,
+        serverTypeExplicit: true,
+      }),
+    ).toEqual(["standard"]);
+  });
+
+  it("matches Go stored-type and custom-class candidate order", () => {
+    const storedType = "stored-native-type";
+    const explicitType = " exact-native-type ";
+    const providers: {
+      name: string;
+      candidates: (
+        machineClass: string,
+        serverType: string,
+        explicit: boolean,
+        missingSelector: boolean,
+      ) => string[];
+      customWant: string[];
+      uppercaseWant: string[];
+      paddedWant: string[];
+      standardType: string;
+      fastType: string;
+    }[] = [
+      {
+        name: "AWS",
+        candidates: (machineClass, serverType, explicit, missingSelector) =>
+          awsLaunchCandidates({
+            class: machineClass,
+            serverType,
+            serverTypeExplicit: explicit,
+            target: missingSelector ? "windows" : "linux",
+            windowsMode: "normal",
+            architecture: missingSelector ? "arm64" : "amd64",
+          }),
+        customWant: [storedType, "custom-shape", "t3.small"],
+        uppercaseWant: [storedType, "FAST", "t3.small"],
+        paddedWant: [storedType, " fast ", "t3.small"],
+        standardType: "c7a.8xlarge",
+        fastType: "c7a.16xlarge",
+      },
+      {
+        name: "Azure",
+        candidates: (machineClass, serverType, explicit, missingSelector) =>
+          azureProvisioningCandidatesForConfig({
+            class: machineClass,
+            serverType,
+            serverTypeExplicit: explicit,
+            target: missingSelector ? "windows" : "linux",
+            windowsMode: missingSelector ? "wsl2" : "normal",
+            architecture: missingSelector ? "arm64" : "amd64",
+            azureSnapshot: "",
+            azureOSDisk: "managed",
+          }),
+        customWant: [storedType, "custom-shape"],
+        uppercaseWant: [storedType, "FAST"],
+        paddedWant: [storedType, " fast "],
+        standardType: "Standard_D32ads_v6",
+        fastType: "Standard_D64ads_v6",
+      },
+      {
+        name: "GCP",
+        candidates: (machineClass, serverType, explicit, missingSelector) =>
+          gcpProvisioningCandidatesForConfig({
+            class: machineClass,
+            serverType,
+            serverTypeExplicit: explicit,
+            target: "linux",
+            architecture: missingSelector ? "arm64" : "amd64",
+          }),
+        customWant: [storedType, "custom-shape"],
+        uppercaseWant: [storedType, "FAST"],
+        paddedWant: [storedType, " fast "],
+        standardType: "c4-standard-32",
+        fastType: "c4-standard-64",
+      },
+      {
+        name: "Hetzner",
+        candidates: (machineClass, serverType, explicit, missingSelector) =>
+          hetznerProvisioningCandidatesForConfig({
+            class: machineClass,
+            serverType,
+            serverTypeExplicit: explicit,
+            target: "linux",
+            architecture: missingSelector ? "arm64" : "amd64",
+          }),
+        customWant: [storedType, "custom-shape"],
+        uppercaseWant: [storedType, "FAST"],
+        paddedWant: [storedType, " fast "],
+        standardType: "ccx33",
+        fastType: "ccx43",
+      },
+    ];
+
+    for (const provider of providers) {
+      for (const scenario of [
+        { machineClass: "custom-shape", want: provider.customWant },
+        { machineClass: "FAST", want: provider.uppercaseWant },
+        { machineClass: " fast ", want: provider.paddedWant },
+      ]) {
+        expect({
+          provider: provider.name,
+          machineClass: scenario.machineClass,
+          candidates: provider.candidates(scenario.machineClass, storedType, false, false),
+        }).toEqual({
+          provider: provider.name,
+          machineClass: scenario.machineClass,
+          candidates: scenario.want,
+        });
+      }
+      for (const scenario of [
+        {
+          machineClass: "fast",
+          placeholder: "beast",
+          wantFirst: provider.fastType,
+        },
+        {
+          machineClass: "standard",
+          placeholder: "fast",
+          wantFirst: provider.standardType,
+        },
+      ]) {
+        expect({
+          provider: provider.name,
+          candidates: provider.candidates(
+            scenario.machineClass,
+            scenario.placeholder,
+            false,
+            false,
+          )[0],
+        }).toEqual({ provider: provider.name, candidates: scenario.wantFirst });
+      }
+      for (const rawStoredType of ["FAST", " fast ", "custom-native-type"]) {
+        expect({
+          provider: provider.name,
+          storedType: rawStoredType,
+          candidates: provider.candidates("standard", rawStoredType, false, false)[0],
+        }).toEqual({
+          provider: provider.name,
+          storedType: rawStoredType,
+          candidates: rawStoredType,
+        });
+      }
+      expect({
+        provider: provider.name,
+        candidates: provider.candidates("standard", storedType, false, true),
+      }).toEqual({ provider: provider.name, candidates: [storedType] });
+      expect({
+        provider: provider.name,
+        candidates: provider.candidates("standard", "", false, true),
+      }).toEqual({ provider: provider.name, candidates: [] });
+      expect({
+        provider: provider.name,
+        candidates: provider.candidates("standard", explicitType, true, true),
+      }).toEqual({ provider: provider.name, candidates: [explicitType] });
+      expect({
+        provider: provider.name,
+        candidates: provider.candidates("standard", "fast", true, true),
+      }).toEqual({ provider: provider.name, candidates: ["fast"] });
+      expect({
+        provider: provider.name,
+        candidates: provider.candidates("fast", "beast", false, true),
+      }).toEqual({ provider: provider.name, candidates: [] });
+      expect({
+        provider: provider.name,
+        candidates: provider.candidates("custom-shape", " stored-native-type ", false, false)[0],
+      }).toEqual({ provider: provider.name, candidates: " stored-native-type " });
+    }
+
+    expect(
+      awsLaunchCandidates({
+        class: " custom-mac-type ",
+        serverType: storedType,
+        serverTypeExplicit: false,
+        target: "macos",
+        windowsMode: "normal",
+        architecture: "amd64",
+      }),
+    ).toEqual([storedType, " custom-mac-type ", ...awsMacOSInstanceTypeCandidates]);
+  });
+
+  it("keeps custom class pass-through outside static selector coverage", () => {
+    for (const machineClass of ["FAST", " fast ", "custom-shape"]) {
+      expect(
+        gcpProvisioningCandidatesForConfig({
+          serverType: machineClass,
+          serverTypeExplicit: false,
+          class: machineClass,
+          target: "linux",
+          architecture: "arm64",
+        }),
+      ).toEqual([machineClass]);
+      expect(
+        hetznerProvisioningCandidatesForConfig({
+          serverType: machineClass,
+          serverTypeExplicit: false,
+          class: machineClass,
+          target: "linux",
+          architecture: "arm64",
+        }),
+      ).toEqual([machineClass]);
+    }
+  });
+
   it("matches the Go CLI machine class tables", () => {
-    const go = readFileSync(new URL("../../internal/cli/config.go", import.meta.url), "utf8");
-    const goAzure = readFileSync(new URL("../../internal/cli/azure.go", import.meta.url), "utf8");
-    const goGCP = readFileSync(new URL("../../internal/cli/gcp.go", import.meta.url), "utf8");
-    const classes = ["standard", "fast", "large", "beast"];
-    const hetzner = parseGoStringArrayCases(goFunctionBody(go, "serverTypeCandidatesForClass"));
+    const goAWS = readFileSync(
+      new URL("../../internal/providers/aws/provider.go", import.meta.url),
+      "utf8",
+    );
+    const goAzure = readFileSync(
+      new URL("../../internal/providers/azure/provider.go", import.meta.url),
+      "utf8",
+    );
+    const goGCP = readFileSync(
+      new URL("../../internal/providers/gcp/provider.go", import.meta.url),
+      "utf8",
+    );
+    const goHetzner = readFileSync(
+      new URL("../../internal/providers/hetzner/provider.go", import.meta.url),
+      "utf8",
+    );
+    const classes = ["tiny", "small", "standard", "fast", "large", "beast"];
+    const hetzner = parseGoStringArrayCases(
+      goFunctionBody(goHetzner, "serverTypeCandidatesForClass"),
+    );
     const awsLinux = parseGoStringArrayCases(
-      goFunctionBody(go, "awsInstanceTypeCandidatesForArchitectureClass"),
+      goFunctionBody(goAWS, "awsInstanceTypeCandidatesForClass"),
     );
     const azureLinux = parseGoStringArrayCases(
-      goFunctionBody(goAzure, "azureVMSizeCandidatesForArchitectureClass"),
+      goFunctionBody(goAzure, "azureVMSizeCandidatesForClass"),
     );
     const azureLinuxARM64 = parseGoStringArrayCases(
       goFunctionBody(goAzure, "azureARM64VMSizeCandidatesForClass"),
@@ -121,19 +485,38 @@ describe("machine class config", () => {
       goFunctionBody(goAzure, "azureWindowsVMSizeCandidatesForClass"),
     );
     const awsLinuxARM64 = parseGoStringArrayCases(
-      goFunctionBody(go, "awsARM64InstanceTypeCandidatesForClass"),
+      goFunctionBody(goAWS, "awsARM64InstanceTypeCandidatesForClass"),
     );
     const gcp = parseGoStringArrayCases(goFunctionBody(goGCP, "gcpMachineTypeCandidatesForClass"));
-    const awsTarget = goFunctionBody(go, "awsInstanceTypeCandidatesForTargetModeArchitectureClass");
-    const awsWSL2 = parseGoStringArrayCases(
-      goSwitchAfter(awsTarget, "if windowsMode == windowsModeWSL2"),
+    const awsWindows = parseGoStringArrayCases(
+      goFunctionBody(goAWS, "awsWindowsInstanceTypeCandidatesForClass"),
     );
-    const awsWindows = parseGoStringArrayCases(goSwitchAfter(awsTarget, "switch class", 1));
+    const awsWSL2 = parseGoStringArrayCases(
+      goFunctionBody(goAWS, "awsWSL2InstanceTypeCandidatesForClass"),
+    );
 
     for (const name of classes) {
       expect(serverTypeCandidatesForClass(name)).toEqual(hetzner[name]);
-      expect(awsInstanceTypeCandidatesForClass(name)).toEqual(awsLinux[name]);
-      expect(awsARM64InstanceTypeCandidatesForClass(name)).toEqual(awsLinuxARM64[name]);
+      expect(
+        awsLaunchCandidates({
+          serverType: "",
+          serverTypeExplicit: false,
+          class: name,
+          target: "linux",
+          windowsMode: "normal",
+          architecture: "amd64",
+        }),
+      ).toEqual(awsLinux[name]);
+      expect(
+        awsLaunchCandidates({
+          serverType: "",
+          serverTypeExplicit: false,
+          class: name,
+          target: "linux",
+          windowsMode: "normal",
+          architecture: "arm64",
+        }),
+      ).toEqual(awsLinuxARM64[name]);
       expect(azureVMSizeCandidatesForClass(name)).toEqual(azureLinux[name]);
       expect(azureARM64VMSizeCandidatesForClass(name)).toEqual(azureLinuxARM64[name]);
       expect(azureWindowsVMSizeCandidatesForClass(name)).toEqual(azureWindows[name]);
@@ -144,16 +527,39 @@ describe("machine class config", () => {
       expect(azureVMSizeCandidatesForTargetClass("windows", name, "normal", "arm64")).toEqual(
         azureLinuxARM64[name],
       );
-      expect(azureVMSizeCandidatesForTargetClass("windows", name, "wsl2", "arm64")).toEqual([name]);
-      expect(awsInstanceTypeCandidatesForTargetClass("windows", name)).toEqual(awsWindows[name]);
-      expect(awsInstanceTypeCandidatesForTargetClass("windows", name, "wsl2")).toEqual(
-        awsWSL2[name],
-      );
+      expect(azureVMSizeCandidatesForTargetClass("windows", name, "wsl2", "arm64")).toEqual([]);
+      expect(
+        awsLaunchCandidates({
+          serverType: "",
+          serverTypeExplicit: false,
+          class: name,
+          target: "windows",
+          windowsMode: "normal",
+          architecture: "amd64",
+        }),
+      ).toEqual(awsWindows[name]);
+      expect(
+        awsLaunchCandidates({
+          serverType: "",
+          serverTypeExplicit: false,
+          class: name,
+          target: "windows",
+          windowsMode: "wsl2",
+          architecture: "amd64",
+        }),
+      ).toEqual(awsWSL2[name]);
       expect(gcpMachineTypeCandidatesForClass(name)).toEqual(gcp[name]);
     }
-    expect(awsInstanceTypeCandidatesForTargetClass("macos", "standard")).toEqual(
-      awsMacOSInstanceTypeCandidates,
-    );
+    expect(
+      awsLaunchCandidates({
+        serverType: "",
+        serverTypeExplicit: false,
+        class: "standard",
+        target: "macos",
+        windowsMode: "normal",
+        architecture: "amd64",
+      }),
+    ).toEqual(awsMacOSInstanceTypeCandidates);
   });
 });
 
@@ -177,46 +583,254 @@ function goFunctionBody(source: string, name: string): string {
   throw new Error(`unterminated Go function ${name}`);
 }
 
-function goSwitchAfter(source: string, marker: string, occurrence = 0): string {
-  let cursor = -1;
-  for (let index = 0; index <= occurrence; index += 1) {
-    cursor = source.indexOf(marker, cursor + 1);
-    expect(cursor).toBeGreaterThanOrEqual(0);
-  }
-  const open = source.indexOf("{", cursor);
-  expect(open).toBeGreaterThanOrEqual(0);
-  let depth = 0;
-  for (let index = open; index < source.length; index += 1) {
-    const char = source[index];
-    if (char === "{") {
-      depth += 1;
-    } else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return source.slice(open + 1, index);
-      }
-    }
-  }
-  throw new Error(`unterminated Go switch after ${marker}`);
-}
-
 function parseGoStringArrayCases(source: string): Record<string, string[]> {
   const out: Record<string, string[]> = {};
-  const pattern = /case "([^"]+)":\s*return \[\]string\{([^}]*)\}/g;
-  for (const match of source.matchAll(pattern)) {
-    const key = match[1];
-    const body = match[2];
-    if (key === undefined || body === undefined) {
+  let pendingKeys: string[] | undefined;
+  let arrayValues: string[] | undefined;
+  let caseLines: string[] | undefined;
+
+  const finishArray = () => {
+    if (pendingKeys === undefined || arrayValues === undefined) {
+      return;
+    }
+    for (const key of pendingKeys) {
+      out[key] = arrayValues;
+    }
+    pendingKeys = undefined;
+    arrayValues = undefined;
+  };
+
+  for (const sourceLine of source.split("\n")) {
+    let line = sourceLine;
+    if (pendingKeys !== undefined && arrayValues !== undefined) {
+      if (isGoCaseStart(line)) {
+        pendingKeys = undefined;
+        arrayValues = undefined;
+      } else {
+        if (scanGoStringArrayLine(line, 0, arrayValues, pendingKeys)) {
+          finishArray();
+        }
+        continue;
+      }
+    }
+
+    const startsCase = isGoCaseStart(line);
+    if (caseLines !== undefined && startsCase) {
+      caseLines = undefined;
+    }
+    if (caseLines !== undefined) {
+      caseLines.push(line);
+      const state = scanGoCaseLine(line);
+      if (state === "invalid") {
+        caseLines = undefined;
+        continue;
+      }
+      if (state === "continued") {
+        continue;
+      }
+      line = caseLines.join("\n");
+      caseLines = undefined;
+    } else if (startsCase) {
+      const state = scanGoCaseLine(line);
+      if (state === "invalid") {
+        continue;
+      }
+      if (state === "continued") {
+        caseLines = [line];
+        continue;
+      }
+    }
+
+    const caseClause = startsCase || line.includes("\n") ? parseGoCaseClause(line) : undefined;
+    if (caseClause !== undefined) {
+      pendingKeys = caseClause.keys;
+      line = caseClause.remainder;
+    } else if (pendingKeys === undefined) {
       continue;
     }
-    out[key] = [...body.matchAll(/"([^"]+)"/g)].map((item) => item[1]).filter(isString);
+
+    const returnLine = line.trimStart();
+    const prefix = "return []string{";
+    if (returnLine.length === 0) {
+      continue;
+    }
+    if (!returnLine.startsWith(prefix)) {
+      pendingKeys = undefined;
+      continue;
+    }
+
+    arrayValues = [];
+    if (scanGoStringArrayLine(returnLine, prefix.length, arrayValues, pendingKeys)) {
+      finishArray();
+    }
+  }
+
+  if (arrayValues !== undefined) {
+    throw new Error(`unterminated []string return for case ${pendingKeys?.join(", ")}`);
   }
   return out;
 }
 
-function isString(value: string | undefined): value is string {
-  return value !== undefined;
+function isGoCaseStart(line: string): boolean {
+  const trimmed = line.trimStart();
+  return trimmed.startsWith("case") && isGoWhitespace(trimmed[4]);
 }
+
+function scanGoCaseLine(line: string): "complete" | "continued" | "invalid" {
+  let quoted = false;
+  let escaped = false;
+  for (const char of line) {
+    if (quoted) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        quoted = false;
+      }
+    } else if (char === '"') {
+      quoted = true;
+    } else if (char === ":") {
+      return "complete";
+    }
+  }
+  return quoted ? "invalid" : "continued";
+}
+
+function parseGoCaseClause(line: string): { keys: string[]; remainder: string } | undefined {
+  const trimmed = line.trimStart();
+  if (!isGoCaseStart(trimmed)) {
+    return undefined;
+  }
+
+  const keys: string[] = [];
+  let index = "case".length;
+  while (index < trimmed.length) {
+    while (isGoWhitespace(trimmed[index])) {
+      index += 1;
+    }
+    const key = readGoQuotedString(trimmed, index);
+    if (key === undefined) {
+      return undefined;
+    }
+    keys.push(key.value);
+    index = key.next;
+
+    while (isGoWhitespace(trimmed[index])) {
+      index += 1;
+    }
+    if (trimmed[index] === ":") {
+      return { keys, remainder: trimmed.slice(index + 1) };
+    }
+    if (trimmed[index] !== ",") {
+      return undefined;
+    }
+    index += 1;
+  }
+  return undefined;
+}
+
+function readGoQuotedString(
+  source: string,
+  start: number,
+): { value: string; next: number } | undefined {
+  if (source[start] !== '"') {
+    return undefined;
+  }
+  const value: string[] = [];
+  let escaped = false;
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (escaped) {
+      value.push(char);
+      escaped = false;
+    } else if (char === "\\") {
+      value.push(char);
+      escaped = true;
+    } else if (char === '"') {
+      return { value: value.join(""), next: index + 1 };
+    } else {
+      value.push(char);
+    }
+  }
+  return undefined;
+}
+
+function scanGoStringArrayLine(
+  line: string,
+  start: number,
+  values: string[],
+  keys: string[],
+): boolean {
+  for (let index = start; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === "}") {
+      return true;
+    }
+    if (char !== '"') {
+      continue;
+    }
+
+    const value = readGoQuotedString(line, index);
+    if (value === undefined) {
+      throw new Error(`unterminated quoted string in []string return for case ${keys.join(", ")}`);
+    }
+    values.push(value.value);
+    index = value.next - 1;
+  }
+  return false;
+}
+
+function isGoWhitespace(char: string | undefined): boolean {
+  return char === " " || char === "\t" || char === "\r" || char === "\n";
+}
+
+describe("parseGoStringArrayCases", () => {
+  it("parses a single case key", () => {
+    expect(parseGoStringArrayCases('case "tiny": return []string{"first", "second"}')).toEqual({
+      tiny: ["first", "second"],
+    });
+  });
+
+  it("preserves multiple case keys in source order", () => {
+    const parsed = parseGoStringArrayCases(`
+      case "small",
+        "standard":
+        return []string{"shared"}
+    `);
+    expect(Object.keys(parsed)).toEqual(["small", "standard"]);
+    expect(parsed).toEqual({ small: ["shared"], standard: ["shared"] });
+  });
+
+  it("parses multiline string arrays", () => {
+    expect(
+      parseGoStringArrayCases(`
+        case "large":
+          return []string{
+            "first",
+            "second",
+          }
+      `),
+    ).toEqual({ large: ["first", "second"] });
+  });
+
+  it("ignores a long unterminated case key without matching a later return", () => {
+    const malformed = `case "${"x".repeat(100_000)}\nreturn []string{"wrong"}`;
+    expect(parseGoStringArrayCases(malformed)).toEqual({});
+  });
+
+  it("does not associate valid cases with malformed predecessors", () => {
+    const parsed = parseGoStringArrayCases(`
+      case "unclosed-array":
+        return []string{
+      case "good":
+        return []string{"right"}
+      case "unclosed-key
+        ": return []string{"wrong"}
+    `);
+    expect(parsed).toEqual({ good: ["right"] });
+  });
+});
 
 describe("lease config", () => {
   it("requires an ssh public key", () => {

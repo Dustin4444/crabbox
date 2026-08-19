@@ -21,6 +21,18 @@ func TestClassSpecs(t *testing.T) {
 	}
 }
 
+func TestClassProfilesCoverCanonicalClasses(t *testing.T) {
+	profiles := (Provider{}).ClassProfiles()
+	if len(profiles) != len(core.CanonicalProviderClasses()) {
+		t.Fatalf("ClassProfiles len=%d want %d", len(profiles), len(core.CanonicalProviderClasses()))
+	}
+	for _, profile := range profiles {
+		if profile.Primary.Type == "" || profile.Fallbacks == nil {
+			t.Fatalf("incomplete profile: %#v", profile)
+		}
+	}
+}
+
 func TestMachineShape(t *testing.T) {
 	tests := []struct {
 		name       string

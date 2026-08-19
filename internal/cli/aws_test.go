@@ -756,6 +756,23 @@ func TestAWSCapacityDoctorCheckRecommendsARM64Types(t *testing.T) {
 	}
 }
 
+func TestAWSCapacityDoctorCheckRecommendsTinyClassForTwoVCPUQuota(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Class = "beast"
+	cfg.ServerType = serverTypeForConfig(cfg)
+
+	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 2, true, nil)
+
+	if check.Status != "warning" {
+		t.Fatalf("status=%q, want warning", check.Status)
+	}
+	if check.Details["recommended_class"] != "tiny" || check.Details["recommended_type"] != "m7a.large" {
+		t.Fatalf("recommendation=(%q,%q), want tiny/m7a.large", check.Details["recommended_class"], check.Details["recommended_type"])
+	}
+}
+
 func TestAWSCapacityDoctorCheckPassesWhenQuotaCoversDefaultClass(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Provider = "aws"

@@ -5,10 +5,12 @@
 ### Added
 
 - Added `tiny` and `small` machine classes for lower-cost smoke checks and small repositories.
+- Added authoritative, target-aware machine-class catalogs to both JSON provider discovery commands while preserving the initial default-target class summaries.
 - Added an opt-in `cmake --version` preflight probe for POSIX, WSL2, and native Windows targets. Thanks @coygeek.
 
 ### Fixed
 
+- Kept explicit Hetzner server-type requests exact instead of continuing through class fallback candidates after capacity errors.
 - Made private draft verification resolve the exact draft by tag and numeric release ID instead of relying on a release-list endpoint that can omit drafts.
 
 ## 0.44.0 - 2026-08-18

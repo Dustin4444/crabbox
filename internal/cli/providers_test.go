@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -102,6 +104,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if bytes.Contains(encodedFirecracker, []byte(`"classes"`)) {
 		t.Fatalf("firecracker JSON unexpectedly contains classes: %s", encodedFirecracker)
+	}
+	if !bytes.Contains(encodedFirecracker, []byte(`"classCatalog"`)) {
+		t.Fatalf("firecracker JSON missing classCatalog: %s", encodedFirecracker)
 	}
 	if vast == nil {
 		t.Fatal("vast provider not found")
@@ -467,6 +472,32 @@ func TestClassSpecJSON(t *testing.T) {
 				t.Fatalf("ClassSpec JSON=%s want %s", encoded, test.want)
 			}
 		})
+	}
+}
+
+func TestProviderClassMachineJSONUsesNullForUnknownShape(t *testing.T) {
+	machine := ProviderClassMachine{
+		Type:         "shape-1",
+		Architecture: ProviderClassArchitectureAMD64,
+	}
+	encoded, err := json.Marshal(machine)
+	if err != nil {
+		t.Fatalf("marshal ProviderClassMachine: %v", err)
+	}
+	want := `{"type":"shape-1","architecture":"amd64","vcpu":null,"memory":null}`
+	if string(encoded) != want {
+		t.Fatalf("ProviderClassMachine JSON=%s want %s", encoded, want)
+	}
+}
+
+func TestProviderClassCatalogJSONKeepsArrays(t *testing.T) {
+	catalog := ProviderClassCatalog{Disposition: ProviderClassDispositionUnmapped, Profiles: []ProviderClassProfile{}}
+	encoded, err := json.Marshal(catalog)
+	if err != nil {
+		t.Fatalf("marshal ProviderClassCatalog: %v", err)
+	}
+	if string(encoded) != `{"disposition":"unmapped","profiles":[]}` {
+		t.Fatalf("ProviderClassCatalog JSON=%s", encoded)
 	}
 }
 
@@ -1948,14 +1979,17 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 		if entry == nil {
 			t.Fatalf("built binary providers json missing %s", provider)
 		}
-		if len(entry.Classes) != len(MachineClassOrder) {
-			t.Fatalf("%s classes=%#v want %d entries", provider, entry.Classes, len(MachineClassOrder))
+		if len(entry.Classes) != len(CanonicalProviderClasses()) {
+			t.Fatalf("%s classes=%#v want %d entries", provider, entry.Classes, len(CanonicalProviderClasses()))
 		}
-		for classIndex, className := range MachineClassOrder {
+		for classIndex, className := range CanonicalProviderClasses() {
 			classSpec := entry.Classes[classIndex]
 			if classSpec.Class != className || classSpec.Type == "" || classSpec.VCPUs <= 0 || classSpec.MemoryGB <= 0 {
 				t.Fatalf("%s class[%d]=%#v", provider, classIndex, classSpec)
 			}
+		}
+		if entry.ClassCatalog.Disposition != ProviderClassDispositionMapped || len(entry.ClassCatalog.Profiles) < 4 {
+			t.Fatalf("%s classCatalog=%#v want mapped profiles", provider, entry.ClassCatalog)
 		}
 	}
 	if firecracker == nil {
@@ -1963,6 +1997,9 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 	}
 	if firecracker.Kind != ProviderKindSSHLease || firecracker.Family != "firecracker" || firecracker.Coordinator != string(CoordinatorNever) {
 		t.Fatalf("firecracker built-in spec=%#v", *firecracker)
+	}
+	if firecracker.ClassCatalog.Disposition != ProviderClassDispositionUnmapped || len(firecracker.ClassCatalog.Profiles) != 0 {
+		t.Fatalf("firecracker classCatalog=%#v", firecracker.ClassCatalog)
 	}
 	if !containsString(firecracker.Targets, targetLinux) {
 		t.Fatalf("firecracker built-in targets=%v", firecracker.Targets)
@@ -1974,6 +2011,42 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 	}
 	if len(firecracker.Aliases) != 0 {
 		t.Fatalf("firecracker built-in aliases=%v, want none", firecracker.Aliases)
+	}
+
+	for _, smoke := range []struct {
+		requested string
+		canonical string
+	}{{requested: "aws", canonical: "aws"}, {requested: "google", canonical: "gcp"}} {
+		var matrix *providerMatrixEntry
+		for index := range entries {
+			if entries[index].Provider == smoke.canonical {
+				matrix = &entries[index]
+				break
+			}
+		}
+		if matrix == nil {
+			t.Fatalf("built binary providers json missing %s", smoke.canonical)
+		}
+		discoveryHome := t.TempDir()
+		describe := exec.Command(binary, "providers", "describe", smoke.requested, "--json")
+		describe.Dir = root
+		describe.Env = []string{
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + discoveryHome,
+			"CRABBOX_CONFIG=" + filepath.Join(discoveryHome, "missing.yaml"),
+			"CRABBOX_PROVIDER=static-discovery-marker",
+		}
+		describeOutput, err := describe.CombinedOutput()
+		if err != nil {
+			t.Fatalf("crabbox providers describe %s --json: %v\n%s", smoke.requested, err, describeOutput)
+		}
+		var description providerDescription
+		if err := json.Unmarshal(describeOutput, &description); err != nil {
+			t.Fatalf("invalid providers describe %s json: %v\n%s", smoke.requested, err, describeOutput)
+		}
+		if description.SchemaVersion != 2 || !reflect.DeepEqual(description.ClassCatalog, matrix.ClassCatalog) {
+			t.Fatalf("provider=%s requested=%s schema=%d describe classCatalog=%#v matrix classCatalog=%#v", smoke.canonical, smoke.requested, description.SchemaVersion, description.ClassCatalog, matrix.ClassCatalog)
+		}
 	}
 }
 

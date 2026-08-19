@@ -111,13 +111,14 @@ type ClassSpec struct {
 
 // ProviderClassSpecProvider reports provider-owned machine class resolutions
 // for the provider matrix.
-// MachineClassOrder lists every portable machine class from smallest to
-// largest. Providers iterate it so a new class reaches every ClassSpecs()
-// implementation at once instead of drifting per provider.
-var MachineClassOrder = []string{"tiny", "small", "standard", "fast", "large", "beast"}
-
 type ProviderClassSpecProvider interface {
 	ClassSpecs() []ClassSpec
+}
+
+// ProviderServerTypeOverrideProvider reports an exact provider-native machine
+// selection that outranks a non-explicit stored ServerType.
+type ProviderServerTypeOverrideProvider interface {
+	ServerTypeOverrideForConfig(cfg Config) (string, bool)
 }
 
 type Backend interface {
@@ -429,12 +430,13 @@ type IdempotentLeaseIDBackend interface {
 }
 
 type ProviderSpec struct {
-	Name        string
-	Family      string
-	Kind        ProviderKind
-	Targets     []TargetSpec
-	Features    FeatureSet
-	Coordinator CoordinatorMode
+	Name             string
+	Family           string
+	Kind             ProviderKind
+	Targets          []TargetSpec
+	Features         FeatureSet
+	Coordinator      CoordinatorMode
+	ClassDisposition ProviderClassDisposition
 	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
 	// not a bidirectional peer endpoint.
 	TailscaleEgressOnly bool
@@ -1311,9 +1313,11 @@ func validateProviderConfig(cfg Config) error {
 		return err
 	}
 	if validator, ok := provider.(ProviderConfigValidator); ok {
-		return validator.ValidateConfig(cfg)
+		if err := validator.ValidateConfig(cfg); err != nil {
+			return err
+		}
 	}
-	return nil
+	return validateProviderClassSelector(provider, cfg)
 }
 
 func providerCommandRoutingArgs(cfg Config, leaseID string) []string {

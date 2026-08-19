@@ -21,12 +21,36 @@ func TestClassSpecs(t *testing.T) {
 	}
 }
 
+func TestClassProfilesCoverCanonicalClasses(t *testing.T) {
+	profiles := (Provider{}).ClassProfiles()
+	if len(profiles) != len(core.CanonicalProviderClasses()) {
+		t.Fatalf("ClassProfiles len=%d want %d", len(profiles), len(core.CanonicalProviderClasses()))
+	}
+	for _, profile := range profiles {
+		if profile.Primary.Type == "" || profile.Fallbacks == nil {
+			t.Fatalf("incomplete profile: %#v", profile)
+		}
+	}
+}
+
+func TestTinyAndSmallCandidateMappings(t *testing.T) {
+	tests := map[string][]string{
+		"tiny":  {"c4-standard-4", "c3-standard-4", "n2-standard-4", "n2d-standard-4"},
+		"small": {"c4-standard-8", "c3-standard-8", "n2-standard-8", "n2d-standard-8", "c4-standard-4"},
+	}
+	for class, want := range tests {
+		if got := gcpMachineTypeCandidatesForClass(class); !reflect.DeepEqual(got, want) {
+			t.Errorf("class=%s candidates=%v want %v", class, got, want)
+		}
+	}
+}
+
 func TestMachineShape(t *testing.T) {
 	tests := []struct {
 		name       string
 		machine    string
 		wantVCPUs  int
-		wantMemory int
+		wantMemory float64
 	}{
 		{name: "C4 standard", machine: "c4-standard-32", wantVCPUs: 32, wantMemory: 120},
 		{name: "C3 standard", machine: "c3-standard-22", wantVCPUs: 22, wantMemory: 88},
@@ -34,7 +58,7 @@ func TestMachineShape(t *testing.T) {
 		{name: "N2D standard", machine: "n2d-standard-32", wantVCPUs: 32, wantMemory: 128},
 		{name: "known vCPU only", machine: "c4-highcpu-32", wantVCPUs: 32},
 		{name: "unknown standard family", machine: "future-standard-32", wantVCPUs: 32},
-		{name: "fractional whole GB", machine: "c4-standard-1", wantVCPUs: 1},
+		{name: "fractional GB", machine: "c4-standard-1", wantVCPUs: 1, wantMemory: 3.75},
 		{name: "unparseable vCPU", machine: "c4-standard-many"},
 		{name: "missing suffix", machine: "c4-standard"},
 	}
@@ -42,7 +66,7 @@ func TestMachineShape(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			gotVCPUs, gotMemory := machineShape(test.machine)
 			if gotVCPUs != test.wantVCPUs || gotMemory != test.wantMemory {
-				t.Fatalf("machineShape(%q)=(%d,%d) want (%d,%d)", test.machine, gotVCPUs, gotMemory, test.wantVCPUs, test.wantMemory)
+				t.Fatalf("machineShape(%q)=(%d,%g) want (%d,%g)", test.machine, gotVCPUs, gotMemory, test.wantVCPUs, test.wantMemory)
 			}
 		})
 	}

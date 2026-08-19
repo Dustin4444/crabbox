@@ -47,12 +47,12 @@ func ServerTypeForProviderClass(provider, class string) string {
 	return serverTypeForProviderClass(provider, class)
 }
 
-func AWSInstanceTypeCandidatesForConfig(cfg Config) []string {
-	return awsInstanceTypeCandidatesForConfig(cfg)
+func ProviderClassCatalogFor(provider Provider) ProviderClassCatalog {
+	return providerClassCatalogFor(provider)
 }
 
-func AWSInstanceTypeCandidatesForClass(class string) []string {
-	return awsInstanceTypeCandidatesForClass(class)
+func AWSLaunchCandidates(cfg Config) []string {
+	return awsLaunchCandidates(cfg)
 }
 
 func AWSInstanceTypeVCPUs(instanceType string) int {
@@ -63,20 +63,16 @@ func AzureVMSizeCandidatesForConfig(cfg Config) []string {
 	return azureVMSizeCandidatesForConfig(cfg)
 }
 
-func AzureVMSizeCandidatesForClass(class string) []string {
-	return azureVMSizeCandidatesForClass(class)
-}
-
 func AzureVMSizeVCPUCount(vmSize string) (int, bool) {
 	return azureVMSizeVCPUCount(vmSize)
 }
 
-func GCPMachineTypeCandidatesForClass(class string) []string {
-	return gcpMachineTypeCandidatesForClass(class)
+func GCPMachineTypeCandidatesForConfig(cfg Config) []string {
+	return gcpMachineTypeCandidatesForConfig(cfg)
 }
 
-func HetznerServerTypeCandidatesForClass(class string) []string {
-	return serverTypeCandidatesForClass(class)
+func HetznerServerTypeCandidatesForConfig(cfg Config) []string {
+	return hetznerServerTypeCandidatesForConfig(cfg)
 }
 
 func ProxmoxServerTypeForConfig(cfg Config) string {

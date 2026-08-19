@@ -11,20 +11,21 @@ import (
 )
 
 type providerMatrixEntry struct {
-	Provider     string       `json:"provider"`
-	Family       string       `json:"family"`
-	Aliases      []string     `json:"aliases,omitempty"`
-	Kind         ProviderKind `json:"kind"`
-	Category     string       `json:"category,omitempty"`
-	Targets      []string     `json:"targets"`
-	Features     []Feature    `json:"features"`
-	Runtime      []string     `json:"runtime,omitempty"`
-	Reachability []string     `json:"reachability,omitempty"`
-	Workspace    []string     `json:"workspace,omitempty"`
-	Evidence     []string     `json:"evidence,omitempty"`
-	Lifecycle    []string     `json:"lifecycle,omitempty"`
-	Coordinator  string       `json:"coordinator"`
-	Classes      []ClassSpec  `json:"classes,omitempty"`
+	Provider     string               `json:"provider"`
+	Family       string               `json:"family"`
+	Aliases      []string             `json:"aliases,omitempty"`
+	Kind         ProviderKind         `json:"kind"`
+	Category     string               `json:"category,omitempty"`
+	Targets      []string             `json:"targets"`
+	Features     []Feature            `json:"features"`
+	Runtime      []string             `json:"runtime,omitempty"`
+	Reachability []string             `json:"reachability,omitempty"`
+	Workspace    []string             `json:"workspace,omitempty"`
+	Evidence     []string             `json:"evidence,omitempty"`
+	Lifecycle    []string             `json:"lifecycle,omitempty"`
+	Coordinator  string               `json:"coordinator"`
+	Classes      []ClassSpec          `json:"classes,omitempty"`
+	ClassCatalog ProviderClassCatalog `json:"classCatalog"`
 }
 
 type providerRecommendationEntry struct {
@@ -223,6 +224,7 @@ func providerMatrixEntryFor(provider Provider) providerMatrixEntry {
 		Evidence:     evidenceCapabilitiesForFeatures(spec.Features),
 		Lifecycle:    lifecycleCapabilitiesForProvider(spec.Coordinator, spec.Features),
 		Coordinator:  string(spec.Coordinator),
+		ClassCatalog: providerClassCatalogFor(provider),
 	}
 	if classProvider, ok := provider.(ProviderClassSpecProvider); ok {
 		entry.Classes = append([]ClassSpec(nil), classProvider.ClassSpecs()...)
