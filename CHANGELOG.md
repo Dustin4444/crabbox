@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Made E2B and Azure Dynamic Sessions workspace sync transactional, retained newly created resources after requested sync/setup failures, and enforced sync, status-wait, and cleanup deadlines.
 - Documented which acquisition responsibilities deliberately remain provider-owned and why centralizing them was rejected.
 - Documented which delegated-run lifecycle responsibilities deliberately remain provider-owned and why centralizing them was rejected.
 - Made doctor configuration fail with a clear provider error instead of panicking when a backend lacks doctor capability.
