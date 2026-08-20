@@ -2,6 +2,10 @@
 
 ## 0.45.1 - Unreleased
 
+### Added
+
+- Added fixed idempotent `--lease-id` replay to the Machine0 provider, binding each caller-supplied lease identity to a durable create intent and the exact Machine0 resource ID.
+
 ### Fixed
 
 - Bounded strict single-request provider JSON subprocess exchanges through a shared transport while keeping provider validation and diagnostics adapter-owned.
