@@ -11,6 +11,7 @@
 - Kept WSL2 workspace-owner commands below the Windows command-line limit by streaming their POSIX scripts over SSH stdin.
 - Fenced Linode heartbeats and Tailscale metadata updates with exact account-, scope-, and instance-bound claims, preserving legacy instance claims, idle-timeout intent, and safe release continuity.
 - Made two timing-sensitive tests robust on loaded CI runners.
+- Required exact, locked resource ownership claims before Tencent Cloud, Nebius, Vast, Orgo, Upstash Box, Coder, and EC2 Mac host lifecycle mutations, preventing name-matched, stale, cross-namespace, or concurrently renewed resources from being destroyed.
 
 ## 0.46.0 - 2026-08-20
 
