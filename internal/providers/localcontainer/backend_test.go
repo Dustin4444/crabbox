@@ -98,11 +98,837 @@ func testBackend(runner *recordingRunner) *backend {
 	return b
 }
 
-func TestBackendAdvertisesExclusiveOneShotAcquireOnly(t *testing.T) {
+func TestBackendAdvertisesAcquireCapabilities(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	capability, ok := any(b).(core.ExclusiveOneShotAcquireBackend)
 	if !ok || !capability.AcquireIsExclusiveOneShot() {
 		t.Fatal("local-container must advertise exclusive fresh acquisitions")
+	}
+	fixed, ok := any(b).(core.IdempotentLeaseIDBackend)
+	if !ok || !fixed.SupportsRequestedLeaseID() {
+		t.Fatal("local-container must advertise idempotent fixed lease acquisitions")
+	}
+}
+
+func TestFixedLocalContainerFingerprintPreservesSubsecondLifecycleDurations(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*core.Config)
+	}{
+		{name: "ttl", mutate: func(cfg *core.Config) { cfg.TTL += time.Nanosecond }},
+		{name: "idle timeout", mutate: func(cfg *core.Config) { cfg.IdleTimeout += time.Nanosecond }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testBackend(&recordingRunner{}).cfg
+			cfg.TTL = 90*time.Second + 100*time.Millisecond
+			cfg.IdleTimeout = 30*time.Second + 100*time.Millisecond
+			req := core.AcquireRequest{Keep: true, RequestedSlug: "precise-duration"}
+			original, err := fixedLocalContainerFingerprint(cfg, req, "ssh-ed25519 precise-duration")
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&cfg)
+			changed, err := fixedLocalContainerFingerprint(cfg, req, "ssh-ed25519 precise-duration")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed == original {
+				t.Fatalf("%s nanosecond drift did not change fixed fingerprint %q", test.name, original)
+			}
+		})
+	}
+}
+
+func TestFixedLocalContainerFingerprintNormalizesPond(t *testing.T) {
+	cfg := testBackend(&recordingRunner{}).cfg
+	cfg.Pond = "  Alpha__Pond  "
+	req := core.AcquireRequest{Keep: true, RequestedSlug: "pond-fingerprint"}
+	original, err := fixedLocalContainerFingerprint(cfg, req, "ssh-ed25519 pond-fingerprint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		pond string
+		same bool
+	}{
+		{name: "equivalent spelling", pond: "alpha-pond", same: true},
+		{name: "different pond", pond: "beta", same: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := cfg
+			changed.Pond = test.pond
+			fingerprint, fingerprintErr := fixedLocalContainerFingerprint(changed, req, "ssh-ed25519 pond-fingerprint")
+			if fingerprintErr != nil {
+				t.Fatal(fingerprintErr)
+			}
+			if (fingerprint == original) != test.same {
+				t.Fatalf("pond %q fingerprint=%q original=%q same=%t", test.pond, fingerprint, original, test.same)
+			}
+		})
+	}
+}
+
+func TestFixedAcquireCreatesRequestedIDAndReplays(t *testing.T) {
+	b, runner, _, createdLeaseID, _, _ := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123451", RequestedSlug: "pending-test",
+	}
+
+	first, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.LeaseID != req.RequestedLeaseID || *createdLeaseID != req.RequestedLeaseID {
+		t.Fatalf("fixed lease=%q created=%q, want %q", first.LeaseID, *createdLeaseID, req.RequestedLeaseID)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.Provider != core.FixedLocalContainerClaimProvider ||
+		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "acquired" {
+		t.Fatalf("fixed claim=%#v err=%v", claim, err)
+	}
+	if claim.FixedCreateIntent.Fingerprint != first.Server.Labels["fixed_intent_sha256"] {
+		t.Fatalf("fixed claim fingerprint does not match container: %#v", claim.FixedCreateIntent)
+	}
+	if first.Server.Provider != providerName || first.Server.Labels["provider"] != providerName {
+		t.Fatalf("fixed lease exposed persisted provider marker: %#v", first.Server)
+	}
+	resolvedClaim, ok, err := core.ResolveLeaseClaimForProvider(req.RequestedLeaseID, providerName)
+	if err != nil || !ok || resolvedClaim.Provider != core.FixedLocalContainerClaimProvider {
+		t.Fatalf("canonical fixed claim=%#v ok=%t err=%v", resolvedClaim, ok, err)
+	}
+	if bySlug, found, lookupErr := localContainerClaimByIDOrSlug(req.RequestedSlug); lookupErr != nil ||
+		!found || bySlug.LeaseID != req.RequestedLeaseID {
+		t.Fatalf("acquired fixed slug claim=%#v found=%t err=%v", bySlug, found, lookupErr)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range claims {
+		if candidate.Provider == providerName {
+			t.Fatalf("legacy-style local-container cleanup can see fixed claim: %#v", candidate)
+		}
+	}
+
+	restarted := testBackend(runner)
+	restarted.waitForSSHReady = b.waitForSSHReady
+	views, err := restarted.List(context.Background(), core.ListRequest{})
+	if err != nil || len(views) != 1 || views[0].Provider != providerName || views[0].CloudID != first.Server.CloudID {
+		t.Fatalf("fixed lease views=%#v err=%v", views, err)
+	}
+	for _, identifier := range []string{req.RequestedLeaseID, req.RequestedSlug} {
+		resolved, resolveErr := restarted.Resolve(context.Background(), core.ResolveRequest{
+			ID: identifier, StatusOnly: true, NoLocalStateMutations: true,
+		})
+		if resolveErr != nil || resolved.LeaseID != first.LeaseID || resolved.Server.Provider != providerName {
+			t.Fatalf("resolved fixed lease %q=%#v err=%v", identifier, resolved, resolveErr)
+		}
+		if err := restarted.AuthorizeStatusTouchClaim(context.Background(), resolved, claim); err != nil {
+			t.Fatalf("authorize fixed lease %q: %v", identifier, err)
+		}
+		if identifier == req.RequestedLeaseID {
+			touched, touchErr := restarted.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "busy"})
+			updated, readErr := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if touchErr != nil || readErr != nil || touched.Provider != providerName || updated.Provider != core.FixedLocalContainerClaimProvider {
+				t.Fatalf("fixed touch server=%#v claim=%#v touchErr=%v readErr=%v", touched, updated, touchErr, readErr)
+			}
+			claim = updated
+		}
+	}
+	if err := restarted.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if current, readErr := core.ReadLeaseClaim(req.RequestedLeaseID); readErr != nil || current.Provider != core.FixedLocalContainerClaimProvider {
+		t.Fatalf("cleanup altered live fixed claim: claim=%#v err=%v", current, readErr)
+	}
+	replayed, err := restarted.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.LeaseID != first.LeaseID || replayed.Server.CloudID != first.Server.CloudID || replayed.SSH.Host != first.SSH.Host || replayed.SSH.Port != first.SSH.Port {
+		t.Fatalf("replayed target=%#v, original=%#v", replayed, first)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates=%d, want 1", creates)
+	}
+	if err := restarted.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: replayed}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFixedAcquireRejectsChangedImage(t *testing.T) {
+	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123452", RequestedSlug: "pending-test",
+	}
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drifted := testBackend(runner)
+	drifted.cfg.LocalContainer.Image = "debian:bookworm"
+	drifted.waitForSSHReady = b.waitForSSHReady
+	_, err = drifted.Acquire(context.Background(), req)
+	requireFixedLocalContainerConflict(t, err)
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates after image drift=%d, want 1", creates)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFixedAcquirePondReplayAndDrift(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		original string
+		replayed string
+		conflict bool
+	}{
+		{name: "equivalent spelling", original: "  Alpha__Pond  ", replayed: "alpha-pond"},
+		{name: "different pond", original: "alpha", replayed: "beta", conflict: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, runner, _, _, _, _ := pendingAcquireBackend(t)
+			b.cfg.Pond = test.original
+			b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+			req := core.AcquireRequest{
+				Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+				RequestedLeaseID: "cbx_abcdef123466", RequestedSlug: "fixed-pond",
+			}
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pond := lease.Server.Labels["pond"]; pond != core.NormalizePondName(test.original) {
+				t.Fatalf("acquired pond=%q, want %q", pond, core.NormalizePondName(test.original))
+			}
+			restarted := testBackend(runner)
+			restarted.cfg.Pond = test.replayed
+			restarted.waitForSSHReady = b.waitForSSHReady
+			replayed, err := restarted.Acquire(context.Background(), req)
+			releaseLease := lease
+			if test.conflict {
+				requireFixedLocalContainerConflict(t, err)
+			} else if err != nil || replayed.LeaseID != lease.LeaseID || replayed.Server.CloudID != lease.Server.CloudID {
+				t.Fatalf("equivalent pond replay=%#v err=%v", replayed, err)
+			} else {
+				releaseLease = replayed
+			}
+			if creates := localContainerCreateCalls(runner); creates != 1 {
+				t.Fatalf("container creates after pond replay=%d, want 1", creates)
+			}
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: releaseLease}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestValidateFixedLocalContainerRejectsMismatchedPond(t *testing.T) {
+	b, _, _, _, _, _ := pendingAcquireBackend(t)
+	b.cfg.Pond = " Alpha "
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123467", RequestedSlug: "fixed-pond-validation",
+	}
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container, err := b.inspectContainer(context.Background(), lease.Server.CloudID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pond := range []string{"beta", ""} {
+		container.Config.Labels["pond"] = pond
+		err = validateFixedLocalContainer(container, b.configForRun(), req.RequestedLeaseID,
+			req.RequestedSlug, claim.FixedCreateIntent.Fingerprint)
+		requireFixedLocalContainerConflict(t, err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFixedAcquireRejectsSubsecondLifecycleDrift(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*core.Config)
+	}{
+		{name: "ttl", mutate: func(cfg *core.Config) { cfg.TTL += time.Nanosecond }},
+		{name: "idle timeout", mutate: func(cfg *core.Config) { cfg.IdleTimeout += time.Nanosecond }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, runner, _, _, _, _ := pendingAcquireBackend(t)
+			b.cfg.TTL = 90*time.Second + 100*time.Millisecond
+			b.cfg.IdleTimeout = 30*time.Second + 100*time.Millisecond
+			b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+			req := core.AcquireRequest{
+				Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+				RequestedLeaseID: "cbx_abcdef123462", RequestedSlug: "precise-duration",
+			}
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			drifted := testBackend(runner)
+			drifted.cfg.TTL = b.cfg.TTL
+			drifted.cfg.IdleTimeout = b.cfg.IdleTimeout
+			test.mutate(&drifted.cfg)
+			drifted.waitForSSHReady = b.waitForSSHReady
+			_, err = drifted.Acquire(context.Background(), req)
+			requireFixedLocalContainerConflict(t, err)
+			if creates := localContainerCreateCalls(runner); creates != 1 {
+				t.Fatalf("container creates after %s drift=%d, want 1", test.name, creates)
+			}
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestFixedAcquireReleasedClaimRemainsTerminal(t *testing.T) {
+	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123453", RequestedSlug: "pending-test",
+	}
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil || !exists || claim.Provider != core.FixedLocalContainerClaimProvider ||
+		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
+		t.Fatalf("terminal fixed claim=%#v exists=%t err=%v", claim, exists, err)
+	}
+	if claim.CloudID != "" || len(claim.Labels) != 0 || claim.SSHHost != "" {
+		t.Fatalf("terminal fixed claim retains live identity: %#v", claim)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if retained, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); err != nil ||
+		!exists || retained.Provider != core.FixedLocalContainerClaimProvider {
+		t.Fatalf("cleanup altered terminal fixed claim: claim=%#v exists=%t err=%v", retained, exists, err)
+	}
+	_, err = b.Acquire(context.Background(), req)
+	requireFixedLocalContainerConflict(t, err)
+	if !strings.Contains(err.Error(), "terminal") {
+		t.Fatalf("terminal replay error=%v", err)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates after terminal replay=%d, want 1", creates)
+	}
+}
+
+func TestReleasedFixedLeaseTombstoneDoesNotReserveSlugRouting(t *testing.T) {
+	b, _, _, _, _, _ := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123460", RequestedSlug: "reusable-local-slug",
+	}
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, found, lookupErr := localContainerClaimByIDOrSlug(req.RequestedSlug); lookupErr != nil || found {
+		t.Fatalf("released fixed slug remained routable: claim=%#v found=%t err=%v", claim, found, lookupErr)
+	}
+	if exact, found, lookupErr := localContainerClaimByIDOrSlug(req.RequestedLeaseID); lookupErr != nil ||
+		!found || !isReleasedFixedLocalContainerClaim(exact) {
+		t.Fatalf("released fixed ID disappeared: claim=%#v found=%t err=%v", exact, found, lookupErr)
+	}
+	if _, _, _, resolveErr := b.resolveContainer(context.Background(), req.RequestedSlug); !isExitCode(resolveErr, 4) {
+		t.Fatalf("released fixed slug resolved without a live container: %v", resolveErr)
+	}
+
+	const ordinaryLeaseID = "cbx_abcdef123461"
+	const ordinaryContainerID = "reused-local-container"
+	labels := testCapturedScopeLabels(map[string]string{
+		"crabbox": "true", "provider": providerName, "lease": ordinaryLeaseID,
+		"slug": req.RequestedSlug, "state": "ready", "runtime": "docker",
+		"server_type": "ubuntu:24.04", "ssh_user": "runner", "work_root": "/workspace/crabbox",
+	})
+	server := core.Server{CloudID: ordinaryContainerID, Provider: providerName, Labels: labels}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+		ordinaryLeaseID, req.RequestedSlug, providerName, "runtime:docker/context:default", "",
+		req.Repo.Root, time.Minute, false, server,
+		core.SSHTarget{Host: "127.0.0.1", Port: "49170", User: "runner"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if claim, found, lookupErr := localContainerClaimByIDOrSlug(req.RequestedSlug); lookupErr != nil ||
+		!found || claim.LeaseID != ordinaryLeaseID || claim.Provider != providerName {
+		t.Fatalf("reused ordinary slug claim=%#v found=%t err=%v", claim, found, lookupErr)
+	}
+	container := inspectContainer{
+		ID: ordinaryContainerID, Name: "/crabbox-reused-local-slug",
+		Config: inspectConfig{Image: "ubuntu:24.04", Labels: labels},
+		State:  inspectState{Status: "running", Running: true},
+	}
+	data, err := json.Marshal([]inspectContainer{container})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: ordinaryContainerID + "\n"},
+		commandKey([]string{"inspect", ordinaryContainerID}): {Stdout: string(data)},
+	}}
+	addDefaultLocalContainerScopeResponses(runner)
+	resolved, resolvedLeaseID, resolvedSlug, resolveErr := testBackend(runner).resolveContainer(context.Background(), req.RequestedSlug)
+	if resolveErr != nil || resolved.ID != ordinaryContainerID || resolvedLeaseID != ordinaryLeaseID || resolvedSlug != req.RequestedSlug {
+		t.Fatalf("reused slug container=%#v lease=%q slug=%q err=%v", resolved, resolvedLeaseID, resolvedSlug, resolveErr)
+	}
+	if tombstone, exists, readErr := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); readErr != nil ||
+		!exists || !isReleasedFixedLocalContainerClaim(tombstone) {
+		t.Fatalf("reused slug altered fixed tombstone: claim=%#v exists=%t err=%v", tombstone, exists, readErr)
+	}
+}
+
+func TestFixedAcquireRecoversPreparedLiveContainer(t *testing.T) {
+	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+		return errors.New("temporary SSH transport failure")
+	}
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123454", RequestedSlug: "pending-test",
+	}
+	if _, err := b.Acquire(context.Background(), req); err == nil {
+		t.Fatal("initial fixed acquisition unexpectedly succeeded")
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.Provider != core.FixedLocalContainerClaimProvider ||
+		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "prepared" || claim.CloudID == "" ||
+		!isPendingLocalContainerClaim(claim) {
+		t.Fatalf("prepared fixed claim=%#v err=%v", claim, err)
+	}
+	if pending, found, lookupErr := localContainerClaimByIDOrSlug(req.RequestedSlug); lookupErr != nil ||
+		!found || pending.LeaseID != req.RequestedLeaseID {
+		t.Fatalf("prepared fixed slug claim=%#v found=%t err=%v", pending, found, lookupErr)
+	}
+	if container, leaseID, _, resolveErr := b.resolveContainer(context.Background(), req.RequestedSlug); resolveErr != nil ||
+		container.ID != claim.CloudID || leaseID != req.RequestedLeaseID {
+		t.Fatalf("prepared fixed slug container=%#v lease=%q err=%v", container, leaseID, resolveErr)
+	}
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates after prepared recovery=%d, want 1", creates)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFixedAcquireRejectsMissingBoundContainer(t *testing.T) {
+	b, runner, _, _, bootstrapDir, containerPresent := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123455", RequestedSlug: "pending-test",
+	}
+	if _, err := b.Acquire(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(*bootstrapDir) })
+	*containerPresent = false
+	_, err := b.Acquire(context.Background(), req)
+	requireFixedLocalContainerConflict(t, err)
+	if !strings.Contains(err.Error(), "missing its bound container") {
+		t.Fatalf("missing container error=%v", err)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates after bound container vanished=%d, want 1", creates)
+	}
+}
+
+func TestFixedAcquireMissingContainerReleasePreservesTerminalClaim(t *testing.T) {
+	b, _, _, _, _, containerPresent := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123459", RequestedSlug: "pending-test",
+	}
+	if _, err := b.Acquire(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	*containerPresent = false
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil || !exists || claim.Provider != core.FixedLocalContainerClaimProvider ||
+		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
+		t.Fatalf("missing-container terminal claim=%#v exists=%t err=%v", claim, exists, err)
+	}
+	_, err = b.Acquire(context.Background(), req)
+	requireFixedLocalContainerConflict(t, err)
+}
+
+func TestFixedAcquireRecreatesUnattemptedPreparedClaim(t *testing.T) {
+	b, runner, _, _, bootstrapDir, containerPresent := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123456", RequestedSlug: "pending-test",
+	}
+	if _, err := b.Acquire(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	firstBootstrapDir := *bootstrapDir
+	t.Cleanup(func() { _ = os.RemoveAll(firstBootstrapDir) })
+	*containerPresent = false
+	if err := core.WithDurableLeaseClaimLock(req.RequestedLeaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
+		if !exists {
+			return errors.New("fixed claim disappeared")
+		}
+		claim.CloudID = ""
+		claim.CloudImmutableID = ""
+		claim.Labels = nil
+		claim.SSHHost = ""
+		claim.SSHPort = 0
+		claim.FixedCreateIntent.State = "prepared"
+		claim.FixedCreateIntent.Attempt = nil
+		return persist()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 2 {
+		t.Fatalf("container creates after unattempted prepared recovery=%d, want 2", creates)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFixedAcquireRefusesUnresolvedCreateAttempt(t *testing.T) {
+	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	originalRun := runner.run
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if firstArg(req.Args) == "run" {
+			return core.LocalCommandResult{Stderr: "daemon transport lost", ExitCode: 1}, errors.New("daemon transport lost")
+		}
+		return originalRun(req)
+	}
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123457", RequestedSlug: "pending-test",
+	}
+	if _, err := b.Acquire(context.Background(), req); err == nil {
+		t.Fatal("ambiguous fixed create unexpectedly succeeded")
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.Attempt["container_name"] == "" || claim.CloudID != "" {
+		t.Fatalf("unresolved create claim=%#v err=%v", claim, err)
+	}
+	_, err = b.Acquire(context.Background(), req)
+	requireFixedLocalContainerConflict(t, err)
+	if !strings.Contains(err.Error(), "unresolved create attempt") {
+		t.Fatalf("unresolved create error=%v", err)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates after ambiguous failure=%d, want 1", creates)
+	}
+}
+
+func TestFixedAcquireBindsStoppedRecoveredContainerForExplicitRelease(t *testing.T) {
+	b, runner, containerPresent := stoppedFixedAcquireBackend(t, nil)
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123468", RequestedSlug: "stopped-recovery",
+	}
+	if _, err := b.Acquire(context.Background(), req); err == nil {
+		t.Fatal("ambiguous stopped-container creation unexpectedly succeeded")
+	}
+	initial, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || initial.Provider != core.FixedLocalContainerClaimProvider ||
+		initial.FixedCreateIntent == nil || initial.FixedCreateIntent.State != "prepared" ||
+		initial.FixedCreateIntent.Attempt["container_name"] != core.LeaseProviderName(req.RequestedLeaseID, req.RequestedSlug) ||
+		initial.FixedCreateIntent.Attempt["container_id"] != "" || initial.CloudID != "" {
+		t.Fatalf("unresolved stopped-container claim=%#v err=%v", initial, err)
+	}
+	if !*containerPresent {
+		t.Fatal("ambiguous creation did not retain its stopped container")
+	}
+	_, err = b.Acquire(context.Background(), req)
+	requireFixedLocalContainerConflict(t, err)
+	if !strings.Contains(err.Error(), "non-running container") {
+		t.Fatalf("stopped-container replay error=%v", err)
+	}
+	bound, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || bound.Provider != core.FixedLocalContainerClaimProvider ||
+		bound.FixedCreateIntent == nil || bound.FixedCreateIntent.State != "prepared" ||
+		bound.CloudID != "container-pending" || bound.FixedCreateIntent.Attempt["container_id"] != bound.CloudID ||
+		bound.Labels["fixed_intent_sha256"] != bound.FixedCreateIntent.Fingerprint ||
+		!isPendingLocalContainerClaim(bound) {
+		t.Fatalf("recovered stopped-container claim=%#v err=%v", bound, err)
+	}
+	if !*containerPresent {
+		t.Fatal("replay unexpectedly removed the stopped container")
+	}
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates after stopped recovery=%d, want 1", creates)
+	}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+	if err != nil || lease.LeaseID != req.RequestedLeaseID || lease.Server.CloudID != bound.CloudID {
+		t.Fatalf("exact stopped-container release target=%#v err=%v", lease, err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatalf("release stopped fixed container: %v", err)
+	}
+	if *containerPresent {
+		t.Fatal("explicit release did not remove stopped container")
+	}
+	tombstone, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil || !exists || fixedLocalContainerLeaseKind.ValidateTerminalClaim(tombstone, bound, req.RequestedLeaseID, nil) != nil {
+		t.Fatalf("stopped-container terminal claim=%#v exists=%t err=%v", tombstone, exists, err)
+	}
+	_, err = b.Acquire(context.Background(), req)
+	requireFixedLocalContainerConflict(t, err)
+	if !strings.Contains(err.Error(), "terminal") {
+		t.Fatalf("terminal stopped-container replay error=%v", err)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates after terminal replay=%d, want 1", creates)
+	}
+}
+
+func TestFixedAcquireStoppedContainerNeverBindsMismatchedIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		mutateContainer func(*inspectContainer)
+		mutateAttempt   bool
+	}{
+		{name: "fingerprint", mutateContainer: func(container *inspectContainer) {
+			container.Config.Labels["fixed_intent_sha256"] = "different-fingerprint"
+		}},
+		{name: "durable attempt identity", mutateAttempt: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, runner, containerPresent := stoppedFixedAcquireBackend(t, test.mutateContainer)
+			req := core.AcquireRequest{
+				Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+				RequestedLeaseID: "cbx_abcdef123469", RequestedSlug: "stopped-mismatch",
+			}
+			if _, err := b.Acquire(context.Background(), req); err == nil {
+				t.Fatal("ambiguous stopped-container creation unexpectedly succeeded")
+			}
+			if test.mutateAttempt {
+				if err := core.WithDurableLeaseClaimLock(req.RequestedLeaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
+					if !exists {
+						return errors.New("fixed claim disappeared")
+					}
+					claim.FixedCreateIntent.Attempt["container_id"] = "different-container"
+					return persist()
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := b.Acquire(context.Background(), req)
+			requireFixedLocalContainerConflict(t, err)
+			claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || claim.CloudID != "" || len(claim.Labels) != 0 ||
+				(test.mutateAttempt && claim.FixedCreateIntent.Attempt["container_id"] != "different-container") {
+				t.Fatalf("mismatched stopped container was bound: claim=%#v err=%v", claim, err)
+			}
+			if !*containerPresent {
+				t.Fatal("mismatched container was unexpectedly removed")
+			}
+			if creates := localContainerCreateCalls(runner); creates != 1 {
+				t.Fatalf("container creates after mismatched recovery=%d, want 1", creates)
+			}
+		})
+	}
+}
+
+func stoppedFixedAcquireBackend(t *testing.T, mutateContainer func(*inspectContainer)) (*backend, *recordingRunner, *bool) {
+	t.Helper()
+	b, runner, _, _, bootstrapDir, containerPresent := pendingAcquireBackend(t)
+	t.Cleanup(func() {
+		if *bootstrapDir != "" {
+			_ = os.RemoveAll(*bootstrapDir)
+		}
+	})
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+		t.Fatal("stopped container was incorrectly adopted as ready")
+		return nil
+	}
+	originalRun := runner.run
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		result, err := originalRun(req)
+		if err != nil {
+			return result, err
+		}
+		switch firstArg(req.Args) {
+		case "run":
+			return core.LocalCommandResult{Stderr: "daemon transport lost", ExitCode: 1}, errors.New("daemon transport lost")
+		case "inspect":
+			var containers []inspectContainer
+			if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
+				t.Fatal(err)
+			}
+			containers[0].State = inspectState{Status: "exited", Running: false}
+			if mutateContainer != nil {
+				mutateContainer(&containers[0])
+			}
+			data, marshalErr := json.Marshal(containers)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			result.Stdout = string(data)
+		}
+		return result, nil
+	}
+	return b, runner, containerPresent
+}
+
+func TestFixedAcquireUnresolvedAttemptReservesRequestedSlug(t *testing.T) {
+	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	originalRun := runner.run
+	firstAttempt := true
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if firstArg(req.Args) == "run" && firstAttempt {
+			firstAttempt = false
+			return core.LocalCommandResult{Stderr: "daemon transport lost", ExitCode: 1}, errors.New("daemon transport lost")
+		}
+		return originalRun(req)
+	}
+	first := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123463", RequestedSlug: "reserved-local-slug",
+	}
+	if _, err := b.Acquire(context.Background(), first); err == nil {
+		t.Fatal("ambiguous fixed create unexpectedly succeeded")
+	}
+	reserved, err := core.ReadLeaseClaim(first.RequestedLeaseID)
+	if err != nil || reserved.FixedCreateIntent == nil || reserved.FixedCreateIntent.State != "prepared" ||
+		reserved.FixedCreateIntent.Attempt["container_name"] == "" || reserved.CloudID != "" {
+		t.Fatalf("unresolved fixed claim=%#v err=%v", reserved, err)
+	}
+	second := first
+	second.RequestedLeaseID = "cbx_abcdef123464"
+	lease, err := b.Acquire(context.Background(), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := lease.Server.Labels["slug"]
+	if slug == first.RequestedSlug || !strings.HasPrefix(slug, first.RequestedSlug+"-") {
+		t.Fatalf("second lease slug=%q, want collision suffix for reserved %q", slug, first.RequestedSlug)
+	}
+	if claim, found, lookupErr := localContainerClaimByIDOrSlug(first.RequestedSlug); lookupErr != nil ||
+		!found || claim.LeaseID != first.RequestedLeaseID {
+		t.Fatalf("reserved slug claim=%#v found=%t err=%v", claim, found, lookupErr)
+	}
+	if resolved, resolveErr := b.Resolve(context.Background(), core.ResolveRequest{ID: slug, StatusOnly: true}); resolveErr != nil ||
+		resolved.LeaseID != second.RequestedLeaseID {
+		t.Fatalf("suffixed slug resolved=%#v err=%v", resolved, resolveErr)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 2 {
+		t.Fatalf("container create attempts=%d, want 2", creates)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFixedAcquireOnAcquiredCanReadClaimAfterLockReleased(t *testing.T) {
+	b, _, _, _, _, _ := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123458", RequestedSlug: "pending-test",
+	}
+	called := false
+	req.OnAcquired = func(lease core.LeaseTarget) error {
+		called = true
+		return core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *core.LeaseClaim, exists bool, _ func() error) error {
+			if !exists || claim.CloudID != lease.Server.CloudID || claim.FixedCreateIntent.State != "acquired" {
+				return errors.New("fixed claim was not committed before acquisition callback")
+			}
+			return nil
+		})
+	}
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("acquisition callback was not called")
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNonFixedAcquireStillCreatesDistinctLeases(t *testing.T) {
+	b, _, _, _, _, _ := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil || claim.Provider != providerName || claim.FixedCreateIntent != nil ||
+		lease.Server.Labels["fixed_intent_sha256"] != "" {
+		t.Fatalf("non-fixed acquisition changed: lease=%#v claim=%#v err=%v", lease, claim, err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+		t.Fatalf("non-fixed release retained a claim: exists=%t err=%v", exists, err)
+	}
+}
+
+func localContainerCreateCalls(runner *recordingRunner) int {
+	count := 0
+	for _, call := range runner.calls {
+		if firstArg(call.Args) == "run" {
+			count++
+		}
+	}
+	return count
+}
+
+func requireFixedLocalContainerConflict(t *testing.T, err error) {
+	t.Helper()
+	var exitErr core.ExitError
+	if err == nil || !core.AsExitError(err, &exitErr) || exitErr.Code != 4 || !strings.Contains(err.Error(), "lease_id_conflict") {
+		t.Fatalf("fixed lease error=%v, want lease_id_conflict exit 4", err)
 	}
 }
 
@@ -2042,10 +2868,19 @@ func TestAcquirePendingClaimCannotAuthorizeReplacementContainer(t *testing.T) {
 
 func pendingAcquireBackend(t *testing.T) (*backend, *recordingRunner, *strings.Builder, *string, *string, *bool) {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var leaseID string
 	var bootstrapDir string
+	var containerName string
+	var slug string
+	var fixedFingerprint string
+	var containerImage string
+	var containerRuntimeImage string
+	var containerPond string
+	var containerDaemonID string
+	var containerContext string
 	containerPresent := false
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
@@ -2060,6 +2895,28 @@ func pendingAcquireBackend(t *testing.T) (*backend, *recordingRunner, *strings.B
 			return core.LocalCommandResult{}, nil
 		case "run":
 			leaseID = labelFromRunArgs(t, req.Args, "lease")
+			slug = labelFromRunArgs(t, req.Args, "slug")
+			containerRuntimeImage = req.Args[len(req.Args)-3]
+			for i := 0; i+1 < len(req.Args); i++ {
+				if req.Args[i] == "--name" {
+					containerName = req.Args[i+1]
+				}
+				if req.Args[i] == "--label" {
+					key, value, _ := strings.Cut(req.Args[i+1], "=")
+					switch key {
+					case "fixed_intent_sha256":
+						fixedFingerprint = value
+					case "image":
+						containerImage = value
+					case "pond":
+						containerPond = value
+					case checkpointMetadataDaemonID:
+						containerDaemonID = value
+					case checkpointMetadataContext:
+						containerContext = value
+					}
+				}
+			}
 			bootstrapDir = bootstrapDirFromRunArgs(t, []core.LocalCommandRequest{req})
 			containerPresent = true
 			return core.LocalCommandResult{Stdout: "container-pending\n"}, nil
@@ -2068,13 +2925,25 @@ func pendingAcquireBackend(t *testing.T) (*backend, *recordingRunner, *strings.B
 				return core.LocalCommandResult{Stderr: "not found", ExitCode: 1}, errors.New("not found")
 			}
 			labels := map[string]string{
-				"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": "pending-test",
+				"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug,
 				"state": pendingClaimState, "recovery": pendingRecoveryKind, "runtime": "docker",
-				"server_type": "ubuntu:24.04", "ssh_user": "runner", "work_root": "/workspace/crabbox",
+				"image": containerImage, "server_type": "ubuntu:24.04", "ssh_user": "runner", "work_root": "/workspace/crabbox",
 				"bootstrap_dir": bootstrapDir, "ssh_key_owned": "true", "bootstrap_owned": "true", "keep": "true",
 			}
+			if containerDaemonID != "" {
+				labels[checkpointMetadataDaemonID] = containerDaemonID
+			}
+			if containerContext != "" {
+				labels[checkpointMetadataContext] = containerContext
+			}
+			if containerPond != "" {
+				labels["pond"] = containerPond
+			}
+			if fixedFingerprint != "" {
+				labels["fixed_intent_sha256"] = fixedFingerprint
+			}
 			data, err := json.Marshal([]inspectContainer{{
-				ID: "container-pending", Name: "/crabbox-pending", Config: inspectConfig{Image: "ubuntu:24.04", Labels: labels},
+				ID: "container-pending", Name: "/" + containerName, Config: inspectConfig{Image: containerRuntimeImage, Labels: labels},
 				State:           inspectState{Status: "running", Running: true},
 				NetworkSettings: inspectNetworking{Ports: map[string][]inspectPort{"2222/tcp": {{HostIP: "127.0.0.1", HostPort: "49170"}}}},
 			}})
@@ -2256,6 +3125,114 @@ esac
 	}
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatalf("release checkpoint fork: %v", err)
+	}
+}
+
+func TestFixedAcquireCheckpointForkUsesImageIDAndReplays(t *testing.T) {
+	const (
+		checkpointImageID  = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		checkpointImage    = "crabbox-checkpoint-fixed"
+		checkpointUser     = "checkpoint-user"
+		checkpointWorkRoot = "/checkpoint/work"
+	)
+	binDir := t.TempDir()
+	dockerScript := `#!/bin/sh
+if [ "$1" = "--context" ]; then
+  shift 2
+fi
+case "$1" in
+  context) printf '%s\n' 'unix:///pinned.sock' ;;
+  info) printf '%s\n' 'daemon-pinned' ;;
+  image) printf '%s\n' 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(dockerScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	originalRun := runner.run
+	var dockerRunArgs []string
+	creates := 0
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if len(req.Args) < 3 || req.Args[0] != "--context" || req.Args[1] != "pinned-context" {
+			t.Fatalf("Docker lifecycle command was not pinned: %v", req.Args)
+		}
+		req.Args = req.Args[2:]
+		if firstArg(req.Args) == "run" {
+			creates++
+			dockerRunArgs = append([]string(nil), req.Args...)
+		}
+		return originalRun(req)
+	}
+	if err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{
+		Config: &b.cfg,
+		Record: core.NativeCheckpointForkRecord{
+			Kind:    core.CheckpointKindDockerCommit,
+			ImageID: checkpointImageID,
+			Name:    checkpointImage,
+			Metadata: map[string]string{
+				checkpointMetadataRuntime:  "docker",
+				checkpointMetadataContext:  "pinned-context",
+				checkpointMetadataDaemonID: "daemon-pinned",
+				checkpointMetadataUser:     checkpointUser,
+				checkpointMetadataWorkRoot: checkpointWorkRoot,
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applyDefaults(&b.cfg)
+	b.captureRuntimeScope = func(context.Context, core.Config) (checkpointScope, error) {
+		return checkpointScope{
+			Runtime: "docker", Context: "pinned-context", Endpoint: "unix:///pinned.sock", DaemonID: "daemon-pinned",
+		}, nil
+	}
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123465", RequestedSlug: "fixed-checkpoint-fork",
+	}
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image := dockerRunArgs[len(dockerRunArgs)-3]; image != checkpointImageID {
+		t.Fatalf("Docker run image=%q, want captured image id %q", image, checkpointImageID)
+	}
+	if image := labelFromRunArgs(t, dockerRunArgs, "image"); image != checkpointImage {
+		t.Fatalf("Docker run image label=%q, want checkpoint name %q", image, checkpointImage)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.Provider != core.FixedLocalContainerClaimProvider ||
+		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "acquired" ||
+		claim.FixedCreateIntent.Fingerprint == "" ||
+		claim.FixedCreateIntent.Fingerprint != labelFromRunArgs(t, dockerRunArgs, "fixed_intent_sha256") {
+		t.Fatalf("fixed checkpoint fork claim=%#v err=%v", claim, err)
+	}
+	container, err := b.inspectContainer(context.Background(), lease.Server.CloudID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFixedLocalContainer(container, b.configForRun(), req.RequestedLeaseID,
+		req.RequestedSlug, claim.FixedCreateIntent.Fingerprint); err != nil {
+		t.Fatalf("validate fixed checkpoint fork: %v", err)
+	}
+	replayed, err := b.Acquire(context.Background(), req)
+	if err != nil || replayed.LeaseID != lease.LeaseID || replayed.Server.CloudID != lease.Server.CloudID {
+		t.Fatalf("fixed checkpoint replay=%#v err=%v", replayed, err)
+	}
+	if creates != 1 {
+		t.Fatalf("checkpoint container creates=%d, want 1", creates)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: replayed}); err != nil {
+		t.Fatalf("release fixed checkpoint fork: %v", err)
+	}
+	tombstone, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil || !exists || tombstone.Provider != core.FixedLocalContainerClaimProvider ||
+		tombstone.FixedCreateIntent == nil || tombstone.FixedCreateIntent.State != "released" ||
+		tombstone.FixedCreateIntent.Fingerprint != claim.FixedCreateIntent.Fingerprint {
+		t.Fatalf("fixed checkpoint fork tombstone=%#v exists=%t err=%v", tombstone, exists, err)
 	}
 }
 

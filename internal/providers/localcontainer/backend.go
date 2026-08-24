@@ -51,6 +51,8 @@ type backend struct {
 }
 
 var _ core.ExclusiveOneShotAcquireBackend = (*backend)(nil)
+var _ core.IdempotentLeaseIDBackend = (*backend)(nil)
+var _ core.ReleaseLeaseClaimRetentionVerifier = (*backend)(nil)
 var _ core.StatusTouchClaimAuthorizer = (*backend)(nil)
 
 type inspectContainer struct {
@@ -99,6 +101,8 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) AcquireIsExclusiveOneShot() bool { return true }
+
+func (b *backend) SupportsRequestedLeaseID() bool { return true }
 
 func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailureEvidenceRequest) (core.RunFailureEvidenceCollector, error) {
 	containerID := strings.TrimSpace(req.Lease.Server.CloudID)
@@ -181,7 +185,14 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if architecture != "" {
 		cfg.Architecture = architecture
 	}
-	if err := validateCheckpointFork(ctx, cfg); err != nil {
+	metadata := cfg.LocalContainer.CheckpointMetadata
+	if strings.TrimSpace(req.RequestedLeaseID) != "" && len(metadata) != 0 &&
+		strings.TrimSpace(metadata[checkpointMetadataForkID]) == "" &&
+		strings.TrimSpace(metadata[checkpointMetadataForkName]) == "" {
+		if err := b.validateRuntimeScope(ctx, checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	} else if err := validateCheckpointFork(ctx, cfg); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	if !hasCompleteCapturedRuntimeScope(cfg.LocalContainer.CheckpointMetadata) {
@@ -199,6 +210,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		cfg.LocalContainer.CheckpointMetadata = cloneLabels(metadata)
 		b.cfg.LocalContainer.CheckpointMetadata = cloneLabels(metadata)
+	}
+	if strings.TrimSpace(req.RequestedLeaseID) != "" {
+		return b.acquireFixed(ctx, req, cfg)
 	}
 	leaseID := core.NewLeaseID()
 	containers, err := b.listContainers(ctx)
@@ -737,7 +751,7 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 	claimScope := b.claimScope(ctx)
 	claimsByLease := make(map[string]core.LeaseClaim, len(claims))
 	for _, claim := range claims {
-		if claim.Provider == providerName && claim.ProviderScope == claimScope {
+		if isLocalContainerClaimProvider(claim.Provider) && claim.ProviderScope == claimScope {
 			claimsByLease[claim.LeaseID] = claim
 		}
 	}
@@ -840,9 +854,12 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		}
 	}
 	lease.Server = mergeLocalContainerClaim(lease.Server, claim)
+	if strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"]) != "" && !fixedLocalContainerLeaseKind.IsFixedClaim(claim) {
+		return core.Exit(4, "lease_id_conflict: refusing to release fixed local-container lease %s without its durable create intent", lease.LeaseID)
+	}
 	hostLeaseRoot := hostLeaseWorkRoot(lease)
 	bootstrapDir := strings.TrimSpace(lease.Server.Labels["bootstrap_dir"])
-	err = core.RemoveLeaseClaimIfUnchangedAfter(lease.LeaseID, claim, func() error {
+	err = fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
 		if err := b.removeContainer(ctx, id); err != nil {
 			return err
 		}
@@ -914,7 +931,7 @@ func (b *backend) requireExactLocalContainerClaim(ctx context.Context, leaseID, 
 func (b *backend) validateExactLocalContainerClaim(ctx context.Context, claim core.LeaseClaim, leaseID, containerID string) error {
 	claimScope := strings.TrimSpace(claim.ProviderScope)
 	currentScope := strings.TrimSpace(b.claimScope(ctx))
-	if claim.LeaseID != strings.TrimSpace(leaseID) || claim.Provider != providerName ||
+	if claim.LeaseID != strings.TrimSpace(leaseID) || !isLocalContainerClaimProvider(claim.Provider) ||
 		claim.CloudID == "" || claim.CloudID != strings.TrimSpace(containerID) ||
 		claimScope == "" || currentScope == "" || claimScope != currentScope {
 		return localContainerOwnershipError(leaseID, containerID)
@@ -928,7 +945,7 @@ func (b *backend) validateExactLocalContainerClaim(ctx context.Context, claim co
 func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
 	leaseID := strings.TrimSpace(lease.LeaseID)
 	containerID := strings.TrimSpace(lease.Server.CloudID)
-	if lease.Server.Provider != providerName || claim.LeaseID != leaseID || claim.Provider != providerName ||
+	if lease.Server.Provider != providerName || claim.LeaseID != leaseID || !isLocalContainerClaimProvider(claim.Provider) ||
 		claim.CloudID == "" || claim.CloudID != containerID {
 		return localContainerOwnershipError(lease.LeaseID, lease.Server.CloudID)
 	}
@@ -951,10 +968,10 @@ func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarge
 		return false, nil
 	}
 	claim, claimExists, snapshotSet := core.ServerLeaseClaimSnapshot(lease.Server)
-	if !snapshotSet || !claimExists || claim.LeaseID != leaseID || claim.Provider != providerName || !b.claimMatchesCurrentScope(ctx, claim) {
+	if !snapshotSet || !claimExists || claim.LeaseID != leaseID || !isLocalContainerClaimProvider(claim.Provider) || !b.claimMatchesCurrentScope(ctx, claim) {
 		return true, localContainerOwnershipError(leaseID, claim.CloudID)
 	}
-	err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+	err := fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
 		absent, err := b.confirmContainerAbsent(ctx, claim.CloudID)
 		if err != nil {
 			return err
@@ -1029,7 +1046,7 @@ func localContainerClaimByIDOrSlug(identifier string) (core.LeaseClaim, bool, er
 	if err != nil {
 		return core.LeaseClaim{}, false, err
 	}
-	if exactClaim.LeaseID == identifier && exactClaim.Provider == providerName {
+	if exactClaim.LeaseID == identifier && isLocalContainerClaimProvider(exactClaim.Provider) {
 		return exactClaim, true, nil
 	}
 	normalized := core.NormalizeLeaseSlug(identifier)
@@ -1042,7 +1059,8 @@ func localContainerClaimByIDOrSlug(identifier string) (core.LeaseClaim, bool, er
 	}
 	var matches []core.LeaseClaim
 	for _, claim := range claims {
-		if claim.Provider == providerName && core.NormalizeLeaseSlug(claim.Slug) == normalized {
+		if isLocalContainerClaimProvider(claim.Provider) && !isReleasedFixedLocalContainerClaim(claim) &&
+			core.NormalizeLeaseSlug(claim.Slug) == normalized {
 			matches = append(matches, claim)
 		}
 	}
@@ -1133,7 +1151,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	claimScope := b.claimScope(ctx)
 	claimsByLease := map[string]core.LeaseClaim{}
 	for _, claim := range claims {
-		if claim.Provider == providerName {
+		if isLocalContainerClaimProvider(claim.Provider) {
 			claimsByLease[claim.LeaseID] = claim
 		}
 	}
@@ -1195,7 +1213,10 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	}
 	claimsRemoved := 0
 	for _, claim := range orphanCandidates {
-		if claim.Provider != providerName || claim.LeaseID == "" {
+		if !isLocalContainerClaimProvider(claim.Provider) || claim.LeaseID == "" {
+			continue
+		}
+		if fixedLocalContainerLeaseKind.IsFixedClaim(claim) {
 			continue
 		}
 		if _, ok := liveLeases[claim.LeaseID]; ok {
@@ -1316,7 +1337,7 @@ func (b *backend) cleanupClaimedContainer(ctx context.Context, claim core.LeaseC
 	if dryRun {
 		err = core.WithLeaseClaimUnchanged(claim.LeaseID, claim, action)
 	} else {
-		err = core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action)
+		err = fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, action)
 	}
 	if err == nil {
 		return cleanupMutationOutcome{}, nil
@@ -1375,7 +1396,7 @@ func (b *backend) cleanupMissingPendingClaim(ctx context.Context, claim core.Lea
 	if dryRun {
 		err = core.WithLeaseClaimUnchanged(claim.LeaseID, claim, action)
 	} else {
-		err = core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action)
+		err = fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, action)
 	}
 	if err != nil && !actionEntered {
 		return cleanupMutationOutcome{changed: true}, err
@@ -1384,7 +1405,7 @@ func (b *backend) cleanupMissingPendingClaim(ctx context.Context, claim core.Lea
 }
 
 func (b *backend) validateCleanupClaim(ctx context.Context, claim core.LeaseClaim, leaseID, containerID string) error {
-	if claim.LeaseID != strings.TrimSpace(leaseID) || claim.Provider != providerName ||
+	if claim.LeaseID != strings.TrimSpace(leaseID) || !isLocalContainerClaimProvider(claim.Provider) ||
 		strings.TrimSpace(claim.CloudID) == "" || strings.TrimSpace(claim.CloudID) != strings.TrimSpace(containerID) ||
 		!hasCompleteCapturedRuntimeScope(claim.Labels) {
 		return localContainerOwnershipError(leaseID, containerID)
@@ -1569,7 +1590,14 @@ func localContainerDisplayImage(cfg core.Config) string {
 }
 
 func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool) (string, string, error) {
+	return b.createContainerWithFixedIntent(ctx, cfg, name, leaseID, slug, publicKey, "", keep)
+}
+
+func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey, fixedFingerprint string, keep bool) (string, string, error) {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
+	if fixedFingerprint != "" {
+		labels["fixed_intent_sha256"] = fixedFingerprint
+	}
 	if core.IsArchitectureExplicit(cfg) {
 		labels["architecture"] = cfg.Architecture
 	}
@@ -2015,7 +2043,7 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 	if err != nil {
 		return inspectContainer{}, "", "", err
 	}
-	if exactClaim.LeaseID == identifier && exactClaim.Provider == providerName {
+	if exactClaim.LeaseID == identifier && isLocalContainerClaimProvider(exactClaim.Provider) {
 		if _, err := b.applyCheckpointScopeLabels(ctx, exactClaim.Labels); err != nil {
 			return inspectContainer{}, "", "", err
 		}
@@ -2032,7 +2060,7 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 	slugClaims := make([]core.LeaseClaim, 0, 1)
 	for i := range claims {
 		claim := claims[i]
-		if claim.Provider != providerName {
+		if !isLocalContainerClaimProvider(claim.Provider) || isReleasedFixedLocalContainerClaim(claim) {
 			continue
 		}
 		if normalized != "" && core.NormalizeLeaseSlug(claim.Slug) == normalized {
@@ -2430,7 +2458,7 @@ func privateLocalContainerScopeLabel(key string) bool {
 }
 
 func isPendingLocalContainerClaim(claim core.LeaseClaim) bool {
-	return claim.Provider == providerName &&
+	return isLocalContainerClaimProvider(claim.Provider) &&
 		strings.EqualFold(strings.TrimSpace(claim.Labels["state"]), pendingClaimState) &&
 		strings.TrimSpace(claim.Labels["recovery"]) == pendingRecoveryKind &&
 		strings.TrimSpace(claim.CloudID) != "" &&
