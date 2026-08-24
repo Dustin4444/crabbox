@@ -220,6 +220,11 @@ type JSONListBackend interface {
 }
 ```
 
+`FeatureRunSession` is also an explicit capability contract. Delegated
+providers return their handle in `RunResult`; opted-in SSH providers such as AWS
+and `local-container` rely on core to write the handle after exact claim and
+coordinator run recording. Do not add provider-specific handle construction.
+
 Provider-native checkpoints/images are also expressed through optional hooks
 (`NativeCheckpointProvider`, `NativeCheckpointForkProvider`) rather than core
 provider-name checks, and config routing/server-type defaults through
@@ -338,8 +343,8 @@ const (
 `FeatureRunSession` is provider-neutral and explicitly opt-in. A delegated
 backend may return a validated handle in `RunResult`; an SSH-lease provider may
 instead have core emit the handle after exact claim recording only when its
-spec also advertises `FeatureSSH` and `FeatureCleanup`. Only `local-container`
-currently opts into that SSH-lease contract.
+spec also advertises `FeatureSSH` and `FeatureCleanup`. AWS and
+`local-container` currently opt into that SSH-lease contract.
 
 Actions-runner hydration is **not** modeled as a provider feature. That workflow
 is core-over-SSH after a Linux or Windows lease exists, so `--actions-runner`
@@ -352,7 +357,7 @@ representative slice:
 ```text
 provider                kind           coordinator  features
 hetzner                 ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, tailscale
-aws                     ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code
+aws                     ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, run-session
 azure                   ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, tailscale
 gcp                     ssh-lease      supported    ssh, crabbox-sync, cleanup, tailscale
 ssh                     ssh-lease      never        ssh, crabbox-sync, desktop, browser, code
