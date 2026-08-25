@@ -6,6 +6,10 @@
 
 - Added explicitly opt-in, image-pinned typed ready pools with exact repository/cache identities and rollback-isolated coordinator storage. Thanks @vincentkoc.
 
+### Fixed
+
+- Retried temporary Machine0 read outages within the existing operation deadline while keeping provider mutations single-attempt.
+
 ## 0.46.1 - 2026-08-24
 
 ### Added
