@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
+	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -16,6 +18,39 @@ import (
 )
 
 var daytonaCleanupTimeout = 30 * time.Second
+
+type daytonaCommandRunner struct {
+	process *sdkdaytona.ProcessService
+}
+
+func newDaytonaCommandRunner(sandbox *sdkdaytona.Sandbox) *daytonaCommandRunner {
+	toolboxConfig := sandbox.ToolboxClient.GetConfig()
+	commandHTTPClient := &http.Client{}
+	if toolboxConfig.HTTPClient != nil {
+		*commandHTTPClient = *toolboxConfig.HTTPClient
+	}
+	commandHTTPClient.Timeout = 0
+	toolboxConfig.HTTPClient = commandHTTPClient
+	return &daytonaCommandRunner{process: sandbox.Process}
+}
+
+func (r *daytonaCommandRunner) ExecuteCommand(ctx context.Context, command string, opts ...func(*sdkoptions.ExecuteCommand)) (*sdktypes.ExecuteResponse, error) {
+	timeout := time.Duration(math.MaxInt32) * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < timeout {
+			timeout = remaining.Truncate(time.Second)
+			if remaining > timeout {
+				timeout += time.Second
+			}
+			if timeout < time.Second {
+				timeout = time.Second
+			}
+		}
+	}
+	opts = append(opts, sdkoptions.WithExecuteTimeout(timeout))
+	return r.process.ExecuteCommand(ctx, command, opts...)
+}
 
 func daytonaCleanupContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), daytonaCleanupTimeout)
@@ -82,6 +117,7 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 			}
 		}()
 	}
+	commands := newDaytonaCommandRunner(sandbox)
 	cfg := b.cfg
 	cfg.Provider = daytonaProvider
 	cfg.WorkRoot = daytonaWorkRoot(cfg)
@@ -90,14 +126,14 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 	var syncPhases []timingPhase
 	if !req.NoSync {
 		syncStarted := time.Now()
-		syncPhases, err = b.syncDaytonaToolbox(ctx, sandbox, req, workdir)
+		syncPhases, err = b.syncDaytonaToolbox(ctx, sandbox, commands, req, workdir)
 		syncDuration = time.Since(syncStarted)
 		if err != nil {
 			return RunResult{Total: time.Since(started), SyncDelegated: true}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else {
-		if _, err := sandbox.Process.ExecuteCommand(ctx, "mkdir -p "+shellQuote(workdir)); err != nil {
+		if _, err := commands.ExecuteCommand(ctx, "mkdir -p "+shellQuote(workdir)); err != nil {
 			return RunResult{}, fmt.Errorf("daytona create workdir: %w", err)
 		}
 	}
@@ -130,7 +166,7 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 	if env := req.Env; len(env) > 0 {
 		execOpts = append(execOpts, sdkoptions.WithCommandEnv(env))
 	}
-	response, err := sandbox.Process.ExecuteCommand(ctx, command, execOpts...)
+	response, err := commands.ExecuteCommand(ctx, command, execOpts...)
 	commandDuration := time.Since(commandStarted)
 	result := RunResult{
 		ExitCode:      responseExitCode(response),
@@ -334,7 +370,7 @@ func (b *daytonaLeaseBackend) deleteDaytonaToolboxSandbox(ctx context.Context, s
 	removeLeaseClaim(leaseID)
 }
 
-func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *sdkdaytona.Sandbox, req RunRequest, workdir string) ([]timingPhase, error) {
+func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *sdkdaytona.Sandbox, commands *daytonaCommandRunner, req RunRequest, workdir string) ([]timingPhase, error) {
 	start := time.Now()
 	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
 	if err != nil {
@@ -374,7 +410,7 @@ func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *s
 		deletePrefix = "rm -rf " + shellQuote(workdir) + " && "
 	}
 	extractCommand := daytonaExtractArchiveCommand(workdir, archivePath, deletePrefix)
-	if response, err := sandbox.Process.ExecuteCommand(ctx, extractCommand); err != nil {
+	if response, err := commands.ExecuteCommand(ctx, extractCommand); err != nil {
 		return nil, fmt.Errorf("daytona extract archive: %w", err)
 	} else if responseExitCode(response) != 0 {
 		return nil, exit(responseExitCode(response), "daytona extract archive exited %d: %s", responseExitCode(response), response.Result)
