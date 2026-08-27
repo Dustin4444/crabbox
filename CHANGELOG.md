@@ -25,6 +25,7 @@
 - Removed coordinator URL credentials from Code and WebVNC browser links, opener arguments, and viewer bootstrap form actions. Thanks @coygeek.
 - Redacted configured and runtime-only credentials from coordinator-stored run failure diagnostics while preserving raw command output. Thanks @coygeek.
 - Retried temporary Machine0 read outages within the existing operation deadline while keeping provider mutations single-attempt.
+- Added actionable Machine0 recovery hints for unclaimed lease IDs without treating short name hashes as proof of lease ownership.
 
 ## 0.46.1 - 2026-08-24
 
