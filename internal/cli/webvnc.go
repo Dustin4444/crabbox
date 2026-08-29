@@ -2842,7 +2842,12 @@ func connectWebVNCBridgeWithDial(ctx context.Context, coord *CoordinatorClient, 
 		}
 	}
 	agentURL := webVNCAgentURLWithCapabilities(agentBaseURL, leaseID, capabilities)
-	ws, resp, err := websocket.Dial(ctx, agentURL, webVNCWebSocketDialOptions(headers))
+	options, err := webVNCWebSocketDialOptions(headers)
+	if err != nil {
+		_ = tcp.Close()
+		return nil, err
+	}
+	ws, resp, err := websocket.Dial(ctx, agentURL, options)
 	if retryBridgeTicketInAuthorization(resp, err) {
 		var retryHeaders http.Header
 		if splitAgentOrigin {
@@ -2850,7 +2855,8 @@ func connectWebVNCBridgeWithDial(ctx context.Context, coord *CoordinatorClient, 
 		} else {
 			retryHeaders = bridgeTicketHeaders(coord, ticket.Ticket)
 		}
-		ws, _, err = websocket.Dial(ctx, agentURL, webVNCWebSocketDialOptions(retryHeaders))
+		options.HTTPHeader = retryHeaders
+		ws, _, err = websocket.Dial(ctx, agentURL, options)
 	}
 	if err != nil {
 		_ = tcp.Close()
@@ -2912,15 +2918,21 @@ func normalizedWebVNCOrigin(value string) (scheme, host, port string, ok bool) {
 	return scheme, host, port, true
 }
 
-func webVNCWebSocketDialOptions(headers http.Header) *websocket.DialOptions {
+func webVNCWebSocketDialOptions(headers http.Header) (*websocket.DialOptions, error) {
+	transport, err := CloneDefaultTransport()
+	if err != nil {
+		return nil, err
+	}
+	transport.ResponseHeaderTimeout = 30 * time.Second
 	return &websocket.DialOptions{
 		HTTPClient: &http.Client{
+			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
 		HTTPHeader: headers,
-	}
+	}, nil
 }
 
 func webVNCAgentBaseURL(base string) (string, error) {

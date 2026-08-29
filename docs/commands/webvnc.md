@@ -177,6 +177,11 @@ Portal auth and lease sharing still decide who can open the session.
 
 ## Security boundary
 
+Bridge WebSocket upgrades allow 30 seconds for response headers. This handshake
+limit does not impose a lifetime limit on an established session. Custom HTTP
+transports must be supported explicitly; the bridge never replaces them with an
+unrelated default route.
+
 WebVNC keeps the same security boundary as `crabbox vnc`:
 
 - VNC stays bound to the runner's loopback interface.
