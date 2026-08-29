@@ -458,6 +458,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return err
 	}
 	var cleanup leaseCleanupResult
+	var finalizeFailureDigest func()
 	var runFailure error
 	recorder := &runRecorder{}
 	var finalizeTerminalRun func()
@@ -504,6 +505,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil && err == nil {
 			err = writeErr
+		}
+	}()
+	// Cleanup runs first; the final timing JSON must still be the last line.
+	defer func() {
+		if finalizeFailureDigest != nil {
+			finalizeFailureDigest()
 		}
 	}()
 	command := fs.Args()
@@ -2410,7 +2417,7 @@ afterSync:
 		finalTimingReport = &report
 	}
 	if code != 0 {
-		printRunFailureDigest(a.Stderr, runFailureDigestInput{
+		digest := runFailureDigestInput{
 			Provider:              cfg.Provider,
 			TargetOS:              cfg.TargetOS,
 			WindowsMode:           cfg.WindowsMode,
@@ -2428,7 +2435,13 @@ afterSync:
 			Classification:        classification,
 			Phases:                timings.commandPhases,
 			Results:               results,
-		})
+		}
+		finalizeFailureDigest = func() {
+			digest.LeaseStopped = cleanup.Stopped
+			printRunFailureDigest(a.Stderr, digest)
+			printFailureTail(a.Stderr, "stdout", stdoutTail, *captureStdout)
+			printFailureTail(a.Stderr, "stderr", stderrTail, *captureStderr)
+		}
 		capture := FailureCaptureMetadata{
 			Provider:       cfg.Provider,
 			LeaseID:        leaseID,
@@ -2462,8 +2475,6 @@ afterSync:
 		}
 		hydrateSuggestion := rawJSRuntimeHydrateSuggestion(cfg, target, leaseID, acquired, *keep, *keepOnFailure)
 		printCommandNotFoundHint(a.Stderr, cfg, target, leaseID, command, *shellMode, code, hydratedByActions, hydrateSuggestion)
-		printFailureTail(a.Stderr, "stdout", stdoutTail, *captureStdout)
-		printFailureTail(a.Stderr, "stderr", stderrTail, *captureStderr)
 		if artifactFailure != nil {
 			return recordFailure(artifactFailure)
 		}
