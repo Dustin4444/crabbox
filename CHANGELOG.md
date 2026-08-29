@@ -16,6 +16,7 @@
 - Made native Windows state replacement and cleanup preserve open readers; the CLI now requires Windows 10 version 1709+ or Windows Server 2019+.
 - Kept Windows external routing state readable after publication by creating it with current-user ownership and private ACLs.
 - Put copy-command usage, path syntax, and examples before the provider flag reference in `cp --help`. Thanks @coygeek.
+- Preserved bounded Docker and Podman diagnostics when runtime identity probes return empty successful output, without accepting missing identities. Thanks @coygeek.
 
 ## 0.47.0 - 2026-08-28
 
