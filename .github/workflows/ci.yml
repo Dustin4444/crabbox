@@ -165,7 +165,7 @@ jobs:
       - name: Test pond mesh cancellation
         run: go test ./internal/cli/ -run PondMeshCancel -count=1 -v
 
-      - name: Run required native WSL stage behaviors without skips
+      - name: Run required native transport behaviors without skips
         shell: pwsh
         run: |
           $required = @(
@@ -181,7 +181,10 @@ jobs:
             'TestWSLStageInitialHandoffBudgets',
             'TestWSLStageBlindingBindsFullAndPartialDigests',
             'TestWSLStageEntropyFailurePreventsDeliveryAndSpoolCreation',
-            'TestWSLStageBlindingStaysOutOfPublicTransportMetadata'
+            'TestWSLStageBlindingStaysOutOfPublicTransportMetadata',
+            'TestVNCPasswordSSHBoundsWSLStageContext',
+            'TestRunSSHOutputBoundedDiscardsOutputOnDeferredCleanupFailure',
+            'TestPondMeshJobTerminationFailureStillKillsWindowsProcessTree'
           )
           $events = @(go test ./internal/cli/ -run ('^(' + ($required -join '|') + ')$') -count=1 -json)
           $code = $LASTEXITCODE
