@@ -42,6 +42,7 @@
 - Restored Ubuntu ARM64 local-container browser provisioning with signed native Mozilla Firefox packages instead of Snap transition packages, while preserving working browsers and advancing past broken distro candidates. Thanks @coygeek.
 - Reported bounded, secret-safe remote Git seed failure phases and categories across ordinary sync, local Actions hydration, and native Windows, while preserving file sync and Git coherence behavior. Thanks @coygeek.
 - Made Machine0 doctor check the same SSH-key prerequisites as new creation and reject missing legacy key pairs when no default is selected, without mutating keys or blocking existing fixed-lease replay. Thanks @coygeek.
+- Cleaned exact-owned interrupted Azure public-IP and NIC provisioning prefixes while restoring ordered SKU fallback and preserving immutable-identity cleanup fences. Thanks @excelsier and @vincentkoc.
 
 ## 0.47.0 - 2026-08-28
 
