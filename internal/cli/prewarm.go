@@ -76,6 +76,15 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 			return err
 		}
 	}
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return err
+	}
+	if !*noHydrate && cfg.Actions.Workflow != "" && provider.Spec().Kind == ProviderKindSSHLease {
+		if err := admitPrewarmHydration(cfg, followupArgs); err != nil {
+			return err
+		}
+	}
 	if (typedIdentityFile || typedCacheCompatibility) && strings.TrimSpace(*poolKey) == "" {
 		return exit(2, "typed ready-pool identity flags require --pool")
 	}
@@ -198,11 +207,7 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 }
 
 func prewarmHydrateArgs(cfg Config, leaseID string, githubRunner bool, waitTimeout time.Duration, keepAliveMinutes int, passthrough []string) []string {
-	args := append([]string{}, passthrough...)
-	args = append(args, "--provider", cfg.Provider, "--target", cfg.TargetOS, "--network", string(cfg.Network), "--id", leaseID)
-	if cfg.TargetOS == targetWindows && cfg.WindowsMode != "" {
-		args = append(args, "--windows-mode", cfg.WindowsMode)
-	}
+	args := prewarmHydrateTargetArgs(cfg, leaseID, passthrough)
 	if githubRunner {
 		args = append(args, "--github-runner")
 	}
@@ -450,6 +455,36 @@ func admitPrewarmProbe(args []string) error {
 	}
 	if err := validateProviderRun(provider, req, *flags.ReadyPool, len(*flags.RequiredSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
 		return exit(2, "prewarm --probe-command is not supported for provider=%s: %v; omit --probe-command or choose a provider that supports the probe options", provider.Spec().Name, err)
+	}
+	if err := validateProviderConfig(cfg); err != nil {
+		return exit(2, "prewarm probe configuration is invalid: %v", err)
+	}
+	return nil
+}
+
+func prewarmHydrateTargetArgs(cfg Config, leaseID string, passthrough []string) []string {
+	args := append([]string{}, passthrough...)
+	args = append(args, "--provider", cfg.Provider, "--target", cfg.TargetOS, "--network", string(cfg.Network), "--id", leaseID)
+	if cfg.TargetOS == targetWindows && cfg.WindowsMode != "" {
+		args = append(args, "--windows-mode", cfg.WindowsMode)
+	}
+	return args
+}
+
+func admitPrewarmHydration(cfg Config, passthrough []string) error {
+	fs := newFlagSet("prewarm-hydration", io.Discard)
+	flags := registerActionsHydrateTargetFlags(fs, defaultConfig())
+	fs.String("id", "", "prospective lease")
+	if err := parseFlags(fs, prewarmHydrateTargetArgs(cfg, "", passthrough)); err != nil {
+		return err
+	}
+	// Use hydration's config loader, without a lease lookup or run-profile expansion.
+	projected, err := flags.loadConfig(fs, "")
+	if err != nil {
+		return err
+	}
+	if err := validateProviderConfig(projected); err != nil {
+		return exit(2, "prewarm hydration configuration is invalid: %v", err)
 	}
 	return nil
 }

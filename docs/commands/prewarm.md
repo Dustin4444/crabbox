@@ -28,6 +28,13 @@ selected provider's run contract. The probe reuses the planned lease with
 `--no-sync --no-hydrate --shell`; unsupported probes fail with exit code 2
 before warmup. This admission does not resolve a lease or inspect prior claims.
 
+Prewarm also validates the provider configuration that hydration and probes
+will reload. Creation-only flags stay on warmup and are not forwarded to either
+follow-up. If a creation override hides an invalid saved value, fix that saved
+configuration before requesting hydration or a probe; prewarm rejects the
+invalid follow-up before allocation, including with `--dry-run`. Plain prewarm
+without hydration or a probe keeps its normal creation override behavior.
+
 ## Reuse
 
 Run follow-up commands against the printed lease id or slug:
