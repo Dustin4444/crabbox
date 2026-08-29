@@ -32,6 +32,7 @@
 - Reported omitted local-container architecture as `native` in config diagnostics without probing the runtime or changing explicit architecture assertions. Thanks @coygeek.
 - Released run-owned workspace authority after static SSH one-shot cleanup so the surviving host can be reused immediately, while preserving guarded owner checks and destructive-provider cleanup ordering.
 - Preserved SIGINT and SIGQUIT behavior for kept and reused POSIX SSH workloads without weakening child ownership checks or changing caller umasks. Thanks @coygeek.
+- Omitted speculative `&&` failure diagnostics for compound shell commands while retaining simple-chain explanations and workload exit behavior. Thanks @coygeek.
 
 ## 0.47.0 - 2026-08-28
 
