@@ -35,6 +35,7 @@
 - Omitted speculative `&&` failure diagnostics for compound shell commands while retaining simple-chain explanations and workload exit behavior. Thanks @coygeek.
 - Printed failed-run output tails once after the digest, preserving both streams, bounded output, capture notices, redaction, and failure bundles. Thanks @coygeek.
 - Clarified uploaded-script path semantics in the Agent Skill, including when to run a synced repository script in place for adjacent assets. Thanks @coygeek.
+- Rejected proven Machine0 PUBLIC-key identity mismatches before VM creation without changing key selection or treating unverified keys as mismatches, and avoided blocking extraction on special files.
 
 ## 0.47.0 - 2026-08-28
 
