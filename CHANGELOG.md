@@ -18,6 +18,7 @@
 - Kept Windows external routing state readable after publication by creating it with current-user ownership and private ACLs.
 - Put copy-command usage, path syntax, and examples before the provider flag reference in `cp --help`. Thanks @coygeek.
 - Preserved bounded Docker and Podman diagnostics when runtime identity probes return empty successful output, without accepting missing identities. Thanks @coygeek.
+- Recovered overloaded SSH multiplexed sessions with one exact-diagnostic retry and a direct-connection fallback while preserving the original lease and command. Thanks @excelsier.
 
 ## 0.47.0 - 2026-08-28
 
