@@ -20,6 +20,7 @@
 - Preserved bounded Docker and Podman diagnostics when runtime identity probes return empty successful output, without accepting missing identities. Thanks @coygeek.
 - Recovered overloaded SSH multiplexed sessions with one exact-diagnostic retry and a direct-connection fallback while preserving the original lease and command. Thanks @excelsier.
 - Marked Machine0 creation-only selectors in provider discovery and excluded them from prewarm follow-ups, with invalid projected provider configuration rejected before allocation.
+- Reported omitted local-container architecture as `native` in config diagnostics without probing the runtime or changing explicit architecture assertions. Thanks @coygeek.
 
 ## 0.47.0 - 2026-08-28
 

@@ -50,6 +50,12 @@ type ProviderArchitectureCapability interface {
 	SupportsArchitecture(cfg Config, architecture string) bool
 }
 
+// ProviderConfigArchitectureDescriber describes an omitted architecture for
+// config diagnostics only. It must not probe the runtime or change execution.
+type ProviderConfigArchitectureDescriber interface {
+	DescribeImplicitArchitecture(cfg Config) string
+}
+
 // ProviderClaimScoper contributes opaque routing identity to local claims.
 // Core persists and compares the value without interpreting provider fields.
 // The adapter must preserve its historical normalization, including whitespace.
