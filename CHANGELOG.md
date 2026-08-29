@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added opt-in Machine0 native size selection context to live catalog discovery while preserving configured defaults and exact fixed-lease replay.
 - Added durable fixed-ID Incus leases and private container disk checkpoints that survive source deletion, with ownership-checked cleanup and fresh SSH identity before fork startup.
 
 ### Fixed
@@ -12,6 +13,9 @@
 - Exposed resolved Incus settings in `config show --json`, with endpoint credential redaction and no daemon access.
 - Bounded coordinator lease reads, doctor probes, and HTTP heartbeats to 30 seconds, and stop's preliminary lookup to ten seconds, preserving provisioning budgets, provider-scoped release, caller cancellation, and cleanup evidence.
 - Retained scoped direct-AWS fixed-lease cleanup receipts for canonical stop replay after inventory disappears, with fresh account, region, identity, and inventory checks; older compact tombstones remain unchanged and fail closed.
+- Attested fixed Machine0 checkpoint-fork replay from identity-checked VM details when inventory omits the pinned image version, preserving key semantics and refusing mismatches without duplicate creation.
+- Made native checkpoint source retirement replayable, preserving pending operation and image identity across interruption, fencing ordinary release after capture reservation, binding Machine0 retirement to its captured account, and refusing forks from discarded images without restarting a retiring Machine0 source or discarding unresolved ownership records; Hetzner retirement remains unavailable until its project identity can be attested.
+- Preserved explicit repository reclaim for existing Machine0 leases and unified fixed replay, inspection, and cleanup around attested native details and early durable UUID binding; retained ambiguous attempts and empty legacy records without duplicate creation or inferred cancellation.
 - Kept automatic egress client tickets off SSH, remote shell, and helper process arguments with a foreground bounded-input handoff to the detached client, preventing SSH teardown from truncating ticket delivery.
 - Kept secret SSH usernames out of VNC/WebVNC and pond tunnel arguments and daemon state, retained private configs through attached teardown or authenticated detached listener readiness, and preserved pond child environment filtering and overrides.
 - Honored `pond connect` flags after the pond name so the documented `pond connect <name> --export` form starts tracked daemons instead of blocking in foreground mode.
@@ -21,6 +25,7 @@
 - Preserved managed Daytona cleanup responsibility after lost create responses, with native TTL for kept sandboxes, early exact-resource tracking, and original-context deletion confirmed by provider observation.
 - Resolved full Machine0 default SSH-key metadata before preflight so public keys are not rejected when list summaries omit their local filenames.
 - Preserved configured Machine0 executable paths and polling settings during checkpoint verification, deletion, and pruning while retaining exact image/version ownership checks and local records on uncertain failures.
+- Preserved Machine0 missing-version cleanup refusals while distinguishing confirmed version removal from whole-image absence, including lost remove responses without erasing sibling versions or unresolved metadata.
 - Made config path diagnostics honor `CRABBOX_CONFIG`, matching the file selected for reads and writes. Thanks @coygeek.
 - Fixed static SSH architecture admission across Linux, macOS, Windows, and WSL2: configured values, including inherited `amd64`, now require fresh matching evidence after read-only ownership checks and before guarded claim publication; remove explicit architecture settings for automatic discovery, with measured or unknown evidence reported separately from offline defaults.
 - Preserved the remote caller's umask for workspace-owned POSIX and WSL2 commands while keeping staged scripts, stdin, and owner state private.

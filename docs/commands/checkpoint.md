@@ -117,6 +117,10 @@ crabbox checkpoint create --id swift-crab --mode native --json
 --json                      Print the complete checkpoint record as one JSON
                             object instead of the human-readable summary.
 --reclaim                   Claim this lease for the current repo.
+--checkpoint-id <id>        Stable caller-owned operation ID; requires retirement.
+--retire-source             Replayable capture followed by verified source release.
+--prepare-only              Read-only retirement eligibility; no capture reservation.
+--discard-failed            Explicitly discard a verified failed capture and retire.
 ```
 
 `--mode` also accepts the aliases `provider-native`/`vm` (native),
@@ -157,6 +161,96 @@ resolves to a disk snapshot where the provider supports one.
 Before a native snapshot, Crabbox cleans the source: on Linux it runs
 `cloud-init clean --logs` (so a forked box regenerates SSH host keys) and
 `sync` to flush filesystem writes.
+
+### Replayable source retirement
+
+Before scrubbing a source, check `providers describe <provider> --json` for
+`checkpoint-retirement-prepare` in `capabilities.lifecycle`. An older binary
+without this capability cannot admit retirement; leave the source on its
+ordinary release path. Then invoke the command below with `--prepare-only`.
+Its JSON receipt binds `id`, `leaseId`, `provider`, `sourceId`, and
+`sourceDisposition: "retire"` to `admission: "ready"` or `"unsupported"`
+(with a `reason`). A known policy or strategy refusal writes no checkpoint
+journal or claim binding and leaves ordinary release usable. An error, malformed
+response, existing operation, or historical hold is not such a refusal.
+
+Preparation is a read-only eligibility observation, not a reservation or
+transferable authorization. Actual creation rechecks the current source and
+claim before binding them. Persist the ID and scrub/capture phase before their
+effects; never treat a later create error as proof that capture was not submitted.
+Admission uses ordinary native-mode strategy selection: direct AWS Linux uses
+an AMI for default/auto, while local-container uses Docker commit. That selection
+retains its implicitness across replay; explicit strategies retain their provider
+restrictions.
+
+An orchestrator retiring a source can supply its own stable checkpoint ID:
+
+```sh
+crabbox checkpoint create --provider machine0 --id cbx_abcdef012345 \
+  --checkpoint-id chk_0123456789abcdef --retire-source --mode native \
+  --wait=false --json
+```
+
+Retirement uses the lease's canonical repository workspace. It requires
+`--mode native` and `--wait=false` and rejects `--workdir`, `--name`, `--reclaim`,
+and `--recipe-only`; those options belong to ordinary checkpoint creation.
+
+Persist that ID before invoking Crabbox. Replay the same command after a
+pending result, transport failure, or process interruption; never generate a
+replacement ID because a response was lost. The returned record includes
+`capture.sourceDisposition: "retire"` and a `capture.phase`. Only `retired`
+proves source retirement. `prepared`, `stopping`, `submitting`, `pending`,
+`ready`, and `retiring` require another bounded replay. `failed` holds the
+source and image for explicit recovery. A stopped VM is not a retired VM.
+After inspecting a terminal failure, add `--discard-failed` to that same
+command to delete its exact failed image, verify image absence, and complete
+the requested source retirement. The returned `capture.discardFailed: true`
+means there is no reusable image, and that checkpoint cannot be forked even
+after retirement completes. An ambiguous submission cannot be discarded through
+this flag; it remains held until its provider identity is reconciled.
+
+The operation binds the source resource, repository, and claim generation
+before effects. Checkpoint and claim locks serialize cooperating owners;
+unknown or replaced sources are never adopted. Machine0 reconciles an
+ambiguous save against the original operation and exact image version. It records
+the authenticated account before stopping the source and checks that account
+before accepting source absence or retiring the claim. Changing accounts causes
+a refusal; already-started captures without an account binding remain held for
+recovery. Keep the native account and API endpoint stable throughout each
+command; separate native invocations cannot make credential changes atomic. Other
+supported native providers (AWS, local-container, and brokered Azure
+disk/GCP checkpoints) retain an ambiguous submission without resaving
+when no provider recovery identity was returned. No background worker is
+started. Ordinary checkpoint creation retains its existing restore-source
+behavior; source retirement is explicit and does not restart a source merely
+to delete it. A configured Machine0 `suspend` release policy is incompatible
+with `--retire-source`, not silently changed to destruction. Hetzner ordinary
+snapshots remain supported, but source retirement is refused before admission:
+its project-scoped API cannot attest the original project after a token change.
+Existing unfinished Hetzner retirements remain held for operator recovery.
+
+A provider may retain the released source's immutable identity in a terminal
+cleanup receipt. Retirement replay preserves that receipt and revalidates it
+through the provider's current account, region, identity, and inventory checks
+before marking the operation retired.
+
+Unresolved operations cannot be forked, pruned, or deleted locally. Historical
+native records with missing image references are also held: a blank reference
+does not prove that submission never happened. Inspect and reconcile the
+original provider operation before removing any ownership evidence.
+
+Older binaries do not understand these operation holds. Before downgrading,
+stop new capture admission and finish all operations with this binary; do not
+run older capture, release, or cleanup commands against unresolved records.
+Retain the candidate and its state if an ambiguous operation cannot be
+resolved. This is an operational rollback boundary, not transparent downgrade
+support.
+
+An older writer can erase a checkpoint record or release a held source because
+it ignores the added fields. If it already ran, stop that writer, preserve all
+remaining records, and restore the checkpoint journal before resuming with the
+new binary. A surviving claim binding prevents recapture after a missing
+journal; it cannot undo a source deletion performed by an older binary.
 
 ## list and inspect
 
@@ -388,6 +482,16 @@ Even when the checkpoint originally created the image name, Crabbox refuses
 `images rm` unless the exact metadata-bound version is still the image's only
 version. Resolve extra versions manually so checkpoint deletion cannot erase
 unrelated work.
+
+If a Machine0 image exists but its recorded version is missing before deletion,
+Crabbox refuses with exit 4 and keeps local metadata for manual reconciliation.
+After an admitted version removal, the same invocation may confirm that exact
+version is gone; whole-image removal must confirm the whole image is gone.
+An empty version list alone does not prove whole-image deletion.
+
+Delete and prune return exit 2 (`busy`) while another operation owns the
+checkpoint lock. They leave resources and metadata unchanged; retry explicitly
+after that operation, including any source rollback, finishes.
 
 **Flags**
 
