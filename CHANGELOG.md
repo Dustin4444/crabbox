@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Honored cancellation during Code bridge reconnect and code-server readiness waits, preserving the existing retry delays while returning promptly on Ctrl+C. Thanks @SebTardif.
 - Bounded best-effort Testbox portal bookkeeping to one five-second budget and delayed final warmup completion/timing until it ends, preserving successful allocations and retained leases on sync failure.
 - Rejected lease-output aliases of captures and success/failure downloads before acquisition, preserving retained lease handles and existing output bytes.
 - Honored cancellation during Hostinger bootstrap SSH retry delays while preserving ownership-checked rollback and recovery state. Thanks @SebTardif.
