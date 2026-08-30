@@ -354,10 +354,13 @@ func TestWorkspaceOwnerContextWrapsEverySSHChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := prepared.command, remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "printf ok"); got != want {
-		t.Fatalf("ordinary SSH child was not witnessed:\n%s", got)
+	if got, want := prepared.command, owner.wrapPOSIXCommand("printf ok", false, prepared.setupMarker); got != want || prepared.setupMarker == "" {
+		t.Fatal("ordinary SSH child was not witnessed with setup diagnostics")
 	}
-	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "printf ok"); !strings.Contains(script, "child_identity=$(ps -o lstart=") {
+	if strings.Contains(prepared.command, "\n") || strings.Count(prepared.command, "'") != 2 {
+		t.Fatal("diagnostic launcher lost login-shell-independent quoting")
+	}
+	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "printf ok", ""); !strings.Contains(script, "child_identity=$(ps -o lstart=") {
 		t.Fatalf("ordinary SSH child witness lost identity fencing:\n%s", script)
 	}
 	inputSize := int64(0)
@@ -365,10 +368,10 @@ func TestWorkspaceOwnerContextWrapsEverySSHChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := prepared.command, remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "cat", true); got != want {
-		t.Fatalf("input SSH child did not preserve stdin:\n%s", got)
+	if got, want := prepared.command, owner.wrapPOSIXCommand("cat", true, prepared.setupMarker); got != want || prepared.setupMarker == "" {
+		t.Fatal("input SSH child did not preserve stdin and setup diagnostics")
 	}
-	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "cat", true); !strings.Contains(script, `cat >"$run_dir/input"`) || !strings.Contains(script, `<"$run_dir/input"`) {
+	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "cat", "", true); !strings.Contains(script, `cat >"$run_dir/input"`) || !strings.Contains(script, `<"$run_dir/input"`) {
 		t.Fatalf("input SSH child witness lost stdin preservation:\n%s", script)
 	}
 	prepared, err = prepareWorkspaceOwnerRemote(contextWithoutWorkspaceOwner(ctx), owner.target, "printf raw", nil)
@@ -480,7 +483,7 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 	if !strings.HasPrefix(posixWitnessTransport, "exec /bin/sh -c '") || strings.Contains(posixWitnessTransport, "\n") || strings.Count(posixWitnessTransport, "'") != 2 {
 		t.Fatalf("POSIX child witness must use the portable launcher: %q", posixWitnessTransport[:min(len(posixWitnessTransport), 80)])
 	}
-	posixWitness := remoteWorkspaceOwnerPOSIXWitnessScript(key, token, "printf ok")
+	posixWitness := remoteWorkspaceOwnerPOSIXWitnessScript(key, token, "printf ok", "")
 	for _, want := range []string{"child_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", "mv \"$child_tmp\" \"$child\"", "rm -f \"$child\""} {
 		if !strings.Contains(posixWitness, want) {
 			t.Fatalf("POSIX child witness missing %q:\n%s", want, posixWitness)

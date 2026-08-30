@@ -181,12 +181,13 @@ func (p *wslStageCleanupPhase) start() context.Context {
 }
 
 type wslStageSpool struct {
-	input      *replayableSSHInput
-	size       int64
-	expected   [sha256.Size]byte
-	timing     wslStageTiming
-	routeProof string
-	shell      wslStageShell
+	setupMarker string
+	input       *replayableSSHInput
+	size        int64
+	expected    [sha256.Size]byte
+	timing      wslStageTiming
+	routeProof  string
+	shell       wslStageShell
 }
 type wslStageRouteProofKey struct{}
 type retryableWSLStageError struct{ error }
@@ -396,14 +397,15 @@ func (s *wslStageSpool) run(ctx context.Context, target *SSHTarget, connectTimeo
 		execCtx, cancel = context.WithTimeout(ctx, s.timing.execute)
 	}
 	defer cancel()
+	stdout, stderr, finish := workspaceOwnerSetupStreams(s.setupMarker, stdout, stderr)
 	err = runSSHCommand(sshCommandContext(execCtx, *target, sshArgsNoInputWithOptions(*target, command, connectTimeout, attempts)...), stdout, stderr)
 	if err == nil {
 		err = context.Cause(execCtx)
 	}
 	if err != nil && (shouldRetrySSHPort(err) || errors.Is(context.Cause(execCtx), context.DeadlineExceeded)) {
-		return exit(7, "WSL2 staged command result is ambiguous: %v", err)
+		err = exit(7, "WSL2 staged command result is ambiguous: %v", err)
 	}
-	return err
+	return finish(err)
 }
 
 func requireWSLStageExecutionReserve(ctx context.Context, reserve time.Duration) error {

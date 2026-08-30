@@ -297,16 +297,25 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			return exit(5, "timed out waiting for SSH on %s during %s; %s", target.Host, phase, sshWaitNextAction(phase))
 		}
 		if isWindowsWSL2Target(*target) {
-			if err := probeWSL2SSHReady(probeCtx, target, profile, stderr); err == nil {
+			err := probeWSL2SSHReady(probeCtx, target, profile, stderr)
+			if err == nil {
 				return nil
-			} else if IsWSLSFTPUnavailable(err) {
+			}
+			if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+				return setupErr
+			}
+			if IsWSLSFTPUnavailable(err) {
 				return err
 			}
 			lastPorts = "wsl2"
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, "", "", lastPorts, time.Since(start), time.Until(deadline)))
 		} else if target.SSHConfigProxy {
-			if probeProxySSHReady(probeCtx, target, profile) == nil {
+			err := probeProxySSHReady(probeCtx, target, profile)
+			if err == nil {
 				return nil
+			}
+			if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+				return setupErr
 			}
 			lastPorts = "proxy"
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, target.Port, "", lastPorts, time.Since(start), time.Until(deadline)))
@@ -327,19 +336,26 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 				if reachablePort == "" {
 					reachablePort = probe.Port
 				}
-				if runSSHQuietWithOptions(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts) != nil {
+				if err := runSSHQuietWithOptions(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts); err != nil {
+					if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+						return setupErr
+					}
 					probes = append(probes, port+":tcp")
 					continue
 				}
 				if transportPort == "" {
 					transportPort = probe.Port
 				}
-				if runSSHQuietWithOptions(probeCtx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts) == nil {
+				err = runSSHQuietWithOptions(probeCtx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts)
+				if err == nil {
 					if target.Port != probe.Port {
 						fmt.Fprintf(stderr, "using ssh port %s for %s (configured %s not ready)\n", probe.Port, target.Host, target.Port)
 						target.Port = probe.Port
 					}
 					return nil
+				}
+				if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+					return setupErr
 				}
 				probes = append(probes, port+":auth")
 			}
@@ -426,9 +442,17 @@ func probeProxySSHReady(ctx context.Context, target *SSHTarget, profile sshReadi
 		candidate := *target
 		candidate.Port, candidate.FallbackPorts = port, []string{}
 		if lastErr = runSSHQuietWithOptions(ctx, candidate, sshTransportProbeCommand(candidate), profile.connectTimeout, profile.connectionAttempts); lastErr != nil {
+			var setupErr *workspaceOwnerSetupError
+			if errors.As(lastErr, &setupErr) {
+				return lastErr
+			}
 			continue
 		}
 		if lastErr = runSSHQuietWithOptions(ctx, candidate, sshReadyCommand(candidate), profile.connectTimeout, profile.connectionAttempts); lastErr != nil {
+			var setupErr *workspaceOwnerSetupError
+			if errors.As(lastErr, &setupErr) {
+				return lastErr
+			}
 			continue
 		}
 		target.Port, target.FallbackPorts = port, []string{}
@@ -459,10 +483,21 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 			outcomes = append(outcomes, outcome{err: err, missingSFTP: IsWSLSFTPUnavailable(err)})
 			continue
 		}
+		// Transport/SFTP probes stay lightweight. An owned readiness command
+		// must pass the same staged witness setup as the subsequent workload.
+		if workspaceOwnerFromContext(ctx) != nil {
+			run = func(remote string) error {
+				return runSSHQuietWithOptions(ctx, probe, remote, profile.connectTimeout, profile.connectionAttempts)
+			}
+		}
 		if err := run(sshReadyCommand(probe)); err == nil {
 			target.Port, target.FallbackPorts = port, []string{}
 			return nil
 		} else {
+			var setupErr *workspaceOwnerSetupError
+			if errors.As(err, &setupErr) {
+				return err
+			}
 			outcomes = append(outcomes, outcome{err: err})
 		}
 	}
@@ -589,9 +624,10 @@ func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeou
 }
 
 type sshTransportPreparation struct {
-	command string
-	direct  io.ReadSeeker
-	stage   *wslStageSpool
+	command     string
+	setupMarker string
+	direct      io.ReadSeeker
+	stage       *wslStageSpool
 }
 
 type sshCommandLimit struct {
@@ -653,6 +689,7 @@ func prepareSSHTransport(target SSHTarget, command string, input io.ReadSeeker, 
 
 func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer) error {
 	if p.stage != nil {
+		p.stage.setupMarker = p.setupMarker
 		return p.stage.run(ctx, target, connectTimeout, connectionAttempts, stdout, stderr)
 	}
 	if err := resolveSSHPortNoInput(ctx, target, connectTimeout, connectionAttempts, stderr); err != nil {
@@ -682,6 +719,14 @@ func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget,
 		return false, err
 	}
 	cmd.Stdin = input
+	stdout, stderr, finish := workspaceOwnerSetupStreams(p.setupMarker, stdout, stderr)
+	defer func() {
+		err = finish(err)
+		var setupErr *workspaceOwnerSetupError
+		if errors.As(err, &setupErr) {
+			muxFailure = false
+		}
+	}()
 	if captureLocalDiagnostics {
 		return runSSHCommandWithLocalDiagnostics(cmd, stdout, stderr)
 	}
@@ -746,7 +791,13 @@ func executeSSH(ctx context.Context, target *SSHTarget, remote string, input io.
 			err = errors.Join(err, prepared.close(ctx, *target))
 		}
 	}()
-	return executePreparedSSH(ctx, target, prepared.command, input, size, sshCommandLimit{execution: limit}, connectTimeout, attempts, stdout, stderr)
+	commandLimit := sshCommandLimit{execution: limit}
+	transport, err := prepareSSHTransport(*target, prepared.command, input, size, commandLimit)
+	if err != nil {
+		return sshPreparationError{err}
+	}
+	transport.setupMarker = prepared.setupMarker
+	return transport.execute(ctx, target, commandLimit, connectTimeout, attempts, stdout, stderr)
 }
 
 func executePreparedSSH(ctx context.Context, target *SSHTarget, command string, input io.ReadSeeker, size int64, limit sshCommandLimit, connectTimeout, attempts string, stdout, stderr io.Writer) (err error) {
@@ -754,9 +805,14 @@ func executePreparedSSH(ctx context.Context, target *SSHTarget, command string, 
 	if err != nil {
 		return sshPreparationError{err}
 	}
+	return transport.execute(ctx, target, limit, connectTimeout, attempts, stdout, stderr)
+}
+
+func (transport *sshTransportPreparation) execute(ctx context.Context, target *SSHTarget, limit sshCommandLimit, connectTimeout, attempts string, stdout, stderr io.Writer) (err error) {
 	defer func() { err = errors.Join(err, transport.close()) }()
 	if limit.execution > 0 {
-		bytes := int64(len(command)) + size
+		// Only staged WSL transport has a size-dependent call budget.
+		var bytes int64
 		if transport.stage != nil {
 			bytes = transport.stage.size
 		}
@@ -862,8 +918,22 @@ func runSSHStream(ctx context.Context, target SSHTarget, remote string, stdout, 
 	return code
 }
 
-func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) (int, error) {
-	err := executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", stdout, stderr)
+func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) (code int, err error) {
+	// Some streaming callers retain only the exit code. Report proven setup
+	// failures here, once, without changing workload stderr or exit semantics.
+	defer func() {
+		var setupErr *workspaceOwnerSetupError
+		if stderr == nil || !errors.As(err, &setupErr) {
+			return
+		}
+		detail := setupErr.Error() + "\n"
+		n, writeErr := io.WriteString(stderr, detail)
+		if writeErr == nil && n < len(detail) {
+			writeErr = io.ErrShortWrite
+		}
+		err = errors.Join(err, writeErr)
+	}()
+	err = executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", stdout, stderr)
 	var preparation sshPreparationError
 	if errors.As(err, &preparation) {
 		return 7, err
@@ -873,6 +943,13 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 
 func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {
 	return runCommandWithPlatformStreams(cmd, stdout, stderr)
+}
+
+func sameCommandStreamWriter(left, right io.Writer) bool {
+	defer func() {
+		_ = recover()
+	}()
+	return left == right
 }
 
 type synchronizedBuffer struct {
@@ -926,6 +1003,10 @@ func sshArgsNoInput(target SSHTarget, remote string) []string {
 }
 
 func shouldRetrySSHPort(err error) bool {
+	var setupErr *workspaceOwnerSetupError
+	if errors.As(err, &setupErr) {
+		return false
+	}
 	return exitCode(err) == 255
 }
 
