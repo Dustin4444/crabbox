@@ -78,7 +78,9 @@ workload)
         wait "$child" || code=$?
         kill -0 "$child" 2>/dev/null || break
     done
-    printf '%s\n' "$code" >"$directory/.result"
+    # The supervisor must never observe a result before its status is complete.
+    printf '%s\n' "$code" >"$directory/.result.tmp" &&
+        mv -- "$directory/.result.tmp" "$directory/.result" || exit 74
     exit "$code"
     ;;
 watch)
@@ -159,7 +161,17 @@ if [ ! -e "$directory/.lost" ] && [ ! -e "$directory/.cancel" ]; then : >"$direc
 code=74
 while valid_guard; do
     [ -e "$directory/.lost" ] || [ -e "$directory/.cancel" ] && break
-    if [ -e "$directory/.result" ]; then read -r code <"$directory/.result"; break; fi
+    if [ -e "$directory/.result" ]; then
+        if {
+            IFS= read -r result && ! IFS= read -r extra && [ -z "$extra" ]
+        } <"$directory/.result"; then
+            case $result in
+                ''|*[!0-9]*) ;;
+                *) [ "${#result}" -le 3 ] && [ "$result" -le 255 ] && code=$result;;
+            esac
+        fi
+        break
+    fi
     kill -0 "$leader" 2>/dev/null || break
     sleep .1
 done

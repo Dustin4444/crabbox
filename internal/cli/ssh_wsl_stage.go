@@ -345,7 +345,7 @@ func newWSLStageSpool(command string, payload []byte, source io.ReadSeeker, payl
 		return nil, err
 	}
 	spool := &wslStageSpool{input: input, size: total, timing: timing}
-	spool.expected, err = spool.prefixDigest(total)
+	spool.expected, err = spool.prefixDigest(context.Background(), total)
 	if err != nil {
 		_ = spool.close()
 		return nil, err
@@ -354,17 +354,33 @@ func newWSLStageSpool(command string, payload []byte, source io.ReadSeeker, payl
 }
 func (s *wslStageSpool) close() error              { return s.input.close() }
 func (s *wslStageSpool) digest() [sha256.Size]byte { return s.expected }
-func (s *wslStageSpool) prefixDigest(size int64) (digest [sha256.Size]byte, err error) {
+func (s *wslStageSpool) prefixDigest(ctx context.Context, size int64) (digest [sha256.Size]byte, err error) {
 	if size < 0 || size > s.size {
 		return digest, errors.New("invalid WSL2 stage prefix length")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return digest, cause
 	}
 	reader, err := s.input.reset()
 	if err != nil {
 		return digest, err
 	}
 	hash := sha256.New()
-	if _, err := io.CopyN(hash, reader, size); err != nil {
-		return digest, err
+	buffer := make([]byte, 32<<10)
+	for remaining := size; remaining > 0; {
+		if cause := context.Cause(ctx); cause != nil {
+			return digest, cause
+		}
+		count := min(int64(len(buffer)), remaining)
+		if _, err := io.ReadFull(reader, buffer[:count]); err != nil {
+			return digest, err
+		}
+		_, _ = hash.Write(buffer[:count])
+		remaining -= count
+	}
+	// A deadline during the final read must not grant deletion authority.
+	if cause := context.Cause(ctx); cause != nil {
+		return digest, cause
 	}
 	copy(digest[:], hash.Sum(nil))
 	return digest, nil
@@ -881,7 +897,7 @@ func cleanupWSLStage(ctx context.Context, target SSHTarget, nonce string, spool 
 			return nil
 		}
 		size = observed
-		digest, err = spool.prefixDigest(size)
+		digest, err = spool.prefixDigest(cleanupCtx, size)
 		if err != nil {
 			return err
 		}

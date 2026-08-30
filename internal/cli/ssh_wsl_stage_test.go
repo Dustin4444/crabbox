@@ -449,7 +449,7 @@ func TestWSLStageBlindingBindsFullAndPartialDigests(t *testing.T) {
 	payloadStart := commandStart + int(binary.LittleEndian.Uint64(raw[16:]))
 	for _, size := range []int{-1, 0, 47, 48, 49, 79, 80, 81, commandStart, commandStart + 1, payloadStart, payloadStart + 1, len(raw), len(raw) + 1} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
-			digest, err := spool.prefixDigest(int64(size))
+			digest, err := spool.prefixDigest(t.Context(), int64(size))
 			if size < 0 || size > len(raw) {
 				if err == nil {
 					t.Fatal("invalid prefix length accepted")
@@ -524,7 +524,7 @@ func TestWSLStageBlindingStaysOutOfPublicTransportMetadata(t *testing.T) {
 	}
 	public := []string{diagnostics.String(), err.Error(), wslStageRootPreparationCommand(nonce), wslStagePreparationMarker + " " + nonce + " cmd"}
 	sensitivePrefix := int64(wslStageHeaderSize) + int64(binary.LittleEndian.Uint32(raw[8:])) + int64(binary.LittleEndian.Uint32(raw[12:])) + 1
-	digest, err := spool.prefixDigest(sensitivePrefix)
+	digest, err := spool.prefixDigest(t.Context(), sensitivePrefix)
 	if err != nil {
 		t.Fatal(err)
 	}

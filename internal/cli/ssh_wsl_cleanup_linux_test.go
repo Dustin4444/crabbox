@@ -182,6 +182,89 @@ func TestWorkspaceOwnerWSL2WatchdogAllowsCompletedFrameExecution(t *testing.T) {
 	}
 }
 
+func installWSLResultWriteFault(t *testing.T, fault string) (string, *os.File) {
+	t.Helper()
+	root := t.TempDir()
+	gate := filepath.Join(root, "gate")
+	if err := syscall.Mkfifo(gate, 0600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(gate, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = file.WriteString("continue\n"); _ = file.Close() })
+	paused := filepath.Join(root, "paused")
+	env := filepath.Join(root, "bash-env")
+	// Intercept the real shell's result write after redirection, without
+	// changing the supervisor or using a timing race to expose an empty file.
+	script := `printf() {
+    local destination writer=$BASHPID
+    destination=$(readlink "/proc/$writer/fd/1")
+    case $destination in
+        */.result|*/.result.tmp)
+            case $CBX_TEST_RESULT_FAULT in
+                pause)
+                    : >"$CBX_TEST_RESULT_PAUSED"
+                    IFS= read -r -t 5 <"$CBX_TEST_RESULT_GATE" || return 1
+                    ;;
+                empty) return 0;;
+                invalid) builtin printf '%s\n' 'not-a-status'; return;;
+                out-of-range) builtin printf '%s\n' 256; return;;
+                unterminated) builtin printf '%s' 23; return;;
+                extra-line) builtin printf '0\n23\n'; return;;
+                extra-bytes) builtin printf '0\n23'; return;;
+                write-failure) return 1;;
+            esac
+            ;;
+    esac
+    builtin printf "$@"
+}
+`
+	if err := os.WriteFile(env, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BASH_ENV", env)
+	t.Setenv("CBX_TEST_RESULT_FAULT", fault)
+	t.Setenv("CBX_TEST_RESULT_PAUSED", paused)
+	t.Setenv("CBX_TEST_RESULT_GATE", gate)
+	return paused, file
+}
+
+func TestWSL2ResultPublicationWaitsForCompleteStatus(t *testing.T) {
+	paused, gate := installWSLResultWriteFault(t, "pause")
+	command := "exit 23\n"
+	f := startWSLLinuxFixture(t, command, nil, len(command), wslLinuxHelper, 100)
+	f.guard(t)
+	waitForTestFile(t, paused, 5*time.Second)
+	if _, err := os.Stat(filepath.Join(f.directory, ".result")); !os.IsNotExist(err) {
+		t.Error("result published before its exit status was written")
+	}
+	select {
+	case err := <-f.done:
+		t.Fatalf("supervisor exited before result publication: %v\n%s", err, f.output.String())
+	case <-time.After(250 * time.Millisecond):
+	}
+	if _, err := gate.WriteString("continue\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.wait(t, 23)
+	assertWSLLinuxAbsent(t, f)
+}
+
+func TestWSL2InvalidResultFailsClosed(t *testing.T) {
+	for _, fault := range []string{"empty", "invalid", "out-of-range", "unterminated", "extra-line", "extra-bytes", "write-failure"} {
+		t.Run(fault, func(t *testing.T) {
+			installWSLResultWriteFault(t, fault)
+			command := "sleep .2; exit 23\n"
+			f := startWSLLinuxFixture(t, command, nil, len(command), wslLinuxHelper, 100)
+			f.guard(t)
+			f.wait(t, 74)
+			assertWSLLinuxAbsent(t, f)
+		})
+	}
+}
+
 func TestWSL2OrdinaryShortFrameWatchdogCleansState(t *testing.T) {
 	for _, closePipe := range []bool{false, true} {
 		t.Run(fmt.Sprint(closePipe), func(t *testing.T) {

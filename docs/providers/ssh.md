@@ -381,6 +381,9 @@ transfer allowances count one upload, not an upload plus readback. The launcher 
 the file through the same exclusive Windows handle. Ready files, route proofs,
 and acknowledged partial uploads use that same verifier for discard; partial
 uploads must match the corresponding exact prefix of the retained local spool.
+Local prefix hashing checks the cleanup deadline between bounded reads; an
+expired hash cannot authorize deletion, and the partial stage remains for
+investigation.
 Identity means nonce plus expected content, not a persistent creation ID: a
 byte-identical copy is equivalent, but different content is never deleted.
 Unknown objects are not swept by age. An unacknowledged create, changed partial,
@@ -416,7 +419,9 @@ or drive automount. Windows keeps its single writer open after frame completion.
 Linux materializes finite command/input files, then gives the control descriptor
 only to a launcher-loss watcher. Workloads do not inherit that descriptor.
 An independent Linux supervisor directly parents an in-group guard and the
-workload leader. Cleanup revalidates guard PID, start identity, group, and record
+workload leader. The leader atomically publishes its complete exit status;
+missing or malformed result records fail closed instead of reporting success.
+Cleanup revalidates guard PID, start identity, group, and record
 before TERM and KILL, reaps its children, and removes evidence only after actual
 group absence. Fallback cleanup asks the surviving supervisor to stop; it never
 reconstructs signal authority from a pathname after that supervisor dies.
