@@ -437,6 +437,7 @@ const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const runLogTextDecoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
 const fatalTextDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 const awsOrphanSweepRecordKey = "aws-orphan-sweep:last";
 const awsOrphanSweepFirstAlarmKey = "aws-orphan-sweep:first-alarm";
@@ -22635,13 +22636,12 @@ function normalizeRunLogInput(input: RunFinishRequest): {
     ? input.logChunks.map((chunk) => String(chunk)).join("")
     : "";
   const rawLog = chunkLog || input.log || "";
-  const bounded = truncateUtf8Tail(rawLog, maxStoredRunLogBytes);
-  const rawBytes = textEncoder.encode(rawLog).byteLength;
+  const bounded = retainedRunLogText(rawLog, maxStoredRunLogBytes);
   return {
     log: bounded,
     source: rawLog,
-    bytes: Math.min(rawBytes, maxStoredRunLogBytes),
-    truncated: Boolean(input.logTruncated) || rawBytes > maxStoredRunLogBytes,
+    bytes: textEncoder.encode(bounded).byteLength,
+    truncated: Boolean(input.logTruncated) || bounded !== rawLog,
   };
 }
 
@@ -22655,7 +22655,7 @@ async function writeTerminalRunLog(
     return;
   }
   await Promise.all(
-    splitRunLogByBytes(log, runLogChunkBytes).map((chunk, index) =>
+    splitRunLogByBytes(log).map((chunk, index) =>
       storage.put(terminalRunLogChunkKey(prefix, index), chunk),
     ),
   );
@@ -22675,32 +22675,24 @@ async function deleteStoragePrefix(
   }
 }
 
-function splitRunLogByBytes(log: string, maxBytes: number): string[] {
+function splitRunLogByBytes(log: string): string[] {
+  const encoded = textEncoder.encode(log);
   const chunks: string[] = [];
-  let current = "";
-  let currentBytes = 0;
-  for (const char of log) {
-    const charBytes = textEncoder.encode(char).byteLength;
-    if (current && currentBytes + charBytes > maxBytes) {
-      chunks.push(current);
-      current = "";
-      currentBytes = 0;
-    }
-    current += char;
-    currentBytes += charBytes;
-  }
-  if (current) {
-    chunks.push(current);
+  for (let start = 0; start < encoded.byteLength;) {
+    let end = Math.min(start + runLogChunkBytes, encoded.byteLength);
+    while (end < encoded.byteLength && (encoded[end]! & 0xc0) === 0x80) end--;
+    chunks.push(runLogTextDecoder.decode(encoded.subarray(start, end)));
+    start = end;
   }
   return chunks;
 }
 
-function truncateUtf8Tail(value: string, maxBytes: number): string {
+function retainedRunLogText(value: string, maxBytes: number): string {
   const encoded = textEncoder.encode(value);
-  if (encoded.byteLength <= maxBytes) {
-    return value;
-  }
-  return textDecoder.decode(encoded.slice(encoded.byteLength - maxBytes));
+  let start = Math.max(0, encoded.byteLength - maxBytes);
+  while (start < encoded.byteLength && (encoded[start]! & 0xc0) === 0x80) start++;
+  // Normalize lone surrogates even below the cap, but preserve a literal BOM.
+  return runLogTextDecoder.decode(encoded.subarray(start));
 }
 
 const MAX_RESULT_FILES = 50;
