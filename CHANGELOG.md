@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Honor explicit SSH port selection from a coordinator lease’s advertised endpoints before remote execution, preserving host trust and independent provider release.
 - Restored machine-readable missing-checkpoint inspection after coordinator-managed deletion, preserving surviving capture bindings and errors from unsupported or unavailable coordinators.
 - Preserved coordinator control-heartbeat failures when HTTP fallback also fails or has no remaining budget, without extending heartbeat deadlines or changing successful fallback.
 - Added exact-source abandonment for unresolved ordinary Machine0 checkpoints: dispose of the positively identified source through its existing claim owner while retaining the unknown image obligation and rejecting later fork, prune, or local deletion.
