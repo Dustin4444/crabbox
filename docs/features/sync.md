@@ -284,6 +284,11 @@ Anonymous HTTP authentication failures and eligible-origin DNS, TLS, firewall,
 connection, and fetch failures safely fall back to the complete ordinary file
 manifest.
 
+A fallback involving `assume-unchanged` or `skip-worktree` index flags does
+not reuse or publish a sync fingerprint: Git can hide edits behind those
+flags. Crabbox transfers the full ordinary manifest instead. An index
+inspection failure also disables fingerprint reuse for that fallback.
+
 Only dependency caches ignored by verified `.gitignore` files from the exact
 target tree may survive overlay preparation: `node_modules`, `.pnpm-store`,
 `.yarn/cache`, and `.yarn/unplugged`. Local `.git/info/exclude` cannot grant
