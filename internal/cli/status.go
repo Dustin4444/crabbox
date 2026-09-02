@@ -259,14 +259,18 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
-	ID                   string             `json:"id"`
-	Slug                 string             `json:"slug,omitempty"`
-	Provider             string             `json:"provider"`
-	TargetOS             string             `json:"target"`
-	WindowsMode          string             `json:"windowsMode,omitempty"`
-	State                string             `json:"state"`
-	ServerID             string             `json:"serverId"`
-	ServerType           string             `json:"serverType"`
+	ID          string `json:"id"`
+	Slug        string `json:"slug,omitempty"`
+	Provider    string `json:"provider"`
+	TargetOS    string `json:"target"`
+	WindowsMode string `json:"windowsMode,omitempty"`
+	State       string `json:"state"`
+	ServerID    string `json:"serverId"`
+	ServerType  string `json:"serverType"`
+	// ProviderResourceID optionally exposes an immutable provider resource ID.
+	// ServerID keeps each provider's existing identity semantics; for Islo it
+	// is the sandbox name rather than the immutable sandbox ID.
+	ProviderResourceID   string             `json:"providerResourceId,omitempty"`
 	Host                 string             `json:"host"`
 	Pond                 string             `json:"pond,omitempty"`
 	Network              NetworkMode        `json:"network"`
