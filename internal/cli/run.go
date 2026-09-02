@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+var runBeforeCommandSSHReadyTimeout = 2 * time.Minute
+
 func applyCapacityMarketFlag(cfg *Config, fs *flag.FlagSet, market string) error {
 	if !flagWasSet(fs, "market") {
 		return nil
@@ -1471,7 +1473,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		return failure
 	}
-	autoHydrateActionsIfNeeded := func(currentTarget SSHTarget) error {
+	autoHydrateActionsIfNeeded := func(currentTarget SSHTarget, plainManifest bool) error {
 		if !autoHydrateActions || hydratedByActions {
 			return nil
 		}
@@ -1501,7 +1503,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			err = exit(7, "prepared local Actions hydration no longer matches lease=%s workspace=%s", leaseID, workdir)
 		}
 		if err == nil {
-			state, err = a.executeLocalActionsHydration(ctx, cfg, repo, currentTarget, *plan, 20*time.Minute, false, false, lifecycleOwner)
+			state, err = a.executeLocalActionsHydration(ctx, cfg, repo, currentTarget, *plan, 20*time.Minute, false, false, plainManifest, lifecycleOwner)
 		}
 		if err != nil {
 			recorder.Event("actions.hydrate.failed", "hydrate", err.Error())
@@ -1605,7 +1607,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		recorder.Event("lease.replace.finished", "leasing", fmt.Sprintf("lease=%s slug=%s", leaseID, blank(serverSlug(server), "-")))
 		return true, nil
 	}
+	originDisposition := classifyGitOrigin(repo.RemoteURL)
 retrySync:
+	plainManifestMode := originDisposition != gitOriginRemoteAttemptSafe
 	if fullResyncRequested && hydratedByActions && !*syncOnly {
 		if !autoHydrateActions {
 			return recordFailure(exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
@@ -1726,7 +1730,9 @@ retrySync:
 			warnCredentialBearingGitSeed(a.Stderr)
 		}
 		overlayDecision := decideGitOverlay(cfg, repo, target, manifest, coherence, credentialBlocked, fullResyncRequested, hydratedByActions)
-		plainManifestFallback := false
+		if plainManifestMode {
+			coherence = gitCoherencePlan{}
+		}
 		overlaySnapshot := ""
 		if overlayDecision.Enabled {
 			overlaySnapshot, err = gitOverlayLocalSnapshot(repo, manifest)
@@ -1743,7 +1749,7 @@ retrySync:
 			timings.syncFallbackReason = overlayDecision.Reason
 		}
 		fingerprint := ""
-		if cfg.Sync.Fingerprint && !isWindowsNativeTarget(target) && !plainManifestFallback {
+		if cfg.Sync.Fingerprint && !isWindowsNativeTarget(target) && !plainManifestMode {
 			stepStart = time.Now()
 			fingerprintConfig := cfg
 			fingerprintConfig.Sync.GitOverlay = overlayDecision.Enabled
@@ -1815,12 +1821,15 @@ retrySync:
 					}
 					overlayDecision.Enabled = false
 					overlayDecision.Reason = reason
-					plainManifestFallback = mutated
+					plainManifestMode = mutated || reason == "origin_unavailable" || reason == "origin_auth_required"
 					timings.syncMode = "manifest"
 					timings.syncTransferFiles = len(manifest.Files)
 					timings.syncTransferBytes = manifest.Bytes
 					timings.syncFallbackReason = reason
-					if mutated {
+					if plainManifestMode {
+						if reason == "origin_unavailable" || reason == "origin_auth_required" {
+							coherence = gitCoherencePlan{}
+						}
 						fingerprint = ""
 					} else if cfg.Sync.Fingerprint {
 						fingerprintConfig := cfg
@@ -1860,7 +1869,7 @@ retrySync:
 				excludes = refreshedExcludes
 				overlayDecision.Enabled = false
 				overlayDecision.Reason = "local_checkout_changed"
-				plainManifestFallback = true
+				plainManifestMode = true
 				fingerprint = ""
 				fmt.Fprintf(a.Stderr, "git overlay fallback reason=%s; using full manifest sync\n", overlayDecision.Reason)
 				if err := checkSyncPreflight(manifest, cfg, *forceSyncLarge, a.Stderr); err != nil {
@@ -1868,10 +1877,27 @@ retrySync:
 				}
 			}
 		}
-		if !overlayDecision.Enabled && !plainManifestFallback && coherence.seedEnabled() {
+		usePlainManifestForOrigin := func(reason string) {
+			plainManifestMode = true
+			coherence = gitCoherencePlan{}
+			fingerprint = ""
+			if overlayDecision.Requested {
+				overlayDecision.Reason = reason
+				timings.syncMode = "manifest"
+				timings.syncTransferFiles = len(manifest.Files)
+				timings.syncTransferBytes = manifest.Bytes
+				timings.syncFallbackReason = reason
+			}
+			fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
+		}
+		if !overlayDecision.Enabled && !plainManifestMode && coherence.seedEnabled() {
 			stepStart = time.Now()
-			if out, err := runIdempotentSSHCombinedOutputLimit(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay, gitSeedDiagnosticLimit); err != nil {
-				warnRemoteGitSeedFailure(a.Stderr, out, err)
+			if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
+				if reason, fallback := gitOriginRuntimeFallbackResult(coherence.RemoteURL, out, err); fallback {
+					usePlainManifestForOrigin(reason)
+				} else {
+					warnRemoteGitSeedFailure(a.Stderr, out, err)
+				}
 			}
 			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}
@@ -1902,8 +1928,10 @@ retrySync:
 		}
 		stopManifestHeartbeat := startSyncHeartbeat(a.Stderr, stepStart, 15*time.Second)
 		manifestCommand := remoteWriteSyncManifestsNewForTarget(target, workdir, finalizeToken)
-		if overlayDecision.Enabled || plainManifestFallback {
+		if overlayDecision.Enabled {
 			manifestCommand = remoteWriteSyncManifestsNewWithMetadata(workdir, finalizeToken, remotePlainSyncMetaDirScript())
+		} else if plainManifestMode {
+			manifestCommand = remoteWriteSyncManifestsNewForTargetMode(target, workdir, finalizeToken, true)
 		}
 		manifestErr := runSSHInput(manifestCtx, target, manifestCommand, strings.NewReader(manifestInput), io.Discard, a.Stderr)
 		stopManifestHeartbeat()
@@ -1920,7 +1948,7 @@ retrySync:
 		if shouldPruneRemoteSync(cfg.Sync.Delete, fullResyncRequested) {
 			// Full resync can git-seed files that are absent from the local manifest.
 			// Seed the old manifest from git so prune removes those resurrected paths.
-			if !overlayDecision.Enabled && !plainManifestFallback && shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
+			if !overlayDecision.Enabled && !plainManifestMode && shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
 				if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
 					return recordFailure(exit(6, "remote sync seed manifest failed: %v", err))
 				}
@@ -1929,8 +1957,8 @@ retrySync:
 			pruneCommand := remotePruneSyncManifestForTarget(target, workdir, finalizeToken)
 			if overlayDecision.Enabled {
 				pruneCommand = remotePruneGitOverlaySyncManifest(workdir, finalizeToken, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
-			} else if plainManifestFallback {
-				pruneCommand = remotePruneSafeSyncManifest(workdir, finalizeToken, remotePlainSyncMetaDirScript(), allowRemoteSyncMassDeletions(cfg, hydratedByActions))
+			} else if plainManifestMode {
+				pruneCommand = remotePruneSyncManifestForTargetMode(target, workdir, finalizeToken, true, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
 			}
 			if _, err := runIdempotentSSHCombinedOutput(ctx, target, pruneCommand, idempotentSSHRetryDelay); err != nil {
 				return recordFailure(exit(6, "remote sync prune failed: %v", err))
@@ -1946,7 +1974,7 @@ retrySync:
 		}
 		baseSHA := gitHydrateBaseSHA(repo, cfg.Sync.BaseRef)
 		hydrateGit := true
-		if hydratedByActions {
+		if !plainManifestMode && hydratedByActions {
 			reason, err := runSSHOutput(ctx, target, remoteGitHydrateStatus(workdir, cfg.Sync.BaseRef, baseSHA))
 			if err == nil && reason != "" {
 				timings.syncSteps.gitHydrateSkipped = true
@@ -1956,22 +1984,25 @@ retrySync:
 			}
 		}
 		stepStart = time.Now()
-		finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+		out, finalizeErr, reason, fallback := runRemoteFinalizeSync(ctx, target, workdir, remoteSyncFinalizeOptions{
 			AllowMassDeletions: allowRemoteSyncMassDeletions(cfg, hydratedByActions),
-			HydrateGit:         hydrateGit && !overlayDecision.Enabled && !plainManifestFallback,
+			HydrateGit:         hydrateGit && !overlayDecision.Enabled && !plainManifestMode,
 			GitOverlay:         overlayDecision.Enabled,
-			PlainManifest:      plainManifestFallback,
+			PlainManifest:      plainManifestMode,
 			BaseRef:            cfg.Sync.BaseRef,
 			BaseSHA:            baseSHA,
 			Fingerprint:        fingerprint,
 			Token:              finalizeToken,
 			Coherence:          coherence,
 		})
-		if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
+		if fallback {
+			usePlainManifestForOrigin(reason)
+		}
+		if finalizeErr != nil {
 			if out != "" {
-				return recordFailure(exit(6, "remote sync finalize failed: %s: %v", out, err))
+				return recordFailure(exit(6, "remote sync finalize failed: %s: %v", out, finalizeErr))
 			}
-			return recordFailure(exit(6, "remote sync finalize failed: %v", err))
+			return recordFailure(exit(6, "remote sync finalize failed: %v", finalizeErr))
 		}
 		timings.syncSteps.finalize = time.Since(stepStart)
 		timings.sync = time.Since(syncStart)
@@ -1983,12 +2014,12 @@ retrySync:
 	}
 afterSync:
 	if !*syncOnly && !*noSync {
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir), idempotentSSHRetryDelay); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir, plainManifestMode), idempotentSSHRetryDelay); err != nil {
 			return recordFailure(exit(7, "invalidate reusable sync fingerprint before execution: %v", err))
 		}
 	}
 	if !*noSync {
-		if err := autoHydrateActionsIfNeeded(target); err != nil {
+		if err := autoHydrateActionsIfNeeded(target, plainManifestMode); err != nil {
 			return recordFailure(err)
 		}
 	}
@@ -2011,7 +2042,7 @@ afterSync:
 	recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before command")
 	target = bootstrapNetworkTarget(cfg, server, target)
 	bootstrapStartedAt := time.Now()
-	bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before command", 2*time.Minute)
+	bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before command", runBeforeCommandSSHReadyTimeout)
 	timings.bootstrap += time.Since(bootstrapStartedAt)
 	if bootstrapErr != nil {
 		replaced, replaceErr := replaceLeaseAfterBeforeCommandSSHFailure(bootstrapErr)
@@ -2052,7 +2083,7 @@ afterSync:
 		if _, err := runIdempotentSSHCombinedOutput(ctx, target, mkdirCommand, idempotentSSHRetryDelay); err != nil {
 			return recordFailure(exit(7, "create remote workdir: %v", err))
 		}
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir), idempotentSSHRetryDelay); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir, plainManifestMode), idempotentSSHRetryDelay); err != nil {
 			return recordFailure(exit(7, "invalidate reusable sync fingerprint before execution: %v", err))
 		}
 	}
