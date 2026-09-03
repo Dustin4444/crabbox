@@ -1617,7 +1617,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
 	}
 	labels := localContainerTouchLabels(expected, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
 	if err != nil {
 		return core.Server{}, err
 	}

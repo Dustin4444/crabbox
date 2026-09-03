@@ -27,6 +27,7 @@ type coordinatorAsyncFixture struct {
 	cfg        Config
 	stderr     bytes.Buffer
 	fixed      bool
+	checkpoint bool
 	started    time.Time
 	deadline   time.Time
 	requested  string
@@ -89,6 +90,9 @@ func (f *coordinatorAsyncFixture) roundTrip(r *http.Request) (*http.Response, er
 	if f.fixed {
 		method, path = http.MethodPut, "/v1/leases/"+f.requested
 	}
+	if f.checkpoint {
+		path += "/from-checkpoint"
+	}
 	switch {
 	case r.Method == method && r.URL.Path == path:
 		f.creates++
@@ -105,12 +109,18 @@ func (f *coordinatorAsyncFixture) roundTrip(r *http.Request) (*http.Response, er
 				LeaseID         string `json:"leaseID"`
 				CreateAttemptID string `json:"createAttemptID"`
 				Keep            bool   `json:"keep"`
+				CheckpointID    string `json:"checkpointID"`
+				CheckpointClaim string `json:"checkpointUseClaim"`
+				AWSSnapshot     string `json:"awsSnapshot"`
 			}
 			if err := json.Unmarshal(body, &request); err != nil {
 				f.t.Fatal(err)
 			}
 			if request.LeaseID != f.requested || !request.Keep || (request.CreateAttemptID == "") != f.fixed {
 				f.t.Fatalf("unexpected create intent: %#v", request)
+			}
+			if f.checkpoint && (request.CheckpointID != "chk_async_fixed" || request.CheckpointClaim != "synthetic-checkpoint-claim" || request.AWSSnapshot != f.cfg.AWSSnapshot) {
+				f.t.Fatal("fixed checkpoint create lost its source or use claim")
 			}
 			f.attempt = request.CreateAttemptID
 			f.deadline, _ = r.Context().Deadline()
@@ -162,14 +172,21 @@ func (f *coordinatorAsyncFixture) cancelReply() (*http.Response, error) {
 }
 
 func (f *coordinatorAsyncFixture) acquire(ctx context.Context) (CoordinatorLease, error) {
+	if f.checkpoint {
+		f.cfg.Provider, f.cfg.TargetOS, f.cfg.WindowsMode = "aws", targetLinux, ""
+		f.cfg.AWSSnapshot = "snap-0123456789abcdef0"
+		f.backend.cfg = f.cfg
+		ctx = withCheckpointLeaseClaim(ctx, "chk_async_fixed", "synthetic-checkpoint-claim")
+	}
 	return f.backend.createCoordinatorLeaseWithProgressMode(ctx, f.cfg, "synthetic-public-key", true, f.requested, "azure-resume", f.fixed)
 }
 
 func TestCoordinatorAsyncReplayReadinessOutlivesRebindBudget(t *testing.T) {
-	for _, fixed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("fixed=%t", fixed), func(t *testing.T) {
+	for _, mode := range []string{"ordinary", "fixed", "fixed checkpoint"} {
+		t.Run(mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				f := newCoordinatorAsyncFixture(t, fixed)
+				f := newCoordinatorAsyncFixture(t, mode != "ordinary")
+				f.checkpoint = mode == "fixed checkpoint"
 				var confirmed time.Time
 				f.onCreate = func(r *http.Request) (*http.Response, error) {
 					if f.creates == 1 {
@@ -247,11 +264,12 @@ func TestCoordinatorAsyncOriginalDeadlineExhaustion(t *testing.T) {
 }
 
 func TestCoordinatorAsyncCallerCancellationWhilePolling(t *testing.T) {
-	for _, fixed := range []bool{false, true} {
+	for _, mode := range []string{"ordinary", "fixed", "fixed checkpoint"} {
 		for _, replay := range []bool{false, true} {
-			t.Run(fmt.Sprintf("fixed=%t/replay=%t", fixed, replay), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/replay=%t", mode, replay), func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
-					f := newCoordinatorAsyncFixture(t, fixed)
+					f := newCoordinatorAsyncFixture(t, mode != "ordinary")
+					f.checkpoint = mode == "fixed checkpoint"
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
 					f.onCreate = func(*http.Request) (*http.Response, error) {
@@ -267,7 +285,7 @@ func TestCoordinatorAsyncCallerCancellationWhilePolling(t *testing.T) {
 					}
 					lease, err := f.acquire(ctx)
 					wantCancels := 1
-					if fixed {
+					if f.fixed {
 						wantCancels = 0
 					}
 					if !errors.Is(err, context.Canceled) || lease.ID != "" || f.gets != 1 || f.cancels != wantCancels {

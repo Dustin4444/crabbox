@@ -40,6 +40,7 @@ type fakeAWSClient struct {
 	accountID        string
 	accountErr       error
 	tagged           []string
+	tagLabels        []map[string]string
 	setTagsErr       error
 	controlCreate    func(*core.AWSFixedCreateControl, Config, string, string) (Server, Config, error)
 }
@@ -58,6 +59,9 @@ func (c *fakeAWSClient) CreateServerWithFallback(_ context.Context, cfg Config, 
 	}
 	if c.created.CloudID == "" {
 		c.created = awsTestServer("i-created", leaseID, slug, "us-east-1")
+	}
+	if c.created.Labels["provider_key"] == "" {
+		c.created.Labels["provider_key"] = cfg.ProviderKey
 	}
 	if c.created.Labels["aws_key_pair_id"] == "" {
 		c.created.Labels["aws_key_pair_id"] = "key-id-for-" + cfg.ProviderKey
@@ -164,6 +168,7 @@ func (c *fakeAWSClient) SetTags(_ context.Context, id string, labels map[string]
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tagged = append(c.tagged, id)
+	c.tagLabels = append(c.tagLabels, maps.Clone(labels))
 	if c.setTagsErr != nil {
 		return c.setTagsErr
 	}
@@ -1389,6 +1394,7 @@ func TestAWSReleaseRemovesClaimWhenProviderKeyDeletionFails(t *testing.T) {
 }
 
 func TestAWSTouchUsesFallbackRegion(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	east := &fakeAWSClient{}
 	west := &fakeAWSClient{}
 	oldClient := newAWSClient
@@ -1405,10 +1411,22 @@ func TestAWSTouchUsesFallbackRegion(t *testing.T) {
 	}
 	t.Cleanup(func() { newAWSClient = oldClient })
 
-	cfg := Config{Provider: "aws", AWSRegion: "us-east-1"}
-	server := awsTestServer("i-west", "cbx_west", "west", "us-west-2")
+	cfg := fixedAWSTestConfig()
+	const leaseID = "cbx_abcdef123498"
+	server := awsTestServer("i-west", leaseID, "west", "us-west-2")
+	server.Labels["provider_key"] = core.ProviderKeyForLease(leaseID)
+	server.Labels["aws_account_id"] = "123456789012"
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "west", cfg, server, SSHTarget{}, 45*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	west.servers = []Server{server}
 	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
-	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{Server: server, LeaseID: "cbx_west"}, State: "ready"}); err != nil {
+	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{Server: server, LeaseID: leaseID}, State: "ready"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(east.tagged) != 0 {

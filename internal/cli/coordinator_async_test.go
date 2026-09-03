@@ -30,6 +30,11 @@ func TestCoordinatorAsyncPreferenceOnlyOnCreateRoutes(t *testing.T) {
 			_, err := c.EnsureLease(ctx, cfg, "synthetic-public-key", true, "cbx_create", "create")
 			return err
 		}},
+		{"fixed-from-checkpoint", http.MethodPut, "/v1/leases/cbx_create/from-checkpoint", func(ctx context.Context, c *CoordinatorClient, cfg Config) error {
+			ctx = withCheckpointLeaseClaim(ctx, "chk_example", "synthetic-claim")
+			_, err := c.EnsureLease(ctx, cfg, "synthetic-public-key", true, "cbx_create", "create")
+			return err
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0

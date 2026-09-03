@@ -186,7 +186,7 @@ func TestProviderLabelDisplayAndDurationHelpers(t *testing.T) {
 	}
 }
 
-func TestTouchDirectLeaseLabelsFallsBackForMalformedStoredValues(t *testing.T) {
+func TestTouchDirectLeaseLabelsRepairsLifecycleWithoutRewritingProviderMetadata(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	cfg := Config{TTL: 10 * time.Minute, IdleTimeout: 2 * time.Minute}
 	got := touchDirectLeaseLabels(map[string]string{
@@ -194,7 +194,7 @@ func TestTouchDirectLeaseLabelsFallsBackForMalformedStoredValues(t *testing.T) {
 		"idle_timeout_secs": "bad",
 		"ttl_secs":          "bad",
 		"slug":              "blue lobster",
-	}, cfg, "", now)
+	}, cfg, "running/command", now)
 	if got["created_at"] != "1777636800" || got["last_touched_at"] != "1777636800" {
 		t.Fatalf("timestamps did not fall back to now: %#v", got)
 	}

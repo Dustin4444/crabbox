@@ -1068,6 +1068,65 @@ describe("durable Azure admission and reconstruction", () => {
     ).toBe(409);
     expect((await storage.list({ prefix: "lease-provisioning:" })).size).toBe(1);
   });
+  it("rejects a concurrent fixed replay canceled after durable admission commits", async () => {
+    const storage = new ProvisioningTestStorage();
+    const azure = new AzureFixture();
+    const { coordinator, provider, runtime } = fleet(storage, azure);
+    const continuation = new AzureResumableProvisioning(env, azure.fetch, storage);
+    provider.resumableProvisioning = () => continuation;
+    const prepare = continuation.prepare.bind(continuation);
+    const prepared = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const resume = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    let preparations = 0;
+    vi.spyOn(continuation, "prepare").mockImplementation(async (...args) => {
+      const index = preparations++;
+      prepared[index]!.resolve();
+      await resume[index]!.promise;
+      return prepare(...args);
+    });
+    const { createAttemptID: _token, ...body } = input();
+    const first = coordinator.fetch(request("PUT", `/v1/leases/${id}`, body));
+    let second: Promise<Response> | undefined;
+    const admitted = Promise.withResolvers<void>();
+    const acknowledge = Promise.withResolvers<void>();
+    try {
+      await prepared[0]!.promise;
+      second = coordinator.fetch(request("PUT", `/v1/leases/${id}`, body));
+      await prepared[1]!.promise;
+      resume[0]!.resolve();
+      expect((await first).status).toBe(202);
+      const original = runtime.commitAndWake.bind(runtime);
+      let hold = true;
+      vi.spyOn(runtime, "commitAndWake").mockImplementation(async (callback) => {
+        const result = await original(callback);
+        if (hold) {
+          hold = false;
+          admitted.resolve();
+          await acknowledge.promise;
+        }
+        return result;
+      });
+      resume[1]!.resolve();
+      await admitted.promise;
+      expect(
+        (await coordinator.fetch(request("POST", `/v1/leases/${id}/release`, { delete: true })))
+          .status,
+      ).toBe(200);
+      acknowledge.resolve();
+      expect((await second).status).toBe(409);
+      expect(await storage.get<LeaseRecord>(`lease:${id}`)).toMatchObject({ state: "released" });
+      expect(
+        await storage.get<LeaseProvisioningOperation>(provisioningOperationKey(id)),
+      ).toHaveProperty("canceledAt");
+      expect(azure.mutations).toHaveLength(0);
+      expect((await storage.list({ prefix: "lease-provisioning:" })).size).toBe(1);
+    } finally {
+      for (const gate of resume) gate.resolve();
+      acknowledge.resolve();
+      await Promise.all([first, second]);
+    }
+  });
+
   it("reconstructs Fleet, runtime and Azure at every phase without reallocating or rerunning bootstrap", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const storage = new ProvisioningTestStorage();

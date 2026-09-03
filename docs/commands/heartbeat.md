@@ -42,6 +42,12 @@ claim is never recreated or overwritten. Terminal leases are rejected before
 touch. Providers without lease-touch support fail with
 `provider=<name> does not support lease heartbeat`.
 
+AWS fixed leases bind their scope to the caller account recorded at creation.
+Heartbeat validates that account and the exact live instance before writing
+tags, while holding the unchanged local claim. Renewals preserve native
+ownership tags, including the full fixed-create fingerprint.
+Waiting for the mutation lock honors request cancellation.
+
 ## Idle timeout
 
 `--idle-timeout <duration>` optionally replaces the lease's idle window while
