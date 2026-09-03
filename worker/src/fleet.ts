@@ -4453,7 +4453,7 @@ export class FleetCoordinator {
           return operation(access.lease, access.context);
         }),
     };
-    const { server, serverType, market, attempts, image, provisioningTiming } = await provider
+    const provisioned = await provider
       .createServerWithFallback(config, leaseID, slug, owner, provisioning)
       .catch(async (error: unknown) => {
         const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
@@ -4494,8 +4494,11 @@ export class FleetCoordinator {
           await this.markAWSIngressReconcilePending(record);
           await this.scheduleAlarm();
         });
+        if (error instanceof CreateAttemptCanceledError) return createCanceledResponse();
         throw error;
       });
+    if (provisioned instanceof Response) return provisioned;
+    const { server, serverType, market, attempts, image, provisioningTiming } = provisioned;
     let current = await this.getLease(record.id);
     const pendingAfterProvision = createAttempt
       ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
@@ -18120,7 +18123,13 @@ class LeaseProviderIdentityMismatchError extends Error {}
 
 class LeaseCleanupInProgressError extends Error {}
 
-class CreateAttemptCanceledError extends Error {}
+const createAttemptCanceledMessage = "create attempt was canceled before completion";
+
+class CreateAttemptCanceledError extends Error {
+  constructor() {
+    super(createAttemptCanceledMessage);
+  }
+}
 
 interface ProviderReadiness {
   provider: Provider;
@@ -19418,7 +19427,7 @@ function createCanceledResponse(): Response {
   return json(
     {
       error: "create_canceled",
-      message: "create attempt was canceled before completion",
+      message: createAttemptCanceledMessage,
     },
     { status: 409 },
   );
@@ -26621,7 +26630,10 @@ export class AWSProvider implements CloudProvider {
         }
         return result;
       } catch (error) {
+        // Keep cancellation typed so the create owner records cleanup debt before
+        // returning its terminal response, even after an earlier regional failure.
         if (
+          error instanceof CreateAttemptCanceledError ||
           providerProvisioningCleanupClaim(error) ||
           error instanceof ProviderResourceUnresolvedError
         ) {
