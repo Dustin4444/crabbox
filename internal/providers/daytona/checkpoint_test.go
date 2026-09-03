@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,7 @@ func newSnapshotFixture(t *testing.T) *snapshotFixture {
 			}
 			s.snapshot = &api.SnapshotDto{Id: "snapshot-exact-id", Name: body.Name, State: api.SNAPSHOTSTATE_PENDING, Entrypoint: []string{}}
 			s.snapshot.SetOrganizationId("org-test")
+			s.snapshot.SetRegionIds([]string{f.sandbox.GetTarget()})
 			if s.snapshotResponseCanceled != nil {
 				s.snapshotMu.Unlock()
 				<-r.Context().Done()
@@ -217,6 +219,79 @@ func TestDaytonaSnapshotLifecycleWaitsEvenWithoutWaitFlag(t *testing.T) {
 				t.Fatal("snapshot not deleted")
 			}
 		})
+	}
+}
+
+func TestDaytonaClassForkKeepsCapturedSnapshot(t *testing.T) {
+	f := newSnapshotFixture(t)
+	result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.snapshot.SetCpu(2)
+	f.snapshot.SetMem(4)
+	f.snapshot.SetDisk(8)
+	f.snapshot.SetSandboxClass("container")
+	cfg := f.request.Config
+	cfg.Class = "standard"
+	if err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{Config: &cfg, Record: core.NativeCheckpointForkRecord{Kind: result.Image.Kind, ImageID: result.Image.ID, Name: result.Image.Name, Direct: true, Metadata: result.Metadata}}); err != nil {
+		t.Fatal(err)
+	}
+	f.classSnapshot = f.snapshot
+	claim, _, err := resolveLeaseClaimForProvider(f.request.LeaseID, daytonaProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runDaytonaClassWarmup(t, cfg, Repo{Root: claim.RepoRoot}); err != nil {
+		t.Fatal(err)
+	}
+	if f.create.GetSnapshot() != result.Image.ID || f.sandboxCreates != 2 {
+		t.Fatalf("fork replaced captured filesystem: snapshot=%s creates=%d", f.create.GetSnapshot(), f.sandboxCreates)
+	}
+}
+
+func TestDaytonaDirectCheckpointClassRestoresRoutingBeforeValidation(t *testing.T) {
+	f := newSnapshotFixture(t)
+	result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("direct checkpoint reached broker: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer broker.Close()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := fmt.Sprintf("provider: daytona\nnetwork: public\ncoordinator: %s\ncoordinatorToken: fixture-broker-token\ndaytona:\n  apiUrl: %s\n", broker.URL, f.server.URL)
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_DAYTONA_API_KEY", f.request.Config.Daytona.APIKey)
+	stateDir, err := core.CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointDir := filepath.Join(stateDir, "checkpoints", f.request.CheckpointID)
+	if err := os.MkdirAll(checkpointDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Load the existing public checkpoint artifact through the real fork parser.
+	record := map[string]any{
+		"id": f.request.CheckpointID, "kind": result.Image.Kind, "provider": daytonaProvider, "targetOs": "linux",
+		"native": map[string]any{"direct": true, "provider": daytonaProvider, "imageId": result.Image.ID, "name": result.Image.Name, "metadata": result.Metadata},
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkpointDir, "checkpoint.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	err = (core.App{Stdout: &stdout, Stderr: io.Discard}).Run(t.Context(), []string{"checkpoint", "fork", f.request.CheckpointID, "--provider", "daytona", "--class", "standard", "--dry-run"})
+	if err != nil || !strings.Contains(stdout.String(), "resource="+result.Image.ID) {
+		t.Fatalf("direct checkpoint route: output=%q err=%v", stdout.String(), err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,22 +23,26 @@ import (
 )
 
 type daytonaLifecycleFixture struct {
-	mu             sync.Mutex
-	server         *httptest.Server
-	sandbox        *api.Sandbox
-	create         api.CreateSandbox
-	createState    api.SandboxState
-	lostCreate     bool
-	createCanceled chan struct{}
-	sandboxCreates int
-	recoveryDelay  int
-	recoveryReads  int
-	deletes        int
-	activity       int
-	autoStop       string
-	autoStopError  bool
-	deleteError    bool
-	paths          []string
+	mu                sync.Mutex
+	server            *httptest.Server
+	sandbox           *api.Sandbox
+	classSnapshot     *api.SnapshotDto
+	responseTarget    string
+	rejectCreate      bool
+	responseMismatch  string
+	create            api.CreateSandbox
+	createState       api.SandboxState
+	createErrorStatus int
+	createCanceled    chan struct{}
+	sandboxCreates    int
+	recoveryDelay     int
+	recoveryReads     int
+	deletes           int
+	activity          int
+	autoStop          string
+	autoStopError     bool
+	deleteError       bool
+	paths             []string
 }
 
 func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, Repo) {
@@ -50,6 +55,16 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 		f.paths = append(f.paths, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/snapshots/"):
+			if f.classSnapshot == nil {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"message":"snapshot not found"}`)
+				return
+			}
+			if selected := strings.TrimPrefix(r.URL.Path, "/snapshots/"); selected != f.classSnapshot.GetName() && selected != f.classSnapshot.GetId() {
+				t.Errorf("unexpected snapshot selection %q", selected)
+			}
+			_ = json.NewEncoder(w).Encode(f.classSnapshot)
 		case r.Method == "GET" && r.URL.Path == "/sandbox":
 			items := []*api.Sandbox{}
 			if f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED {
@@ -57,10 +72,15 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "nextCursor": nil})
 		case r.Method == "POST" && r.URL.Path == "/sandbox":
-			f.sandboxCreates++
 			if err := json.NewDecoder(r.Body).Decode(&f.create); err != nil {
 				t.Error(err)
 			}
+			if f.rejectCreate {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"message":"snapshot is not available in requested region"}`)
+				return
+			}
+			f.sandboxCreates++
 			f.sandbox = &api.Sandbox{}
 			f.sandbox.SetId("sandbox-test")
 			f.sandbox.SetName(f.create.GetName())
@@ -68,19 +88,43 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 			f.sandbox.SetState(f.createState)
 			f.sandbox.SetToolboxProxyUrl(f.server.URL + "/toolbox")
 			f.sandbox.SetAutoStopInterval(float32(f.create.GetAutoStopInterval()))
+			f.sandbox.SetTarget(blank(f.responseTarget, blank(f.create.GetTarget(), "us")))
+			if f.classSnapshot != nil {
+				f.sandbox.SetSnapshot(f.classSnapshot.GetId())
+				f.sandbox.SetCpu(f.classSnapshot.GetCpu())
+				f.sandbox.SetMemory(f.classSnapshot.GetMem())
+				f.sandbox.SetDisk(f.classSnapshot.GetDisk())
+				f.sandbox.SetGpu(f.classSnapshot.GetGpu())
+				f.sandbox.SetSandboxClass("container")
+				switch f.responseMismatch {
+				case "response":
+					f.sandbox.SetMemory(99)
+				case "response-class":
+					f.sandbox.SetSandboxClass("linux-vm")
+				case "empty-class":
+					f.sandbox.SetSandboxClass("")
+				case "missing-class":
+					f.sandbox.SandboxClass = nil
+				case "snapshot-name":
+					f.sandbox.SetSnapshot(f.classSnapshot.GetName())
+				}
+			}
 			if f.createCanceled != nil {
 				<-r.Context().Done()
 				close(f.createCanceled)
 				return
 			}
-			if f.lostCreate {
-				w.WriteHeader(http.StatusBadGateway)
-				_, _ = io.WriteString(w, `{"message":"response lost after allocation"}`)
+			if f.createErrorStatus != 0 {
+				w.WriteHeader(f.createErrorStatus)
+				_, _ = io.WriteString(w, `{"message":"Sandbox failed to start: synthetic startup failure"}`)
 				return
 			}
 			_ = json.NewEncoder(w).Encode(f.sandbox)
 		case r.Method == "GET" && r.URL.Path == "/sandbox/sandbox-test":
 			_ = json.NewEncoder(w).Encode(f.sandbox)
+		case r.Method == "GET" && f.rejectCreate && r.URL.Path == "/sandbox/"+f.create.GetName():
+			f.recoveryReads++
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == "GET" && f.sandbox != nil && r.URL.Path == "/sandbox/"+f.sandbox.GetName():
 			f.recoveryReads++
 			if f.recoveryReads <= f.recoveryDelay {
@@ -176,6 +220,23 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 	return f, backend, repo
 }
 
+func runDaytonaClassWarmup(t *testing.T, cfg Config, repo Repo) error {
+	t.Helper()
+	t.Chdir(repo.Root)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := fmt.Sprintf("provider: daytona\nnetwork: public\ndaytona:\n  apiUrl: %q\n  workRoot: %q\n", cfg.Daytona.APIURL, cfg.Daytona.WorkRoot)
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_DAYTONA_API_KEY", cfg.Daytona.APIKey)
+	args := []string{"warmup", "--provider", daytonaProvider, "--class", cfg.Class, "--daytona-snapshot", cfg.Daytona.Snapshot, "--daytona-target", cfg.Daytona.Target}
+	if cfg.Architecture != "" {
+		args = append(args, "--arch", cfg.Architecture)
+	}
+	return (core.App{Stdout: io.Discard, Stderr: io.Discard}).Run(t.Context(), args)
+}
+
 func TestDaytonaCreationIsPrivateAndHasNativeTTL(t *testing.T) {
 	f, b, repo := newDaytonaLifecycleFixture(t)
 	sandbox, leaseID, _, err := b.createDaytonaToolboxSandbox(t.Context(), repo, true, false, "")
@@ -194,15 +255,148 @@ func TestDaytonaCreationIsPrivateAndHasNativeTTL(t *testing.T) {
 	if err := requireExactDaytonaResourceClaim(leaseID, sandbox.ID); err != nil {
 		t.Fatal(err)
 	}
+	for _, request := range f.paths {
+		if strings.Contains(request, "/snapshots/") {
+			t.Fatal("inherited class must not change native snapshot selection")
+		}
+	}
+}
+
+func TestDaytonaClassSelectsSnapshotWithoutResourceOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		class, name       string
+		cpu, memory, disk float32
+	}{
+		{"tiny", "daytona-small", 1, 1, 3},
+		{"small", "daytona-small", 1, 1, 3},
+		{"standard", "daytona-medium", 2, 4, 8},
+		{"fast", "daytona-medium", 2, 4, 8},
+		{"large", "daytona-large", 4, 8, 10},
+		{"beast", "daytona-large", 4, 8, 10},
+	} {
+		t.Run(tc.class, func(t *testing.T) {
+			f, b, repo := newDaytonaLifecycleFixture(t)
+			b.cfg.Class, b.cfg.Daytona.Snapshot, b.cfg.Daytona.Target = tc.class, "", "us"
+			core.MarkClassExplicit(&b.cfg)
+			f.classSnapshot = &api.SnapshotDto{Id: "snapshot-exact-id", Name: tc.name, State: api.SNAPSHOTSTATE_ACTIVE, Cpu: tc.cpu, Mem: tc.memory, Disk: tc.disk, RegionIds: []string{"us"}, Entrypoint: []string{}}
+			f.classSnapshot.SetSandboxClass("container")
+			if _, _, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, ""); err != nil {
+				t.Fatal(err)
+			}
+			if f.create.GetSnapshot() != "snapshot-exact-id" || f.create.Cpu != nil || f.create.Memory != nil || f.create.Disk != nil {
+				t.Fatalf("class must select exact snapshot without resize fields: %+v", f.create)
+			}
+		})
+	}
+}
+
+func TestDaytonaClassPreservesCustomSnapshotAndRejectsMismatches(t *testing.T) {
+	for _, mismatch := range []string{"", "snapshot-name", "missing-class", "cpu", "memory", "disk", "gpu", "container", "state", "class", "architecture", "response", "response-class", "empty-class"} {
+		t.Run(blank(mismatch, "matching"), func(t *testing.T) {
+			f, b, repo := newDaytonaLifecycleFixture(t)
+			b.cfg.Class, b.cfg.Daytona.Snapshot, b.cfg.Daytona.Target = "standard", "custom-exact-id", "us"
+			f.classSnapshot = &api.SnapshotDto{Id: "custom-exact-id", Name: "my-prepared-project", State: api.SNAPSHOTSTATE_ACTIVE, Cpu: 2, Mem: 4, Disk: 8, RegionIds: []string{"us"}, Entrypoint: []string{}}
+			f.classSnapshot.SetSandboxClass("container")
+			switch mismatch {
+			case "cpu":
+				f.classSnapshot.Cpu = 1
+			case "memory":
+				f.classSnapshot.Mem = 1
+			case "disk":
+				f.classSnapshot.Disk = 3
+			case "gpu":
+				f.classSnapshot.Gpu = 1
+			case "container":
+				f.classSnapshot.SetSandboxClass("linux-vm")
+			case "state":
+				f.classSnapshot.State = api.SNAPSHOTSTATE_PENDING
+			case "class":
+				b.cfg.Class = "small"
+			case "architecture":
+				b.cfg.Architecture = "arm64"
+			case "response", "response-class", "empty-class", "missing-class", "snapshot-name":
+				f.responseMismatch = mismatch
+			}
+			err := runDaytonaClassWarmup(t, b.cfg, repo)
+			leaseID := f.create.GetLabels()["lease"]
+			if mismatch == "" || mismatch == "snapshot-name" || mismatch == "missing-class" {
+				if err != nil || f.create.GetSnapshot() != "custom-exact-id" {
+					t.Fatalf("custom snapshot was not preserved: snapshot=%s err=%v", f.create.GetSnapshot(), err)
+				}
+			} else if mismatch == "response" || mismatch == "response-class" || mismatch == "empty-class" {
+				if err == nil || f.sandboxCreates != 1 || f.deletes != 1 {
+					t.Fatalf("mismatched allocation must be cleaned: creates=%d deletes=%d err=%v", f.sandboxCreates, f.deletes, err)
+				}
+				if _, exists, claimErr := resolveLeaseClaimForProvider(leaseID, daytonaProvider); exists || claimErr != nil {
+					t.Fatalf("cleaned allocation retained claim: %v %v", exists, claimErr)
+				}
+			} else if err == nil || f.sandboxCreates != 0 {
+				t.Fatalf("snapshot mismatch must fail before allocation: creates=%d err=%v", f.sandboxCreates, err)
+			}
+		})
+	}
+}
+
+func TestDaytonaClassKeepsNativeTargetResolution(t *testing.T) {
+	for _, scenario := range []string{"name", "id", "default", "unavailable", "response-mismatch"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, b, repo := newDaytonaLifecycleFixture(t)
+			b.cfg.Class, b.cfg.Daytona.Target = "small", "east"
+			f.classSnapshot = &api.SnapshotDto{Id: "test-snapshot", Name: "prepared", State: api.SNAPSHOTSTATE_ACTIVE, Cpu: 1, Mem: 1, Disk: 3, RegionIds: []string{"region-one"}, Entrypoint: []string{}}
+			f.classSnapshot.SetSandboxClass("container")
+			f.responseTarget = "region-one"
+			switch scenario {
+			case "id":
+				b.cfg.Daytona.Target = "region-one"
+			case "default":
+				b.cfg.Daytona.Target = ""
+			case "unavailable":
+				f.classSnapshot.RegionIds, f.rejectCreate = []string{"elsewhere"}, true
+			case "response-mismatch":
+				f.responseTarget = "wrong-region"
+			}
+			err := runDaytonaClassWarmup(t, b.cfg, repo)
+			leaseID := f.create.GetLabels()["lease"]
+			if scenario == "unavailable" {
+				if err == nil || !strings.Contains(err.Error(), "not available in requested region") || f.sandbox != nil || f.sandboxCreates != 0 || f.deletes != 0 {
+					t.Fatalf("native rejection created a resource: creates=%d deletes=%d err=%v", f.sandboxCreates, f.deletes, err)
+				}
+				if f.recoveryReads == 0 || !strings.Contains(err.Error(), "allocation unconfirmed") {
+					t.Fatalf("ambiguous HTTP 400 bypassed bounded recovery: reads=%d err=%v", f.recoveryReads, err)
+				}
+			} else if scenario == "response-mismatch" {
+				if err == nil || f.sandboxCreates != 1 || f.deletes != 1 {
+					t.Fatalf("target mismatch not rolled back: creates=%d deletes=%d err=%v", f.sandboxCreates, f.deletes, err)
+				}
+				if _, exists, claimErr := resolveLeaseClaimForProvider(leaseID, daytonaProvider); exists || claimErr != nil {
+					t.Fatalf("rollback retained ownership: exists=%v err=%v", exists, claimErr)
+				}
+			} else if err != nil || f.sandboxCreates != 1 {
+				t.Fatalf("native target resolution failed: creates=%d err=%v", f.sandboxCreates, err)
+			}
+			posts := 0
+			for _, request := range f.paths {
+				if request == "POST /sandbox" {
+					posts++
+				}
+			}
+			if posts != 1 || f.create.GetTarget() != b.cfg.Daytona.Target || f.create.GetSnapshot() != "test-snapshot" {
+				t.Fatalf("native selectors changed: target=%q snapshot=%q", f.create.GetTarget(), f.create.GetSnapshot())
+			}
+		})
+	}
 }
 
 func TestDaytonaAllocationFailureRollsBack(t *testing.T) {
-	for _, failure := range []string{"startup failure", "lost create response", "create response timeout"} {
+	for _, failure := range []string{"startup failure", "lost create response", "allocated bad request", "create response timeout"} {
 		t.Run(failure, func(t *testing.T) {
 			f, b, repo := newDaytonaLifecycleFixture(t)
 			f.createState = api.SANDBOXSTATE_ERROR
-			f.lostCreate = failure == "lost create response"
-			if f.lostCreate {
+			if failure == "lost create response" || failure == "allocated bad request" {
+				f.createErrorStatus = http.StatusBadGateway
+				if failure == "allocated bad request" {
+					f.createErrorStatus = http.StatusBadRequest
+				}
 				f.recoveryDelay = 2
 			}
 			ctx := t.Context()
@@ -236,7 +430,7 @@ func TestDaytonaAllocationFailureRollsBack(t *testing.T) {
 			if f.deletes != 1 {
 				t.Fatalf("deletes=%d, error=%v", f.deletes, err)
 			}
-			if f.lostCreate && f.recoveryReads != 3 {
+			if f.createErrorStatus != 0 && f.recoveryReads != 3 {
 				t.Fatalf("recoveryReads=%d, want delayed allocation recovery", f.recoveryReads)
 			}
 			if failure == "create response timeout" && (f.recoveryReads != 1 || f.sandbox.GetId() != "sandbox-test" || f.sandbox.GetLabels()["lease"] != leaseID || f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED) {
@@ -348,9 +542,12 @@ func TestDaytonaReadinessIgnoresStaleLabels(t *testing.T) {
 		sandbox.SetId("sandbox-test")
 		sandbox.SetState(api.SandboxState(state))
 		sandbox.SetLabels(map[string]string{"state": "ready"})
-		view := daytonaStatusView("cbx_111111111111", sandbox, baseConfig())
+		view := daytonaStatusView("cbx_111111111111", sandbox)
 		if view.Ready || view.State != state {
 			t.Fatalf("provider state %s rendered %+v", state, view)
+		}
+		if view.ServerType != "snapshot" {
+			t.Fatalf("unrecorded sizing must not inherit the caller's class: %s", view.ServerType)
 		}
 	}
 }
@@ -366,7 +563,7 @@ func TestDaytonaHeartbeatUpdatesProviderAndLabels(t *testing.T) {
 		sandbox.GetLabels()[key] = value
 	}
 	idle := 90 * time.Minute
-	touched, err := b.Touch(t.Context(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox, b.cfg)}, State: "ready", IdleTimeoutOverride: &idle})
+	touched, err := b.Touch(t.Context(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)}, State: "ready", IdleTimeoutOverride: &idle})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +585,7 @@ func TestDaytonaHeartbeatPolicyFailureDoesNotPublishNewTimeout(t *testing.T) {
 	}
 	f.autoStopError = true
 	idle := 90 * time.Minute
-	_, err = b.Touch(t.Context(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox, b.cfg)}, State: "ready", IdleTimeoutOverride: &idle})
+	_, err = b.Touch(t.Context(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)}, State: "ready", IdleTimeoutOverride: &idle})
 	if err == nil || !strings.Contains(err.Error(), "auto-stop") {
 		t.Fatalf("error=%v", err)
 	}

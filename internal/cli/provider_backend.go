@@ -32,6 +32,12 @@ type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
 
+// CoordinatorAcquireValidator keeps provider-owned creation policy at broker
+// acquisition; configuration checks must not prevent existing-lease cleanup.
+type CoordinatorAcquireValidator interface {
+	ValidateCoordinatorAcquire() error
+}
+
 // ProviderConfigDefaulter owns provider-specific defaults that must be applied
 // after generic config parsing and before target validation.
 type ProviderConfigDefaulter interface {
@@ -1708,7 +1714,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ssh, ok := backend.(SSHLeaseBackend); ok && shouldUseCoordinator(cfg, provider.Spec()) {
+	if ssh, ok := backend.(SSHLeaseBackend); ok && ShouldUseCoordinator(cfg, provider.Spec()) {
 		coord, _, err := newCoordinatorClient(cfg)
 		if err != nil {
 			return nil, err
@@ -1727,7 +1733,9 @@ func configureProviderBackend(provider Provider, cfg *Config, rt Runtime) (Backe
 	return provider.Configure(*cfg, rt)
 }
 
-func shouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
+// ShouldUseCoordinator reports whether provider allocations use the coordinator.
+// Registered mode keeps allocation with the direct provider.
+func ShouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
 	return cfg.BrokerMode != BrokerModeRegistered &&
 		spec.Coordinator == CoordinatorSupported && strings.TrimSpace(cfg.Coordinator) != ""
 }
