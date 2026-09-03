@@ -15,6 +15,8 @@ import {
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   CloudflareCoordinatorRuntime,
+  legacyAlarmKey,
+  setLegacyWake,
   type CoordinatorRuntime,
   type CoordinatorSocketHandlers,
   type CoordinatorStorage,
@@ -255,6 +257,10 @@ class FleetDurableObject extends ProductionFleetDurableObject {
     await this.drainMaintenance();
   }
 
+  async ready(): Promise<void> {
+    await this.initialized;
+  }
+
   private async drainMaintenance(): Promise<void> {
     while (this.tasks.size) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- a completed pass may latch a follow-up pass.
@@ -266,12 +272,16 @@ class FleetDurableObject extends ProductionFleetDurableObject {
 class MemoryStorage {
   private values: Map<string, unknown>;
   private alarmTime: number | undefined;
+  private alarmWritten = false;
   private revision = 0;
   private transactionTail = Promise.resolve();
   beforeGet?: (key: string) => Promise<void>;
   afterGet?: (key: string, value: unknown) => Promise<void> | void;
   beforePut?: (key: string, value: unknown) => Promise<void>;
   beforeDelete?: (key: string) => Promise<void>;
+  beforeGetAlarm?: () => void;
+  beforeSetAlarm?: (time: number) => Promise<void>;
+  beforeList?: (options: Parameters<CoordinatorStorageView["list"]>[0]) => void;
   transactionPutCounts: number[] = [];
 
   constructor(values = new Map<string, unknown>()) {
@@ -299,17 +309,25 @@ class MemoryStorage {
 
   async deleteAlarm(): Promise<void> {
     this.alarmTime = undefined;
+    this.alarmWritten = true;
     this.revision += 1;
+    this.alarmCommitted(undefined);
   }
 
   async getAlarm(): Promise<number | null> {
+    this.beforeGetAlarm?.();
     return this.alarmTime ?? null;
   }
 
   async setAlarm(time: number): Promise<void> {
+    await this.beforeSetAlarm?.(time);
     this.alarmTime = time;
+    this.alarmWritten = true;
     this.revision += 1;
+    this.alarmCommitted(time);
   }
+
+  protected alarmCommitted(_time: number | undefined): void {}
 
   async transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
     const predecessor = this.transactionTail;
@@ -341,6 +359,9 @@ class MemoryStorage {
     const prefixes = new Set<string>();
     const transaction = new MemoryStorage(structuredClone(snapshot));
     transaction.alarmTime = this.alarmTime;
+    transaction.beforeGetAlarm = this.beforeGetAlarm;
+    transaction.beforeSetAlarm = (time) => this.beforeSetAlarm?.(time) ?? Promise.resolve();
+    transaction.beforeList = this.beforeList;
     transaction.beforeGet = async (key) => {
       reads.add(key);
       await this.beforeGet?.(key);
@@ -387,6 +408,8 @@ class MemoryStorage {
       }
       this.alarmTime = transaction.alarmTime;
       this.revision += 1;
+      // A same-time write rearms a consumed job, but aborted attempts publish no job.
+      if (transaction.alarmWritten) this.alarmCommitted(transaction.alarmTime);
       return { committed: true, value: result };
     } finally {
       this.transactionPutCounts.push(putCount);
@@ -403,6 +426,7 @@ class MemoryStorage {
     startAfter?: string;
     noCache?: boolean;
   } = {}): Promise<Map<string, T>> {
+    this.beforeList?.({ prefix, limit, startAfter });
     const matches = new Map<string, T>();
     for (const [key, value] of [...this.values].toSorted(([left], [right]) =>
       left.localeCompare(right),
@@ -39426,6 +39450,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function alarmRuntime(storage: MemoryStorage): CloudflareCoordinatorRuntime {
+  return new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
+}
+
 describe("synthetic acknowledgement reliability", () => {
   const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
   const leaseID = "cbx_aacc00000001";
@@ -39435,23 +39463,21 @@ describe("synthetic acknowledgement reliability", () => {
     queuedAlarm: number | undefined;
     readonly alarmWrites: number[] = [];
 
-    override async setAlarm(time: number): Promise<void> {
-      await super.setAlarm(time);
-      this.alarmWrites.push(time);
+    protected override alarmCommitted(time: number | undefined): void {
+      if (time !== undefined) this.alarmWrites.push(time);
       this.queuedAlarm = time;
     }
 
-    override async deleteAlarm(): Promise<void> {
-      await super.deleteAlarm();
+    consumeAlarm(): void {
+      if (this.queuedAlarm === undefined || this.queuedAlarm > Date.now()) {
+        throw new Error("no due alarm job is queued");
+      }
+      // Node consumes the job before its handler runs, retaining the persisted timestamp.
       this.queuedAlarm = undefined;
     }
 
     async deliverAlarm(fleet: FleetDurableObject): Promise<void> {
-      if (this.queuedAlarm === undefined || this.queuedAlarm > Date.now()) {
-        throw new Error("no due alarm job is queued");
-      }
-      // Node consumes the job, but retains its persisted timestamp even if maintenance fails.
-      this.queuedAlarm = undefined;
+      this.consumeAlarm();
       await fleet.alarm();
     }
   }
@@ -39499,6 +39525,63 @@ describe("synthetic acknowledgement reliability", () => {
     );
     return socket;
   }
+
+  it.each(["callback", "alarm"])(
+    "publishes neither transaction state nor an alarm job after a %s failure",
+    async (failure) => {
+      const storage = new RetainedAlarmStorage();
+      const runtime = alarmRuntime(storage);
+      const future = Date.now() + 10_000;
+      await runtime.scheduleAlarm(future);
+      storage.seed("synthetic-transaction", "before");
+      storage.beforeSetAlarm = vi.fn<NonNullable<MemoryStorage["beforeSetAlarm"]>>(async () => {
+        throw new Error("synthetic alarm transaction failure");
+      });
+      await expect(
+        runtime.commitAndWake(async (transaction) => {
+          await transaction.put("synthetic-transaction", "after");
+          await setLegacyWake(transaction, future - 1);
+          if (failure === "callback") throw new Error("synthetic callback transaction failure");
+        }),
+      ).rejects.toThrow(`synthetic ${failure} transaction failure`);
+      expect(storage.beforeSetAlarm).toHaveBeenCalledTimes(failure === "alarm" ? 1 : 0);
+      expect(storage.value("synthetic-transaction")).toBe("before");
+      expect(storage.value(legacyAlarmKey)).toBe(future);
+      expect(storage.alarm()).toBe(future);
+      expect(storage.queuedAlarm).toBe(future);
+      expect(storage.alarmWrites).toEqual([future]);
+    },
+  );
+
+  it("publishes only the committed alarm job after a serialization retry", async () => {
+    const storage = new RetainedAlarmStorage();
+    const runtime = alarmRuntime(storage);
+    const future = Date.now() + 10_000;
+    await runtime.scheduleAlarm(future);
+    storage.seed("synthetic-transaction", "before");
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    let attempts = 0;
+    const operation = runtime.commitAndWake(async (transaction) => {
+      const value = await transaction.get("synthetic-transaction");
+      attempts += 1;
+      if (attempts === 1) {
+        entered.resolve();
+        await resume.promise;
+      }
+      await transaction.put("synthetic-result", value);
+    });
+    await entered.promise;
+    await storage.put("synthetic-transaction", "replacement");
+    resume.resolve();
+    await operation;
+    expect(attempts).toBe(2);
+    expect(storage.value("synthetic-result")).toBe("replacement");
+    expect(storage.queuedAlarm).toBe(future);
+    expect(storage.alarmWrites).toEqual([future, future]);
+    await storage.transaction(async () => undefined);
+    expect(storage.alarmWrites).toEqual([future, future]);
+  });
 
   it.each(["serializeAttachment", "deserializeAttachment"] as const)(
     "acknowledges the terminal commit despite a subscribed socket %s failure",
@@ -39661,17 +39744,28 @@ describe("synthetic acknowledgement reliability", () => {
         const storage = new ObservedMemoryStorage();
         seedLease(storage);
         const fleet = testFleet(storage);
+        await fleet.ready();
         const socket = addSocket(fleet, "synthetic-heartbeat");
-        const get = vi.spyOn(storage, "get");
-        const put = vi.spyOn(storage, "put");
-        const getAlarm = vi.spyOn(storage, "getAlarm");
-        const setAlarm = vi.spyOn(storage, "setAlarm");
+        const get = (storage.beforeGet = vi.fn<NonNullable<MemoryStorage["beforeGet"]>>(
+          async () => {},
+        ));
+        const put = (storage.beforePut = vi.fn<NonNullable<MemoryStorage["beforePut"]>>(
+          async () => {},
+        ));
+        const list = (storage.beforeList = vi.fn<NonNullable<MemoryStorage["beforeList"]>>());
+        const getAlarm = (storage.beforeGetAlarm =
+          vi.fn<NonNullable<MemoryStorage["beforeGetAlarm"]>>());
+        const setAlarm = (storage.beforeSetAlarm = vi.fn<
+          NonNullable<MemoryStorage["beforeSetAlarm"]>
+        >(async () => {}));
         async function heartbeat(idleTimeoutSeconds?: number): Promise<void> {
           storage.resetListOptions();
           get.mockClear();
           put.mockClear();
+          list.mockClear();
           getAlarm.mockClear();
           setAlarm.mockClear();
+          const alarmReads = storage.value(legacyAlarmKey) === undefined ? 2 : 1;
           let acknowledged: boolean;
           if (transport === "http") {
             const response = await fleet.fetch(
@@ -39694,9 +39788,15 @@ describe("synthetic acknowledgement reliability", () => {
           }
           expect(acknowledged).toBe(true);
           expect.soft(storage.listOptions).toEqual([]);
-          expect.soft(get.mock.calls.length).toBeLessThanOrEqual(3);
-          expect(put).toHaveBeenCalledTimes(1);
-          expect.soft(getAlarm).toHaveBeenCalledTimes(1);
+          expect.soft(get.mock.calls.length).toBeLessThanOrEqual(5);
+          expect(put.mock.calls.filter(([key]) => key.startsWith("lease:"))).toHaveLength(1);
+          expect(put.mock.calls.length).toBeLessThanOrEqual(2);
+          expect(list.mock.calls.length).toBeLessThanOrEqual(1);
+          for (const [options] of list.mock.calls)
+            expect(options).toEqual(
+              expect.objectContaining({ prefix: "provisioning-due:", limit: 1 }),
+            );
+          expect.soft(getAlarm).toHaveBeenCalledTimes(alarmReads);
           expect(setAlarm.mock.calls.length).toBeLessThanOrEqual(1);
         }
         await heartbeat();
@@ -39705,11 +39805,11 @@ describe("synthetic acknowledgement reliability", () => {
         );
         expect(storage.alarm()! - Date.now()).toBe(1800_000);
         const earlier = Date.now() + 10_000;
-        await storage.setAlarm(earlier);
+        await alarmRuntime(storage).scheduleAlarm(earlier);
         await heartbeat();
         expect.soft(storage.alarm()).toBe(earlier);
         expect.soft(setAlarm).not.toHaveBeenCalled();
-        await storage.setAlarm(Date.now() + 1800_000);
+        await alarmRuntime(storage).scheduleAlarm(Date.now() + 1800_000);
         await heartbeat(60);
         expect(storage.alarm()).toBe(Date.now() + 60_000);
         expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.idleTimeoutSeconds).toBe(60);
@@ -39718,6 +39818,52 @@ describe("synthetic acknowledgement reliability", () => {
       }
     },
   );
+
+  it("retries failed runtime-owned maintenance without losing queued cleanup", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const storage = new RetainedAlarmStorage();
+      const lease = seedLease(storage);
+      const deleted: string[] = [];
+      const provider = fakeProvider(undefined, {}, async (id) => {
+        deleted.push(id);
+      });
+      const fleet = testFleet(storage, { hetzner: provider });
+      await fleet.ready();
+      const release = await fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+      );
+      expect(release.status).toBe(200);
+      let failures = 0;
+      storage.beforeList = (options) => {
+        if (options?.prefix === "workspace:" && failures === 0) {
+          failures += 1;
+          throw new Error("synthetic maintenance failure before alarm reconciliation");
+        }
+      };
+      // The fixture awaits actual waitUntil-owned work, including its retry commit.
+      await storage.deliverAlarm(fleet);
+      expect(failures).toBe(1);
+      expect(error).toHaveBeenCalledExactlyOnceWith(
+        "coordinator maintenance failed; retry scheduled",
+      );
+      const retryAt = Date.now() + 15_000;
+      expect(storage.alarm()).toBe(retryAt);
+      expect(storage.queuedAlarm).toBe(retryAt);
+      expect(storage.alarmWrites.at(-1)).toBe(retryAt);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBe(true);
+      expect(deleted).toEqual([]);
+      vi.setSystemTime(retryAt);
+      await storage.deliverAlarm(testFleet(storage, { hetzner: provider }));
+      expect(deleted).toEqual([lease.cloudID]);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBeUndefined();
+      expect(storage.queuedAlarm).toBeUndefined();
+    } finally {
+      error.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 
   it.each([
     ["http heartbeat", 0],
@@ -39738,6 +39884,7 @@ describe("synthetic acknowledgement reliability", () => {
           deleted.push(id);
         });
         let fleet = testFleet(storage, { hetzner: provider });
+        await fleet.ready();
         async function acknowledge(): Promise<void> {
           storage.resetListOptions();
           let acknowledged: boolean;
@@ -39766,27 +39913,29 @@ describe("synthetic acknowledgement reliability", () => {
         }
 
         const future = Date.now() + 10_000;
-        await storage.setAlarm(future);
+        await alarmRuntime(storage).scheduleAlarm(future);
         await acknowledge();
         const earlier = action === "release" ? Date.now() : future;
         expect(storage.alarm()).toBe(earlier);
         expect(storage.queuedAlarm).toBe(earlier);
-        expect(storage.alarmWrites).toEqual(action === "release" ? [future, earlier] : [future]);
+        // Release first checks durable provisioning cancellation, then arms legacy cleanup.
+        expect(storage.alarmWrites).toEqual(
+          action === "release" ? [future, future, earlier] : [future],
+        );
         expect(deleted).toEqual([]);
 
         vi.setSystemTime(earlier + overdueMS);
-        const failure = vi
-          .spyOn(storage, "list")
-          .mockRejectedValueOnce(
-            new Error("synthetic maintenance failure before alarm reconciliation"),
-          );
-        await expect(storage.deliverAlarm(fleet)).rejects.toThrow("synthetic maintenance failure");
-        failure.mockRestore();
+        storage.consumeAlarm();
         expect(storage.alarm()).toBe(earlier);
         expect(storage.queuedAlarm).toBeUndefined();
 
-        // No retry job remains; reconstruct using the same durable timestamp and lease state.
+        // Simulate a restart after consuming the job but before its handler starts.
+        const recoveryWritesBefore = storage.alarmWrites.length;
         fleet = testFleet(storage, { hetzner: provider });
+        await fleet.ready();
+        expect(storage.alarmWrites.slice(recoveryWritesBefore)).toEqual([earlier]);
+        expect(storage.queuedAlarm).toBe(earlier);
+        storage.consumeAlarm();
         const writesBefore = storage.alarmWrites.length;
         await acknowledge();
         expect.soft(storage.alarmWrites.slice(writesBefore)).toEqual([earlier]);
@@ -39818,9 +39967,15 @@ describe("synthetic acknowledgement reliability", () => {
       const storage = new ObservedMemoryStorage();
       seedLease(storage);
       const fleet = testFleet(storage);
-      await storage.setAlarm(Date.now() + 1800_000);
-      const get = vi.spyOn(storage, "get");
-      const put = vi.spyOn(storage, "put");
+      await fleet.ready();
+      await alarmRuntime(storage).scheduleAlarm(Date.now() + 1800_000);
+      const get = (storage.beforeGet = vi.fn<NonNullable<MemoryStorage["beforeGet"]>>(
+        async () => {},
+      ));
+      const put = (storage.beforePut = vi.fn<NonNullable<MemoryStorage["beforePut"]>>(
+        async () => {},
+      ));
+      const list = (storage.beforeList = vi.fn<NonNullable<MemoryStorage["beforeList"]>>());
       const before = Date.now();
       const release = await fleet.fetch(
         request("POST", `/v1/leases/${leaseID}/release`, {
@@ -39830,14 +39985,23 @@ describe("synthetic acknowledgement reliability", () => {
       );
       expect(release.status).toBe(200);
       expect.soft(storage.listOptions).toEqual([]);
-      expect.soft(get.mock.calls.length).toBeLessThanOrEqual(6);
-      expect(put).toHaveBeenCalledTimes(1);
+      expect.soft(get.mock.calls.length).toBeLessThanOrEqual(9);
+      expect(put.mock.calls.filter(([key]) => key.startsWith("lease:"))).toHaveLength(1);
+      expect(put).toHaveBeenCalledTimes(2);
+      // The cancellation check and legacy wake each merge one bounded due-index entry.
+      expect(list.mock.calls).toEqual([
+        [expect.objectContaining({ prefix: "provisioning-due:", limit: 1 })],
+        [expect.objectContaining({ prefix: "provisioning-due:", limit: 1 })],
+      ]);
       expect.soft(storage.alarm()).toBeGreaterThanOrEqual(before);
       expect.soft(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
       const earlier = before - 1;
-      await storage.setAlarm(earlier);
+      await alarmRuntime(storage).scheduleAlarm(earlier);
       storage.resetListOptions();
-      const setAlarm = vi.spyOn(storage, "setAlarm");
+      const setAlarm = (storage.beforeSetAlarm = vi.fn<
+        NonNullable<MemoryStorage["beforeSetAlarm"]>
+      >(async () => {}));
+      list.mockClear();
       const replay = await fleet.fetch(
         request("POST", `/v1/leases/${leaseID}/release`, {
           headers,
@@ -39846,8 +40010,16 @@ describe("synthetic acknowledgement reliability", () => {
       );
       expect(replay.status).toBe(200);
       expect.soft(storage.listOptions).toEqual([]);
+      const wakeCommits = deleteServer ? 1 : 2;
+      expect(list.mock.calls).toEqual(
+        Array.from({ length: wakeCommits }, () => [
+          expect.objectContaining({ prefix: "provisioning-due:", limit: 1 }),
+        ]),
+      );
       expect.soft(storage.alarm()).toBe(earlier);
-      expect.soft(setAlarm).toHaveBeenCalledExactlyOnceWith(earlier);
+      expect
+        .soft(setAlarm.mock.calls)
+        .toEqual(Array.from({ length: wakeCommits }, () => [earlier]));
     },
   );
 
@@ -39863,10 +40035,11 @@ describe("synthetic acknowledgement reliability", () => {
         deleted.push(id);
       });
       const fleet = testFleet(storage, { hetzner: provider });
+      await fleet.ready();
       if (failAlarmWrite)
-        vi.spyOn(storage, "setAlarm").mockRejectedValueOnce(
-          new Error("synthetic alarm storage failure"),
-        );
+        storage.beforeSetAlarm = vi
+          .fn<NonNullable<MemoryStorage["beforeSetAlarm"]>>(async () => {})
+          .mockRejectedValueOnce(new Error("synthetic alarm storage failure"));
       const release = await fleet.fetch(
         request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
       );
@@ -39877,6 +40050,7 @@ describe("synthetic acknowledgement reliability", () => {
       expect(pending.cleanupClaimExpiresAt).toBe(pending.cleanupStartedAt);
       expect(deleted).toEqual([]);
       expect(storage.alarm() === undefined).toBe(failAlarmWrite);
+      expect(storage.value(legacyAlarmKey)).toBe(failAlarmWrite ? undefined : storage.alarm());
       storage.resetListOptions();
       const retry = await testFleet(storage, { hetzner: provider }).fetch(
         request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
