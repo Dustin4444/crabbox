@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Restore current Tenki CLI inventory and legacy-claim recovery, and retain ownership claims until the exact session acknowledges termination; obsolete workspace/project settings now give migration guidance before creating a lease. [PR 1741](https://github.com/openclaw/crabbox/pull/1741). Thanks @eddiewang.
 - Avoid unnecessary Git metadata lookups during configuration loading, lease claim refreshes, and sync planning while preserving repository and credential trust boundaries. [PR 1783](https://github.com/openclaw/crabbox/pull/1783). Thanks @steipete.
 - Preserve finish-submission and receipt-verification errors, attempt counts, and recovery guidance when terminal run recording times out, without changing retry limits or receipt verification.
 - Closed and joined lease-owned SSH connection masters after confirmed brokered deletion, preserving native connection reuse and lease/host-key isolation while retaining failed local cleanup for a local-only retry. [PR 1774](https://github.com/openclaw/crabbox/pull/1774). Thanks @steipete.
