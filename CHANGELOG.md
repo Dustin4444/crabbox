@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Report Azure Dynamic Sessions cleanup failures as failed runs, preserve primary Superserve/Azure errors through cleanup and timing output, and keep Superserve rollback bound to the originally created sandbox. [PR 1836](https://github.com/openclaw/crabbox/pull/1836). Thanks @steipete.
+
 ## 0.49.1 - 2026-09-04
 
 Users upgrading from v0.48.1 also receive the [v0.49.0 changes](https://github.com/openclaw/crabbox/blob/v0.49.0/CHANGELOG.md#0490---2026-09-03), previously available through the Go module release.
