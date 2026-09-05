@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Blaxel: prepare and validate sync archives before fresh allocation, freeze the pre-create snapshot, and share staged workspace replacement and cleanup while retaining native upload retries. [PR 1867](https://github.com/openclaw/crabbox/pull/1867). Thanks @steipete.
 - CubeSandbox: share sandbox run finalization so failed cleanup retains an accurate recovery session, setup failures honor `--keep-on-failure`, and timing errors no longer mask command exits; preserve observed abnormal exit codes. [PR 1850](https://github.com/openclaw/crabbox/pull/1850). Thanks @steipete.
 - Limit literal run-artifact discovery to the parent directory, preserving existing matching, required-file, and symlink guards. [PR 1878](https://github.com/openclaw/crabbox/pull/1878). Thanks @steipete.
 - OpenComputer: share run finalization so cleanup failures are reported, timing errors preserve the original exit, and command preparation honors `--keep-on-failure`; preserve cancellation and timeout causes and distinguish transport errors from command exits. [PR 1845](https://github.com/openclaw/crabbox/pull/1845). Thanks @steipete.
