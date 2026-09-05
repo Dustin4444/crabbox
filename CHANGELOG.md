@@ -7,6 +7,7 @@
 - Blaxel: stop the original process after interrupted polling requests and preserve cancellation and timeout causes without exposing redacted credentials. [PR 1846](https://github.com/openclaw/crabbox/pull/1846). Thanks @steipete.
 - Report Azure Dynamic Sessions cleanup failures as failed runs, preserve primary Superserve/Azure errors through cleanup and timing output, and keep Superserve rollback bound to the originally created sandbox. [PR 1836](https://github.com/openclaw/crabbox/pull/1836). Thanks @steipete.
 - Local provider bridges: preserve cancellation and deadline causes when a POSIX child is interrupted, without masking completed command exits or output-limit errors. [PR 1862](https://github.com/openclaw/crabbox/pull/1862). Thanks @steipete.
+- CodeSandbox: share run finalization so failed cleanup returns an accurate recovery session, cancellation honors `--keep-on-failure`, and timing errors preserve the command outcome. [PR 1843](https://github.com/openclaw/crabbox/pull/1843). Thanks @steipete.
 
 ## 0.49.1 - 2026-09-04
 
