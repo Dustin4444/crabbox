@@ -260,7 +260,7 @@ func TestOneShotTeardownKeepsOriginalClaim(t *testing.T) {
 	}
 	b := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(r)).(*tensorlakeBackend)
 	result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Command: []string{"user-workload"}})
-	if err != nil || result.Session == nil || !result.Session.Kept {
+	if err == nil || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider || result.Session == nil || !result.Session.Kept {
 		t.Fatal("expected retained session", err)
 	}
 	if findCall(r, "sbx terminate") != nil {
