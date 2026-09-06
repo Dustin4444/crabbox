@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Stop SSH readiness promptly on host-key rejection, including WSL SFTP and split or oversized diagnostics, without changing host trust. [PR 1877](https://github.com/openclaw/crabbox/pull/1877). Thanks @shunkakinoki.
 - SmolVM: share sandbox run finalization so deletion failures no longer report success, early preparation failures honor keep-on-failure, and primary outcomes survive cleanup or timing errors while preserving provider keep policy and separate profile/resource cleanup budgets. [PR 1908](https://github.com/openclaw/crabbox/pull/1908).
 - Allow protected AWS image qualification to pass Node toolchain setup by using the supported no-cache input while keeping Go caching disabled. [PR 1909](https://github.com/openclaw/crabbox/pull/1909).
 - Fix documentation table-of-contents links for repeated headings so each link reaches its own section, while preserving existing first-heading URLs. [PR 1787](https://github.com/openclaw/crabbox/pull/1787). Thanks @steipete.
