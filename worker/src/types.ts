@@ -966,6 +966,7 @@ export interface ProviderFastSnapshotRestore {
 
 export interface PromotedImageRecord extends ProviderImage {
   promotedAt: string;
+  revision?: string;
   catalogOnly?: boolean;
   variantSelectors?: ImageVariantSelectors;
 }
