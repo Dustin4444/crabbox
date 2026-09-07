@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Agent Sandbox, OpenSandbox, and Hyper-V: classify readiness deadlines and cancellation consistently without losing the last probe's diagnostic or changing public exit codes. [PR 1964](https://github.com/openclaw/crabbox/pull/1964).
 - Report producer-confirmed checkpoint non-submission as structured JSON after verified reservation cleanup, without implying that source rollback succeeded. [PR 1952](https://github.com/openclaw/crabbox/pull/1952). Thanks @steipete.
 - Wait for cloud-init completion within the existing 30-second status deadline before native-image cleanup, retain strict post-clean checks with phase/status diagnostics, and release fresh direct AWS/Hetzner reservations only for confirmed pre-submission failures. [PR 1963](https://github.com/openclaw/crabbox/pull/1963). Thanks @steipete.
 - Overlap the initial AWS quota lookup with security-group preparation, preserving per-candidate quota checks and joining both operations before launch or failure cleanup.
