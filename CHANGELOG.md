@@ -4,6 +4,8 @@
 
 - Preserve current-boot cloud-init completion records during Linux developer-image cleanup while still clearing cached initialization and seed data, and fail preparation if cleanup cannot complete safely. [PR 1954](https://github.com/openclaw/crabbox/pull/1954). Thanks @vincentkoc.
 - Stop SSH readiness probes and backoff at the shared deadline, reporting the active probe with authentication unknown instead of mislabeling expired checks as authentication failures. [PR 1949](https://github.com/openclaw/crabbox/pull/1949). Thanks @vincentkoc.
+- Keep AWS deletion and unrelated heartbeat alarm scans out of the ingress queue, and admit control WebSockets independently of lifecycle work, while preserving cleanup claims, alarm deadlines, authentication, and message serialization. [PR 1951](https://github.com/openclaw/crabbox/pull/1951).
+
 - Reuse verified SSH endpoints within an operation, preserving advertised fallbacks when switching hosts or ports and avoiding redundant login probes across direct, proxy, and WSL execution. [PR 1941](https://github.com/openclaw/crabbox/pull/1941).
 - Report image qualification reaping as idle after clean teardown, while preserving failed recovery evidence and checking transient controller ownership before cleanup. [PR 1942](https://github.com/openclaw/crabbox/pull/1942). Thanks @vincentkoc.
 - Add `crabbox bench check` to enforce sample, failure, and p95 runner timing policy across every matched local benchmark group. [PR 1899](https://github.com/openclaw/crabbox/pull/1899). Thanks @vincentkoc.
