@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Distinguish required-artifact, artifact-change, and artifact-schema validation failures from workload exits in run timing and failure digests, preserving exit 7 and artifact enforcement. [PR 1934](https://github.com/openclaw/crabbox/pull/1934), [Issue 1894](https://github.com/openclaw/crabbox/issues/1894). Thanks @coygeek.
+
 ## 0.51.0 - 2026-09-06
 
 ### Highlights
