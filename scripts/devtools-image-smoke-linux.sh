@@ -1,5 +1,6 @@
 set -euo pipefail
-echo devtools-smoke-ok
+: "${expected_node_major?Mint smoke renderer must set expected_node_major}"
+[[ "$(id -u)" -ne 0 ]] || { echo 'developer image smoke requires a nonroot user' >&2; exit 1; }
 uname -a
 command -v git
 command -v gh
@@ -15,7 +16,7 @@ command -v trufflehog
 trufflehog --no-update --version
 command -v docker
 node --version
-node -e 'if (Number(process.versions.node.split(".")[0]) < 24) throw new Error(`Node.js 24 or newer is required, found ${process.version}`)'
+node -e 'const major = process.versions.node.split(".")[0]; const expected = process.argv[1]; if (expected ? major !== expected : Number(major) < 24) throw new Error("Node.js " + (expected ? "major " + expected : "24 or newer") + " is required, found " + process.version)' -- "$expected_node_major"
 corepack --version
 pnpm --version
 docker_group_member() {
@@ -46,3 +47,5 @@ fi
 test -d /var/cache/crabbox/pnpm
 test -f /var/lib/crabbox-readiness/linux.json
 test -f /var/lib/crabbox/image-ready
+developer_archive_probe
+echo devtools-smoke-ok

@@ -558,6 +558,7 @@ exit 1
 				...process.env,
 				PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
 				CRABBOX_FAKE_GPG_LOG: log,
+				CRABBOX_LINUX_NODE_MAJOR: "22",
 				CRABBOX_LINUX_APT_KEYRINGS_DIR: keyrings,
 				CRABBOX_LINUX_APT_SOURCES_DIR: sources,
 				CRABBOX_LINUX_APT_CONF_DIR: aptConf,
@@ -610,7 +611,7 @@ exit 1
 for (const repository of [
 	{
 		name: "NodeSource",
-		functionCall: "node_toolchain_ready() { return 0; }; add_nodesource",
+		functionCall: "add_nodesource",
 		keyring: "nodesource.gpg",
 		source: "nodesource.list",
 		expectedFingerprint: nodesourceSigningKeyFingerprint,
@@ -664,6 +665,7 @@ printf 'unexpected-key\n'
 					PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
 					CRABBOX_FAKE_GPG_FINGERPRINT: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 					CRABBOX_FAKE_GPG_LOG: log,
+					CRABBOX_LINUX_NODE_MAJOR: "22",
 					CRABBOX_LINUX_APT_KEYRINGS_DIR: keyrings,
 					CRABBOX_LINUX_APT_SOURCES_DIR: sources,
 					CRABBOX_LINUX_OS_RELEASE_FILE: osRelease,
@@ -723,6 +725,7 @@ printf 'reviewed-key\n'
 					...process.env,
 					PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
 					CRABBOX_FAKE_GPG_LOG: log,
+					CRABBOX_LINUX_NODE_MAJOR: "22",
 					CRABBOX_LINUX_APT_KEYRINGS_DIR: keyrings,
 					CRABBOX_LINUX_APT_SOURCES_DIR: sources,
 					CRABBOX_LINUX_OS_RELEASE_FILE: osRelease,

@@ -21,6 +21,10 @@ sudo_preserve_env="CRABBOX_LINUX_PNPM_VERSION,CRABBOX_LINUX_NODE_MAJOR,CRABBOX_L
 nodesource_signing_key_fingerprint="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
 docker_signing_key_fingerprint="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 google_linux_signing_key_fingerprint="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
+public_toolchain_archive_dir="/opt/crabbox/toolchain-archives"
+node_toolcache_root="/opt/hostedtoolcache"
+node_link_dir="/usr/local/bin"
+pinned_node_version="24.19.0"
 
 log() {
   printf 'linux-tools: %s\n' "$*" >&2
@@ -112,17 +116,14 @@ docker_packages_installed() {
   return 0
 }
 
-node_toolchain_ready() {
-  command -v node >/dev/null 2>&1 &&
-    node --version | grep -q "^v${node_major}\\." &&
-    command -v npm >/dev/null 2>&1 &&
-    command -v corepack >/dev/null 2>&1
+pinned_node_supported() {
+  [[ "$node_major" == "24" && "$(dpkg --print-architecture)" == "amd64" ]]
 }
 
 add_nodesource() {
   local source="$apt_sources_dir/nodesource.list"
   local source_tmp
-  if node_toolchain_ready && [[ ! -e "$source" ]]; then
+  if pinned_node_supported; then
     return 0
   fi
   install -d -m 0755 "$apt_sources_dir"
@@ -230,13 +231,328 @@ EOF
   fi
 }
 
+toolchain_archive_spec() {
+  # Digests bind upstream bytes, not a mutable installation or Corepack metadata.
+  case "$1" in
+    node-v24.19.0-linux-x64.tar.xz)
+      printf '%s\n' "sha256 14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647 https://nodejs.org/dist/v24.19.0/$1" ;;
+    pnpm-11.22.0.tgz)
+      printf '%s\n' "sha512 1ff870c4c6133dfd88fb2afc46dd13d47f09c9794b438c6fdb47ca98caf3bc16381ee0be93a091b8e3824cf01f889f46d7d9e20910fb0be1ab0fb5baa80dd621 https://registry.npmjs.org/pnpm/-/$1" ;;
+    pnpm-12.3.4.tgz)
+      printf '%s\n' "sha512 961aa41fb077da3a04a441d9f8e15ebc0c96da8ef710b2eb67bf9ee7cb0610eabd48f1fd85f51cffe73846785fa0f87c56a3a872a1d893f8446741b5cce45457 https://registry.npmjs.org/pnpm/-/$1" ;;
+    exe.linux-x64-12.3.4.tgz)
+      printf '%s\n' "sha512 d99a8e9523e47f05f5879711f853e259ff3e17eda1653ff74ef8542b9b22807ab06900888aaf11ec21b186774ab3adc9b5c2e2d9ad50a68fb05ff128c9f8f225 https://registry.npmjs.org/@pnpm/exe.linux-x64/-/$1" ;;
+    *) log "no reviewed public toolchain archive: $1"; return 1 ;;
+  esac
+}
+
+verify_toolchain_archive() {
+  python3 - "$@" <<'PY'
+import hashlib
+import sys
+
+algorithm, expected, filename = sys.argv[1:]
+digest = hashlib.new(algorithm)
+with open(filename, "rb") as archive:
+    for block in iter(lambda: archive.read(1024 * 1024), b""):
+        digest.update(block)
+if digest.hexdigest() != expected:
+    sys.exit("public toolchain archive checksum mismatch: " + filename)
+PY
+}
+
+stage_toolchain_archive() {
+  local name="$1" staging="$2" allow_download="${3:-0}"
+  local algorithm expected url
+  read -r algorithm expected url <<<"$(toolchain_archive_spec "$name")"
+  [[ -n "$expected" ]] || return 1
+  # Hash the private copy that will be extracted; never execute a cached tree.
+  if [[ -f "$public_toolchain_archive_dir/$name" && ! -L "$public_toolchain_archive_dir/$name" ]] &&
+    cp "$public_toolchain_archive_dir/$name" "$staging/$name" &&
+    verify_toolchain_archive "$algorithm" "$expected" "$staging/$name"; then
+    return 0
+  fi
+  rm -f "$staging/$name"
+  if [[ "$allow_download" != "1" ]]; then
+    log "verified public toolchain archive unavailable offline: $name"
+    return 1
+  fi
+  curl -q --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 300 \
+    --output "$staging/$name" "$url" &&
+    verify_toolchain_archive "$algorithm" "$expected" "$staging/$name"
+}
+
+cache_public_toolchain_archives() (
+  set -euo pipefail
+  umask 077
+  local staging name pending
+  staging="$(mktemp -d)"
+  # Bind paths now: Bash can unwind function locals before an EXIT trap on failure.
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  [[ ! -L "$public_toolchain_archive_dir" ]] || return 1
+  install -d -m 0755 "$public_toolchain_archive_dir"
+  for name in node-v24.19.0-linux-x64.tar.xz pnpm-11.22.0.tgz pnpm-12.3.4.tgz exe.linux-x64-12.3.4.tgz; do
+    stage_toolchain_archive "$name" "$staging" 1
+    pending="$(mktemp "$public_toolchain_archive_dir/.archive.XXXXXX")"
+    # shellcheck disable=SC2064
+    trap "$(printf 'rm -rf -- %q %q' "$staging" "$pending")" EXIT
+    install -m 0644 "$staging/$name" "$pending"
+    python3 - "$pending" "$public_toolchain_archive_dir/$name" <<'PY'
+import os
+import sys
+os.replace(sys.argv[1], sys.argv[2])
+PY
+  done
+)
+
+seed_offline_pnpm() {
+  local version="$1" staging="$2" corepack_home="$3"
+  local destination="$corepack_home/v1/pnpm/$version" algorithm digest url
+  read -r algorithm digest url <<<"$(toolchain_archive_spec "pnpm-$version.tgz")"
+  [[ -n "$digest" ]] || return 1
+  [[ ! -e "$destination" && ! -L "$destination" ]] || return 1
+  stage_toolchain_archive "pnpm-$version.tgz" "$staging" || return 1
+  mkdir -p "$destination" || return 1
+  tar --no-same-owner -xzf "$staging/pnpm-$version.tgz" -C "$destination" --strip-components=1 || return 1
+  if [[ "$version" == "12.3.4" ]]; then
+    stage_toolchain_archive exe.linux-x64-12.3.4.tgz "$staging" || return 1
+    mkdir "$staging/native" || return 1
+    tar --no-same-owner -xzf "$staging/exe.linux-x64-12.3.4.tgz" -C "$staging/native" || return 1
+    install -m 0755 "$staging/native/package/pnpm" "$destination/pnpm-native" || return 1
+  fi
+  # Corepack 0.35.0 does not authenticate cache hits or `install -g <pack.tgz>`.
+  # Create its metadata only in a fresh tree extracted from independently pinned bytes.
+  python3 - "$destination/.corepack" "$version" "$digest" <<'PY'
+import json
+import sys
+filename, version, digest = sys.argv[1:]
+with open(filename, "x") as metadata:
+    json.dump({
+        "locator": {"name": "pnpm", "reference": version + "+sha512." + digest},
+        "bin": {"pnpm": "./bin/pnpm.mjs", "pnpx": "./bin/pnpx.mjs"},
+        "hash": "sha512." + digest,
+    }, metadata)
+PY
+}
+
+public_tool_links() {
+  python3 - "$@" <<'PY'
+import os
+import sys
+import tempfile
+
+action, link_dir, bin_dir, *tools = sys.argv[1:]
+if action not in ("check", "publish") or not os.path.isabs(bin_dir):
+    sys.exit("invalid public tool link operation")
+
+def check(tool):
+    link = os.path.join(link_dir, tool)
+    target = os.path.join(bin_dir, tool)
+    if os.path.lexists(link) and (not os.path.islink(link) or os.readlink(link) != target):
+        sys.exit("linux-tools: public tool conflict at " + link + "; resolve before rebake")
+
+for tool in tools:
+    check(tool)
+if action == "publish":
+    # Each rename replaces one entry, never a directory's contents; not a group transaction.
+    with tempfile.TemporaryDirectory(prefix=".crabbox-tool-links-", dir=link_dir) as staging:
+        for tool in tools:
+            check(tool)
+            pending = os.path.join(staging, tool)
+            os.symlink(os.path.join(bin_dir, tool), pending)
+            os.replace(pending, os.path.join(link_dir, tool))
+PY
+}
+
+install_pinned_node() (
+  set -euo pipefail
+  umask 022
+  local staging destination node_path
+  destination="$node_toolcache_root/node/$pinned_node_version/x64"
+  public_tool_links check "$node_link_dir" "$destination/bin" node npm npx corepack pnpm pnpx || return $?
+  staging="$(mktemp -d)" || return $?
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  stage_toolchain_archive node-v24.19.0-linux-x64.tar.xz "$staging" || return $?
+  install -d -m 0755 "$(dirname "$destination")" || return $?
+  rm -f "$destination.complete" || return $?
+  mkdir "$staging/node" || return $?
+  tar --no-same-owner -xJf "$staging/node-v24.19.0-linux-x64.tar.xz" -C "$staging/node" --strip-components=1 || return $?
+  node_path="$staging/node/bin:$PATH"
+  [[ "$("$staging/node/bin/node" --version)" == "v$pinned_node_version" ]] || return 1
+  env PATH="$node_path" "$staging/node/bin/npm" --version || return $?
+  env PATH="$node_path" "$staging/node/bin/corepack" --version || return $?
+  env PATH="$node_path" "$staging/node/bin/corepack" enable --install-directory "$staging/node/bin" || return $?
+  # The image recipe owns this exact version slot. Markers never justify reusing its bytes.
+  rm -rf "$destination" || return $?
+  mv "$staging/node" "$destination" || return $?
+  install -d -m 0755 "$node_link_dir" || return $?
+  public_tool_links publish "$node_link_dir" "$destination/bin" node npm npx corepack pnpm pnpx || return $?
+  touch "$destination.complete"
+)
+
+nodesource_node_version() {
+  local arch="$1" versions package version origin extra url suite source_arch kind selected=""
+  [[ "$node_major" =~ ^[0-9]+$ ]] || return 1
+  versions="$(LC_ALL=C apt-cache madison "nodejs:$arch")" || return $?
+  while IFS='|' read -r package version origin extra; do
+    read -r package <<<"$package"
+    read -r version <<<"$version"
+    read -r url suite source_arch kind extra <<<"$origin"
+    [[ "$package" == "nodejs" || "$package" == "nodejs:$arch" ]] || continue
+    [[ "$url" == "https://deb.nodesource.com/node_$node_major.x" &&
+      "$suite" == "nodistro/main" && "$source_arch" == "$arch" &&
+      "$kind" == "Packages" && -z "$extra" ]] || continue
+    [[ "${version#*:}" == "$node_major."* ]] || continue
+    if [[ -z "$selected" ]] || dpkg --compare-versions "$version" gt "$selected"; then
+      selected="$version"
+    fi
+  done <<<"$versions"
+  [[ -n "$selected" ]] || return 1
+  printf '%s\n' "$selected"
+}
+
+install_requested_node() {
+  local arch version installed status installed_version installed_arch tool link_target
+  local package_files file node_binary="" actual_version expected_version
+  local -a retired_tools=() install_args=(install -y --no-install-recommends)
+  arch="$(dpkg --print-architecture)" || return $?
+  version="$(nodesource_node_version "$arch")" || {
+    log "no NodeSource Node $node_major package for native architecture $arch; owned links retained"
+    return 1
+  }
+  installed="$(dpkg-query -W -f='${db:Status-Status}\t${Version}\t${Architecture}\n' "nodejs:$arch" 2>/dev/null || true)"
+  read -r status installed_version installed_arch <<<"$installed"
+  if [[ "$status" == "installed" ]] && dpkg --compare-versions "$version" lt "$installed_version"; then
+    if [[ "$node_major" != "22" || "${installed_version#*:}" != "24."* || "$installed_arch" != "$arch" ]]; then
+      log "refusing Node package downgrade $installed_version to $version; only the explicit Node 24 to 22 transition is supported"
+      return 1
+    fi
+    install_args+=(--allow-downgrades)
+  fi
+  # Snapshot this installer's exact retirement set before APT can change any links.
+  for tool in node npm npx corepack pnpm pnpx; do
+    if [[ -L "$node_link_dir/$tool" ]]; then
+      link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
+      [[ "$link_target" != "$node_toolcache_root/node/24.19.0/x64/bin/$tool." ]] || retired_tools+=("$tool")
+    fi
+  done
+  if retry apt-get "${install_args[@]}" "nodejs:$arch=$version"; then
+    :
+  else
+    status=$?
+    log "NodeSource package replacement failed for nodejs:$arch=$version; owned links retained"
+    return "$status"
+  fi
+  installed="$(dpkg-query -W -f='${db:Status-Status}\t${Version}\t${Architecture}\n' "nodejs:$arch")" || {
+    log "Node package replacement verification failed; owned links retained"
+    return 1
+  }
+  read -r status installed_version installed_arch <<<"$installed"
+  if [[ "$status" != "installed" || "$installed_version" != "$version" || "$installed_arch" != "$arch" ]]; then
+    log "Node package replacement verification failed for nodejs:$arch=$version; owned links retained"
+    return 1
+  fi
+  package_files="$(dpkg-query -L "nodejs:$arch")" || return $?
+  while IFS= read -r file; do
+    if [[ "$file" == /*/bin/node ]]; then
+      [[ -z "$node_binary" ]] || { log "ambiguous package-owned Node binary; owned links retained"; return 1; }
+      node_binary="$file"
+    fi
+  done <<<"$package_files"
+  expected_version="${version#*:}"
+  expected_version="v${expected_version%%-*}"
+  if [[ ! -f "$node_binary" || -L "$node_binary" || ! -x "$node_binary" ]] ||
+    ! actual_version="$("$node_binary" --version)" || [[ "$actual_version" != "$expected_version" ]]; then
+    log "package-owned Node binary verification failed for nodejs:$arch=$version; owned links retained"
+    return 1
+  fi
+  for tool in ${retired_tools[@]+"${retired_tools[@]}"}; do
+    if [[ -L "$node_link_dir/$tool" ]]; then
+      # Preserve operator replacements, including targets with trailing newlines.
+      link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
+      if [[ "$link_target" == "$node_toolcache_root/node/24.19.0/x64/bin/$tool." ]]; then
+        rm -- "$node_link_dir/$tool" || return 1
+      fi
+    fi
+  done
+  hash -r
+}
+
 install_node_pnpm() {
-  apt_install nodejs
+  local use_pinned_node=0
+  if pinned_node_supported; then
+    use_pinned_node=1
+    public_tool_links check "$node_link_dir" "$node_toolcache_root/node/$pinned_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
+    cache_public_toolchain_archives
+    install_pinned_node || return $?
+    export PATH="$node_link_dir:$PATH"
+  else
+    if [[ "$node_major" != "24" ]]; then
+      local actual_node_version
+      install_requested_node || return $?
+      actual_node_version="$(node --version)" || {
+        log "requested Node major $node_major is unavailable; resolve PATH before preparing Corepack"
+        return 1
+      }
+      if [[ "$actual_node_version" != "v$node_major."* ]]; then
+        log "requested Node major $node_major, but node reports $actual_node_version; resolve PATH shadowing before preparing Corepack"
+        return 1
+      fi
+    else
+      # The non-x86_64 default route does not opt into any downgrade.
+      apt_install nodejs || return $?
+    fi
+  fi
   command -v npm >/dev/null
   command -v corepack >/dev/null
-  corepack enable
+  if [[ "$use_pinned_node" == "0" ]]; then
+    corepack enable
+  fi
   corepack prepare "pnpm@$pnpm_version" --activate
   command -v pnpm >/dev/null
+}
+
+offline_node_pnpm_probe() (
+  set -euo pipefail
+  umask 077
+  [[ "$(id -u)" -ne 0 ]] || { log "offline developer-tool smoke must run as a nonroot user"; return 1; }
+  local staging version corepack_home package_manager algorithm digest url
+  staging="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  stage_toolchain_archive node-v24.19.0-linux-x64.tar.xz "$staging"
+  mkdir "$staging/node" "$staging/home"
+  tar --no-same-owner -xJf "$staging/node-v24.19.0-linux-x64.tar.xz" -C "$staging/node" --strip-components=1
+  [[ "$("$staging/node/bin/node" --version)" == "v24.19.0" ]]
+  for version in 11.22.0 12.3.4; do
+    corepack_home="$staging/corepack-$version"
+    seed_offline_pnpm "$version" "$staging" "$corepack_home"
+    read -r algorithm digest url <<<"$(toolchain_archive_spec "pnpm-$version.tgz")"
+    package_manager="pnpm@$version+sha512.$digest"
+    mkdir -p "$staging/project-$version/dependency"
+    printf '{"name":"offline-smoke","version":"1.0.0","dependencies":{"smoke-dependency":"file:./dependency"}}\n' >"$staging/project-$version/package.json"
+    printf '{"name":"smoke-dependency","version":"1.0.0","main":"index.js"}\n' >"$staging/project-$version/dependency/package.json"
+    printf 'module.exports = 42;\n' >"$staging/project-$version/dependency/index.js"
+    (
+      cd "$staging/project-$version"
+      local -a offline_env=(env -i "HOME=$staging/home" "PATH=$staging/node/bin:/usr/bin:/bin"
+        "COREPACK_HOME=$corepack_home" COREPACK_ENABLE_NETWORK=0 COREPACK_DEFAULT_TO_LATEST=0
+        COREPACK_ENABLE_PROJECT_SPEC=0 COREPACK_ENV_FILE=0 CI=1)
+      [[ "$("${offline_env[@]}" corepack "$package_manager" --version)" == "$version" ]]
+      "${offline_env[@]}" corepack "$package_manager" install --offline --ignore-scripts --no-frozen-lockfile
+      "${offline_env[@]}" node -e 'if (require("smoke-dependency") !== 42) process.exit(1)'
+    )
+  done
+)
+
+node_pnpm_smoke_script() {
+  printf 'public_toolchain_archive_dir=%q\n' "$public_toolchain_archive_dir"
+  printf 'node_major=%q\n' "$node_major"
+  declare -f log pinned_node_supported toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive seed_offline_pnpm offline_node_pnpm_probe
+  # Evaluate the builder's predicate in the guest, never against the mint host.
+  printf '%s\n' 'if pinned_node_supported; then' '  offline_node_pnpm_probe' 'fi'
 }
 
 trufflehog_sha256_for_arch() {
