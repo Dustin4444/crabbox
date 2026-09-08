@@ -8,6 +8,8 @@
 - Reduce coordinator maintenance work for large lease histories by selecting bridge cleanup from live owners and existing records, and limiting pool and provisioning lookups to relevant leases. [PR 1997](https://github.com/openclaw/crabbox/pull/1997). Thanks @steipete.
 - Retry an exact coordinator lease read once on HTTP 5xx during run preparation, sharing the original deadline without replaying SSH, scripts, or permanent failures. [PR 1999](https://github.com/openclaw/crabbox/pull/1999).
 
+- Describe Cloud Run Sandbox configuration bindings once, keeping launcher/workdir defaults consistent across diagnostics and claims while preserving source precedence and operation-specific behavior. [PR 2000](https://github.com/openclaw/crabbox/pull/2000). Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights
