@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Disable the unused WSLg compositor on headless managed Windows WSL2 leases to avoid service-session crashes that stall commands and workspace-owner renewal; preserve other WSL settings and existing execution deadlines. https://github.com/openclaw/crabbox/pull/2005. Thanks @steipete.
+
 - Fix managed Windows WSL2 command timeouts by disabling redundant cloud-init discovery, verifying cold-start readiness, and allowing a target-specific status probe budget for fixed-ID orchestrators. https://github.com/openclaw/crabbox/pull/1996. Thanks @steipete.
 
 - GitHub runner tool-cache seeding: query systemd's manager environment correctly so eligible quiescent runners can reuse authenticated Node/Go copies while custom cache settings and unknown runner state still block publication. Thanks @vincentkoc.
