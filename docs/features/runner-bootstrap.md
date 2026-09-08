@@ -16,6 +16,15 @@ runtime composition. Code lives in `internal/cli/bootstrap.go` and
 Bootstrapped boxes carry no coordinator credentials. The box never calls the
 broker; the CLI connects to it directly over SSH.
 
+Managed WSL2 distributions additionally install Node/npm through the bundled
+`--node-only` entrypoint of `scripts/install-linux-developer-tools.sh`. The
+bootstrap generator reads that canonical script into both runtimes; regenerate
+with `node scripts/generate-bootstrap.mjs` after changing it, and refresh its
+input SHA-256 in `recipes/devtools/v1/linux-x86_64.json`. The default amd64
+Node version and archive verification match Linux developer images. WSL2's
+ready check requires Node and npm, but its setup omits the full developer image's
+Docker, Go, browser tools, pnpm activation, and offline pnpm archive set.
+
 ## The minimal Linux contract
 
 Brokered and direct cloud Linux runners are Ubuntu machines configured by
