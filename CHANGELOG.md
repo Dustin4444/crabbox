@@ -4,6 +4,8 @@
 
 - Fix truncated GCP lease failures by surfacing bounded API error summaries and preserving quoted JSON diagnostics with credential redaction. [PR 1984](https://github.com/openclaw/crabbox/pull/1984). Thanks @steipete.
 
+- Retain an exact-key sanitized outcome for successful, failed, and incomplete measured AWS image publications, with descriptive baseline evidence, opaque promotion binding, and rollback/cleanup state after finalization. [PR 1986](https://github.com/openclaw/crabbox/pull/1986). Thanks @vincentkoc.
+
 - Fix Azure leases blocked by retained legacy shared-infrastructure fences by verifying settled resources before transactional takeover. [PR 1982](https://github.com/openclaw/crabbox/pull/1982). Thanks @steipete.
 
 - CLI: negotiate HTTP/2 for coordinator API requests, apply the shared redirect guard to control upgrades, and avoid waiting for idle control peers during shutdown. https://github.com/openclaw/crabbox/pull/1985. Thanks @steipete.
