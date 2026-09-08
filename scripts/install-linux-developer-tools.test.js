@@ -13,6 +13,47 @@ const nodesourceSigningKeyFingerprint = "6F71F525282841EEDAF851B42F59B5F99B1BE0B
 const dockerSigningKeyFingerprint = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88";
 const googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
 
+for (const [platform, arch, major, expected] of [
+  ["Linux", "amd64", "24", true],
+  ["Linux", "amd64", "22", true],
+  ["Linux", "arm64", "24", false],
+  ["Darwin", "amd64", "24", false],
+]) {
+  test(`Go bake routing is independent of Node ${major} on ${platform}/${arch}`, (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-go-route-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        `
+source scripts/install-linux-developer-tools.sh
+uname() { printf '%s\\n' "$FIXTURE_PLATFORM"; }
+dpkg() { printf '%s\\n' "$FIXTURE_ARCH"; }
+cache_public_toolchain_archives() { printf 'archive=%s\\n' "$@"; }
+install_pinned_go() { echo go-installed; }
+install_go_toolchain
+`,
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          PATH: process.env.PATH,
+          HOME: root,
+          TMPDIR: root,
+          CRABBOX_LINUX_NODE_MAJOR: major,
+          FIXTURE_ARCH: arch,
+          FIXTURE_PLATFORM: platform,
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.includes("go-installed"), expected);
+    assert.equal(result.stdout.includes("archive=go1.27.0.linux-amd64.tar.gz"), expected);
+  });
+}
+
 test("linux developer image installs every readiness package from the generated effective builder profile", async () => {
   const { minimal, builder } = await loadRecipes();
   const source = fs.readFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), "utf8");
@@ -1021,11 +1062,17 @@ test("linux developer image keeps the existing TruffleHog binary when candidate 
 test("linux developer image reports TruffleHog from the configured install directory", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-version-"));
 	const fixture = installTruffleHogFixture(dir);
+	const goLinkDir = path.join(dir, "go-links");
 	const osRelease = path.join(dir, "os-release");
+	fs.mkdirSync(goLinkDir);
 	fs.writeFileSync(osRelease, "PRETTY_NAME='Test Linux'\n", "utf8");
 	writeExecutable(
 		path.join(fixture.targetBin, "trufflehog"),
 		"#!/usr/bin/env bash\nprintf 'trufflehog 3.95.9\\n'\n",
+	);
+	writeExecutable(
+		path.join(goLinkDir, "go"),
+		"#!/usr/bin/env bash\nprintf 'go version go1.27.0 linux/amd64\\n'\n",
 	);
 	for (const command of ["git", "gh", "jq", "rg", "fd", "python3", "node", "npm", "corepack", "pnpm", "docker"]) {
 		writeExecutable(
@@ -1033,9 +1080,18 @@ test("linux developer image reports TruffleHog from the configured install direc
 			`#!/usr/bin/env bash\nprintf '${command} test-version\\n'\n`,
 		);
 	}
+	writeExecutable(
+		path.join(fixture.bin, "uname"),
+		"#!/usr/bin/env bash\ncase \"${1:-}\" in\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\nesac\n",
+	);
 	const result = spawnSync(
 		"bash",
-		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\nprint_versions"],
+		[
+			"-c",
+			'set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ngo_link_dir="$1"\nprint_versions',
+			"bash",
+			goLinkDir,
+		],
 		{
 			cwd: repoRoot,
 			env: {
@@ -1049,6 +1105,7 @@ test("linux developer image reports TruffleHog from the configured install direc
 	);
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /go version go1\.27\.0 linux\/amd64/);
 	assert.match(result.stdout, /trufflehog 3\.95\.9/);
 });
 
