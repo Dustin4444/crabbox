@@ -6,6 +6,7 @@
 
 - Describe Scaleway configuration bindings once, sharing configured defaults while preserving explicit SDK location overrides and distinct file, environment, and flag list behavior. [PR 2036](https://github.com/openclaw/crabbox/pull/2036). Thanks @steipete.
 - Preserve recorded broker network diagnostics in inspect/status JSON, including SSH source CIDRs and AWS placement fields, without changing the resolved network mode or adding provider requests. https://github.com/openclaw/crabbox/pull/2039. Thanks @vincentkoc.
+- Allow the existing bodyless coordinator GET/HEAD curl fallback after a dial-local timeout while the request budget remains live, without replaying mutations or extending deadlines. https://github.com/openclaw/crabbox/pull/2044. Thanks @vincentkoc.
 
 - Describe Tencent Cloud configuration bindings once, preserving 64-bit sizes, raw defaults, explicit type precedence, and trusted endpoint overrides while sharing runtime fallback values. [PR 2041](https://github.com/openclaw/crabbox/pull/2041). Thanks @steipete.
 
