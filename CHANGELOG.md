@@ -9,6 +9,7 @@
 
 
 - Transfer Blacksmith run artifacts through bounded native file download instead of bulk stdout, preserving the original collection deadline and claim while isolating each invocation's evidence. [PR 2043](https://github.com/openclaw/crabbox/pull/2043). Thanks @steipete.
+- Restore omission of ignored empty and zero provider settings when updating user configuration, while preserving explicit clears and meaningful false/zero overrides. [PR 2053](https://github.com/openclaw/crabbox/pull/2053). Thanks @steipete.
 - Describe Scaleway configuration bindings once, sharing configured defaults while preserving explicit SDK location overrides and distinct file, environment, and flag list behavior. [PR 2036](https://github.com/openclaw/crabbox/pull/2036). Thanks @steipete.
 - Preserve recorded broker network diagnostics in inspect/status JSON, including SSH source CIDRs and AWS placement fields, without changing the resolved network mode or adding provider requests. https://github.com/openclaw/crabbox/pull/2039. Thanks @vincentkoc.
 - Release the exact local checkpoint reservation and return the non-submission receipt when brokered native source preparation fails before any checkpoint or image request. Preserve uncertain coordinator submissions for recovery. [PR 2042](https://github.com/openclaw/crabbox/pull/2042). Thanks @steipete.
