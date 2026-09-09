@@ -12,6 +12,8 @@ import {
   sharedWindowsFinalize,
   sharedWindowsDesktop,
   sharedMacOS,
+  sharedMacOSSSHSession,
+  sharedMacOSNodeInstall,
   sharedCodeServerInstall,
   sharedTailscalePinnedInstall,
   sharedTailscalePackageInstall,
@@ -435,7 +437,14 @@ ${setupComplete}
 }
 
 export function macOSUserData(config: LeaseConfig): string {
-  return sharedMacOS(config.sshUser, config.sshPublicKey, config.workRoot, sshPorts(config));
+  return (
+    "#!/bin/bash\nset -euo pipefail\n(\n" +
+    sharedMacOSSSHSession() +
+    ")\n(\n" +
+    sharedMacOSNodeInstall() +
+    ")\n" +
+    sharedMacOS(config.sshUser, config.sshPublicKey, config.workRoot, sshPorts(config))
+  );
 }
 
 function optionalReadyChecks(config: LeaseConfig): string {
