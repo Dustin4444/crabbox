@@ -2321,18 +2321,20 @@ sshCIDRs: [203.0.113.0/24]`), &digitalOceanFile); err != nil {
 func TestVultrConfigFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
+	var vultrFile fileVultrConfig
+	if err := yaml.Unmarshal([]byte(`region: ewr
+os: "2284"
+image: image-file
+snapshot: snapshot-file
+firewallGroup: fw-file
+vpcIds: [vpc-file-a, vpc-file-b]
+sshCIDRs: [203.0.113.0/24]
+userScheme: limited`), &vultrFile); err != nil {
+		t.Fatal(err)
+	}
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "vultr",
-		Vultr: &fileVultrConfig{
-			Region:        "ewr",
-			OS:            "2284",
-			Image:         "image-file",
-			Snapshot:      "snapshot-file",
-			FirewallGroup: "fw-file",
-			VPCIDs:        []string{"vpc-file-a", "vpc-file-b"},
-			SSHCIDRs:      []string{"203.0.113.0/24"},
-			UserScheme:    "limited",
-		},
+		Vultr:    &vultrFile,
 	})
 	if cfg.Provider != "vultr" ||
 		cfg.Vultr.Region != "ewr" ||
@@ -2467,14 +2469,16 @@ func TestLinuxProviderConnectionDefaultsPreserveExplicitValues(t *testing.T) {
 
 func TestVultrDefaultsPreserveExplicitGenericValues(t *testing.T) {
 	cfg := baseConfig()
+	var vultrFile fileVultrConfig
+	if err := yaml.Unmarshal([]byte(`region: sjc`), &vultrFile); err != nil {
+		t.Fatal(err)
+	}
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "vultr",
 		WorkRoot: "/srv/crabbox",
 		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
 		Windows:  &fileWindowsConfig{Mode: windowsModeNormal},
-		Vultr: &fileVultrConfig{
-			Region: "sjc",
-		},
+		Vultr:    &vultrFile,
 	})
 
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
@@ -12810,6 +12814,273 @@ func TestDigitalOceanBindingCoreDefaults(t *testing.T) {
 		}
 		if cfg.DigitalOcean.Image != tc.want {
 			t.Fatalf("OS=%s image=%q", tc.os, cfg.DigitalOcean.Image)
+		}
+	}
+}
+
+func TestVultrBindingSources(t *testing.T) {
+	if got := baseConfig().Vultr; !reflect.DeepEqual(got, VultrConfig{}) {
+		t.Fatalf("raw=%#v", got)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"missing", "null", "empty", "equal", "padded", "custom"} {
+			cfg := baseConfig()
+			cfg.Vultr = VultrConfig{Region: "prior", OS: "prior", Image: "prior", Snapshot: "prior", FirewallGroup: "prior", UserScheme: "prior"}
+			want := cfg.Vultr
+			fields := map[string]any{}
+			accepted := mode == "equal" || mode == "padded" || mode == "custom"
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"region", &want.Region}, {"os", &want.OS}, {"image", &want.Image}, {"snapshot", &want.Snapshot}, {"firewallGroup", &want.FirewallGroup}, {"userScheme", &want.UserScheme}} {
+				switch mode {
+				case "null":
+					fields[f.key] = nil
+				case "empty":
+					fields[f.key] = ""
+				case "equal":
+					fields[f.key] = "prior"
+				case "padded":
+					fields[f.key] = "  "
+				case "custom":
+					fields[f.key] = "fixture"
+				}
+				if accepted {
+					*f.v = fields[f.key].(string)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"vultr": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Vultr, want) {
+				t.Fatalf("file trusted=%t mode=%s got=%#v want=%#v", trusted, mode, cfg.Vultr, want)
+			}
+		}
+	}
+	for _, raw := range []string{"", "prior", "  ", "fixture"} {
+		t.Run("env-"+raw, func(t *testing.T) {
+			for _, key := range []string{"REGION", "OS", "IMAGE", "SNAPSHOT", "FIREWALL_GROUP", "USER_SCHEME"} {
+				t.Setenv("CRABBOX_VULTR_"+key, raw)
+			}
+			cfg := baseConfig()
+			cfg.Vultr = VultrConfig{Region: "prior", OS: "prior", Image: "prior", Snapshot: "prior", FirewallGroup: "prior", UserScheme: "prior"}
+			v := raw
+			if v == "" {
+				v = "prior"
+			}
+			want := VultrConfig{Region: v, OS: v, Image: v, Snapshot: v, FirewallGroup: v, UserScheme: v}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Vultr, want) {
+				t.Fatalf("env=%#v want=%#v", cfg.Vultr, want)
+			}
+		})
+	}
+}
+
+func TestVultrBindingLists(t *testing.T) {
+	for _, field := range []struct{ key, member, env string }{{"vpcIds", "VPCIDs", "CRABBOX_VULTR_VPC_IDS"}, {"sshCIDRs", "SSHCIDRs", "CRABBOX_VULTR_SSH_CIDRS"}} {
+		for _, trusted := range []bool{false, true} {
+			for _, mode := range []string{"missing", "null", "empty", "raw"} {
+				fields := map[string]any{}
+				switch mode {
+				case "null":
+					fields[field.key] = nil
+				case "empty":
+					fields[field.key] = []string{}
+				case "raw":
+					fields[field.key] = []string{" fixture ", "", "fixture", "fixture"}
+				}
+				data, err := yaml.Marshal(map[string]any{"vultr": fields})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal(data, &file); err != nil {
+					t.Fatal(err)
+				}
+				cfg := baseConfig()
+				dest := reflect.ValueOf(&cfg.Vultr).Elem().FieldByName(field.member)
+				dest.Set(reflect.ValueOf([]string{"prior"}))
+				prior := dest.Pointer()
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if mode != "raw" {
+					if !reflect.DeepEqual(dest.Interface(), []string{"prior"}) || dest.Pointer() != prior {
+						t.Fatal("ignored list changed")
+					}
+				} else {
+					if !reflect.DeepEqual(dest.Interface(), []string{" fixture ", "", "fixture", "fixture"}) {
+						t.Fatalf("raw list=%#v", dest.Interface())
+					}
+					v := reflect.ValueOf(file.Vultr).Elem().FieldByName(field.member)
+					if v.Kind() == reflect.Pointer {
+						v = v.Elem()
+					}
+					if dest.Pointer() != v.Pointer() {
+						t.Fatal("list backing not shared")
+					}
+				}
+			}
+		}
+		for _, tc := range []struct {
+			raw  string
+			want []string
+		}{{"", nil}, {" , , ", []string{}}, {"none", []string{"none"}}, {" a, , b,a ", []string{"a", "b", "a"}}} {
+			t.Run(field.key+tc.raw, func(t *testing.T) {
+				t.Setenv(field.env, tc.raw)
+				cfg := baseConfig()
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				got := reflect.ValueOf(cfg.Vultr).FieldByName(field.member).Interface()
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("env list=%#v want=%#v", got, tc.want)
+				}
+				if tc.raw == "" {
+					reflect.ValueOf(&cfg.Vultr).Elem().FieldByName(field.member).Set(reflect.ValueOf([]string{"prior"}))
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(reflect.ValueOf(cfg.Vultr).FieldByName(field.member).Interface(), []string{"prior"}) {
+						t.Fatal("empty env changed prior")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestVultrBindingCoreDefaults(t *testing.T) {
+	for _, raw := range []string{"", "  ", "custom"} {
+		cfg := baseConfig()
+		cfg.Provider = "vultr"
+		cfg.Vultr.Region = raw
+		cfg.Vultr.UserScheme = raw
+		cfg.Location = "generic"
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		r, u := raw, raw
+		if raw == "" {
+			r = "ewr"
+			u = "root"
+		}
+		if cfg.Vultr.Region != r || cfg.Vultr.UserScheme != u || cfg.Vultr.OS != "" || cfg.Vultr.Image != "" || cfg.Vultr.Snapshot != "" {
+			t.Fatalf("defaults=%#v", cfg.Vultr)
+		}
+	}
+}
+
+func TestVultrRuntimeTransformCore(t *testing.T) {
+	for _, region := range []string{"", "custom-region", "  "} {
+		for _, scheme := range []string{"", "custom-scheme", "  ", "limited", "LIMITED", " limited "} {
+			for _, lists := range []string{"nil", "empty", "shared"} {
+				for _, explicit := range []bool{false, true} {
+					cfg := baseConfig()
+					cfg.Provider = "vultr"
+					cfg.Location = "generic-region"
+					cfg.Class = "standard"
+					cfg.Vultr = VultrConfig{Region: region, UserScheme: scheme, OS: "raw-os", Image: "raw-image", Snapshot: "raw-snapshot", FirewallGroup: "raw-group"}
+					switch lists {
+					case "empty":
+						cfg.Vultr.VPCIDs = []string{}
+						cfg.Vultr.SSHCIDRs = []string{}
+					case "shared":
+						cfg.Vultr.VPCIDs = []string{"vpc-a", "vpc-a"}
+						cfg.Vultr.SSHCIDRs = []string{" 192.0.2.0/24 ", ""}
+					}
+					before := cfg.Vultr
+					want := before
+					if region == "" {
+						want.Region = "ewr"
+					}
+					if scheme == "" {
+						want.UserScheme = "root"
+					}
+					user, port, root := "root", "22", "/work/crabbox"
+					if explicit {
+						user, port, root = "alice", "2200", "/srv/project"
+						cfg.SSHUser = user
+						cfg.SSHPort = port
+						cfg.WorkRoot = root
+						MarkSSHUserExplicit(&cfg)
+						MarkSSHPortExplicit(&cfg)
+						MarkWorkRootExplicit(&cfg)
+					}
+					if err := applyProviderConfigDefaults(&cfg); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(cfg.Vultr, want) {
+						t.Fatalf("region=%q scheme=%q lists=%s got=%#v want=%#v", region, scheme, lists, cfg.Vultr, want)
+					}
+					if reflect.ValueOf(cfg.Vultr.VPCIDs).Pointer() != reflect.ValueOf(before.VPCIDs).Pointer() || reflect.ValueOf(cfg.Vultr.SSHCIDRs).Pointer() != reflect.ValueOf(before.SSHCIDRs).Pointer() {
+						t.Fatal("core changed slice backing")
+					}
+					if cfg.SSHUser != user || cfg.SSHPort != port || cfg.WorkRoot != root || cfg.Class != "standard" || cfg.Location != "generic-region" || cfg.TargetOS != targetLinux || cfg.SSHFallbackPorts != nil {
+						t.Fatalf("generic effects user=%q port=%q root=%q class=%q location=%q target=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.Class, cfg.Location, cfg.TargetOS)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestVultrWithRuntimeDefaults(t *testing.T) {
+	for _, tc := range []struct{ region, scheme, wantRegion, wantScheme string }{
+		{"", "", "ewr", "root"},
+		{"custom-region", "custom-scheme", "custom-region", "custom-scheme"},
+		{"  ", " limited ", "  ", " limited "},
+		{"", "custom-scheme", "ewr", "custom-scheme"},
+		{"custom-region", "", "custom-region", "root"},
+	} {
+		for _, listState := range []string{"nil", "empty", "populated"} {
+			input := VultrConfig{Region: tc.region, UserScheme: tc.scheme, OS: "raw-os", Image: "raw-image", Snapshot: "raw-snapshot", FirewallGroup: "raw-group"}
+			switch listState {
+			case "empty":
+				input.VPCIDs = []string{}
+				input.SSHCIDRs = []string{}
+			case "populated":
+				input.VPCIDs = []string{"vpc-a", "vpc-a"}
+				input.SSHCIDRs = []string{" 192.0.2.0/24 ", ""}
+			}
+			// Independent slice copies retain nilness and expose mutations to input storage.
+			original := input
+			if input.VPCIDs != nil {
+				original.VPCIDs = make([]string, len(input.VPCIDs))
+				copy(original.VPCIDs, input.VPCIDs)
+			}
+			if input.SSHCIDRs != nil {
+				original.SSHCIDRs = make([]string, len(input.SSHCIDRs))
+				copy(original.SSHCIDRs, input.SSHCIDRs)
+			}
+			want := original
+			want.Region = tc.wantRegion
+			want.UserScheme = tc.wantScheme
+			got := input.WithRuntimeDefaults()
+			if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(input, original) {
+				t.Fatalf("region=%q scheme=%q lists=%s got=%#v input=%#v want=%#v", tc.region, tc.scheme, listState, got, input, want)
+			}
+			if reflect.ValueOf(got.VPCIDs).Pointer() != reflect.ValueOf(input.VPCIDs).Pointer() || reflect.ValueOf(got.SSHCIDRs).Pointer() != reflect.ValueOf(input.SSHCIDRs).Pointer() {
+				t.Fatal("result must share slice backing")
+			}
+			again := got.WithRuntimeDefaults()
+			if !reflect.DeepEqual(again, want) || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(input, original) {
+				t.Fatal("runtime defaults must be idempotent without mutating receiver or slices")
+			}
+			if reflect.ValueOf(again.VPCIDs).Pointer() != reflect.ValueOf(input.VPCIDs).Pointer() || reflect.ValueOf(again.SSHCIDRs).Pointer() != reflect.ValueOf(input.SSHCIDRs).Pointer() {
+				t.Fatal("idempotent result must retain slice backing")
+			}
 		}
 	}
 }
