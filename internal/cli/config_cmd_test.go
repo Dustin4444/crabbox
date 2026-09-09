@@ -449,11 +449,11 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 func TestGeneratedFileStorageWriter(t *testing.T) {
 	for _, tc := range []struct{ name, input, want string }{
 		{"missing", "{}", "{}"},
-		{"null sections", "vultr: null\ntensorlake: null\ntencentcloud: null\nrunpod: null", "{}"},
-		{"empty sections", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}"},
-		{"null values", "vultr: {region: null, vpcIds: null}\ntensorlake: {cpus: null, memoryMB: null}\ntencentcloud: {rootGB: null}\nrunpod: {diskGB: null}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}"},
-		{"historical zero omission", "vultr: {region: '', vpcIds: [], sshCIDRs: []}\ntensorlake: {cpus: 0, memoryMB: 0}\ntencentcloud: {rootGB: 0}\nrunpod: {diskGB: 0}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}"},
-		{"raw nonzero storage", "vultr: {region: '  ', vpcIds: [' a ', a, a]}\ntensorlake: {cpus: -0.5, memoryMB: -2}\ntencentcloud: {rootGB: 4294967296}\nrunpod: {diskGB: -3}", "vultr: {region: '  ', vpcIds: [' a ', a, a]}\ntensorlake: {cpus: -0.5, memoryMB: -2}\ntencentcloud: {rootGB: 4294967296}\nrunpod: {diskGB: -3}"},
+		{"null sections", "vultr: null\ntensorlake: null\ntencentcloud: null\nrunpod: null\nlinode: null", "{}"},
+		{"empty sections", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"null values", "vultr: {region: null, vpcIds: null}\ntensorlake: {cpus: null, memoryMB: null}\ntencentcloud: {rootGB: null}\nrunpod: {diskGB: null}\nlinode: {region: null, image: null, type: null, firewall: null, sshCIDRs: null}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"historical zero omission", "vultr: {region: '', vpcIds: [], sshCIDRs: []}\ntensorlake: {cpus: 0, memoryMB: 0}\ntencentcloud: {rootGB: 0}\nrunpod: {diskGB: 0}\nlinode: {region: '', image: '', type: '', firewall: '', sshCIDRs: []}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"raw nonzero storage", "vultr: {region: '  ', vpcIds: [' a ', a, a]}\ntensorlake: {cpus: -0.5, memoryMB: -2}\ntencentcloud: {rootGB: 4294967296}\nrunpod: {diskGB: -3}\nlinode: {region: '  ', image: image-example, type: type-example, firewall: firewall-example, sshCIDRs: [' 192.0.2.0/24 ', 192.0.2.0/24, 192.0.2.0/24]}", "vultr: {region: '  ', vpcIds: [' a ', a, a]}\ntensorlake: {cpus: -0.5, memoryMB: -2}\ntencentcloud: {rootGB: 4294967296}\nrunpod: {diskGB: -3}\nlinode: {region: '  ', image: image-example, type: type-example, firewall: firewall-example, sshCIDRs: [' 192.0.2.0/24 ', 192.0.2.0/24, 192.0.2.0/24]}"},
 		{"negative int64 retained", "tencentcloud: {rootGB: -4}", "tencentcloud: {rootGB: -4}"},
 		{"intentional presence and clear", "blaxel: {execTimeoutSecs: 0, forgetMissing: false}\nanthropicSandboxRuntime: {settings: '', debug: false}\nmodal: {secrets: []}", "blaxel: {execTimeoutSecs: 0, forgetMissing: false}\nanthropicSandboxRuntime: {settings: '', debug: false}\nmodal: {secrets: []}"},
 	} {
@@ -489,7 +489,7 @@ func TestGeneratedFileStorageWriter(t *testing.T) {
 
 func TestGeneratedFileStorageSetBroker(t *testing.T) {
 	path := isolatedConfigPath(t)
-	if err := os.WriteFile(path, []byte("vultr: {region: '', vpcIds: []}\nmodal: {secrets: []}\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("vultr: {region: '', vpcIds: []}\nlinode: {region: '', image: '', type: '', firewall: '', sshCIDRs: []}\nmodal: {secrets: []}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
@@ -506,6 +506,9 @@ func TestGeneratedFileStorageSetBroker(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got["vultr"], map[string]any{}) {
 		t.Errorf("vultr storage = %#v, want empty mapping", got["vultr"])
+	}
+	if !reflect.DeepEqual(got["linode"], map[string]any{}) {
+		t.Errorf("linode storage = %#v, want empty mapping", got["linode"])
 	}
 	if !reflect.DeepEqual(got["modal"], map[string]any{"secrets": []any{}}) {
 		t.Errorf("modal clear lost: %#v", got["modal"])
