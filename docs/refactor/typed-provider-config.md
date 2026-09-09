@@ -2,7 +2,9 @@
 
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
-runner, Cloudflare Sandbox, E2B, Blaxel, and Azure Dynamic Sessions describe their mechanical config bindings
+runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
+and Tensorlake
+describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
 `internal/cli/config_opensandbox.go`,
@@ -11,7 +13,9 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_fastapi_cloud.go`, `internal/cli/config_railway.go`,
 `internal/cli/config_upstash_box.go`, `internal/cli/config_cloudflare.go`,
 `internal/cli/config_cloudflare_sandbox.go`, `internal/cli/config_e2b.go`,
-`internal/cli/config_blaxel.go`, and `internal/cli/config_azure_dynamic_sessions.go`.
+`internal/cli/config_blaxel.go`, `internal/cli/config_azure_dynamic_sessions.go`,
+`internal/cli/config_smolvm.go`, `internal/cli/config_semaphore.go`, and
+`internal/cli/config_tensorlake.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -71,16 +75,32 @@ machine-specific paths. Its header identifies the generator and source file.
    source, `int`, and the existing nonnegative policy; empty or unknown modes are
    rejected. File/default checks stay nonnegative, flags remain deferred, and
    malformed environment input keeps the previous value while parsed negatives
-   reach the existing later validator. No parser function is supplied by the tag.
+   retain each provider's existing later handling. No parser function is supplied
+   by the tag.
    An existing positive-only integer file binding can opt into
    `fileInt:"positive"`: only a present value greater than zero assigns;
    omitted/null/zero/negative input is ignored. It requires an int with file
    admission and the existing nonnegative default policy. This fixed predicate
    changes no environment or flag behavior and accepts no custom expressions.
-   A string field may name one existing fallback environment variable with
-   `envAlias`; primary and alias names share collision checks. Empty aliases
-   are invalid. The primary value wins, then the alias, then the prior value;
-   empty values fall through, without trimming nonempty values.
+   A file-admitted `float64` with the same existing positive-only YAML rule can
+   use `fileFloat:"positive"`. It emits the literal greater-than-zero predicate
+   without changing float parsing or adding finite/range validation to file or
+   environment input. Float default validation remains separate; `fileInt` and
+   the int-only nonnegative policy do not become float policies.
+   A string field may name an existing fallback environment variable with
+   `envAlias`, and a second with `envAlias2` only when the first is present.
+   All names share collision checks; empty aliases, non-string fields, and
+   fields without environment admission are rejected. The primary value wins,
+   then the first alias, then the second, then the prior value. Empty values
+   fall through without trimming nonempty values. No arbitrary alias list or
+   custom parser is accepted.
+   A flag-admitted string with an existing raw-empty registration fallback can
+   declare `flagFallback:"value"` instead of a `default` tag. The value must be
+   nonempty. Its generated constant supplies only the flag's raw-empty fallback;
+   the base config stays zero, whitespace is preserved, unvisited flags do not
+   assign, and explicitly empty flags still clear. Runtime consumers may use
+   the same constant through their existing fallback logic. No expression,
+   trimming mode, or duration parser is generated.
    For an existing string file binding that ignores empty YAML values, declare
    `fileIgnoreEmpty:"true"`. This is valid only for strings with a file source;
    it adds an exact nonempty check without trimming, changing environment/flag
@@ -100,7 +120,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -294,6 +314,27 @@ TTL-positive, final-default timeout chain. Endpoint reports and central visits
 retain core provenance policy. API version and workdir share their Go defaults;
 Azure routing, native authentication and session behavior stay with their
 existing owners.
+
+SmolVM declares all eight fields, including its environment-only three-name key
+chain. CPU and memory retain positive-only file admission and tolerant environment
+parsing; explicit flags and validation order remain separate. Endpoint input
+reports and central flag visits retain existing provenance ownership. Its six
+configured fallback consumers share constants, while raw-empty network behavior,
+fixed mount/upload roots, endpoint trust, and lifecycle remain unchanged.
+
+Semaphore declares all six string fields without filling its raw empty defaults.
+Machine, OS image, and idle timeout share three fallback constants across flag
+registration and their existing acquisition, display, and duration helpers.
+Host/token reports and central host visits preserve source policy; token has no
+flag. Host/project validation, job identity, SSH, and lifecycle stay outside the
+generator.
+
+Tensorlake declares all fourteen fields, including positive-only YAML CPU floats
+and three positive-only file integers with tolerant environment parsing. API-key
+and API-URL input reports and central URL flag visits retain their existing
+ownership. Three configured fallback consumers share constants; native namespace
+pinning, omitted image/snapshot/nonpositive sizing, native CLI identity checks,
+and lifecycle remain separate.
 
 The generator accepts only these seven exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -6084,6 +6085,275 @@ func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
 	}
 }
 
+func TestSemaphoreRawDefaultsAndFileAcceptance(t *testing.T) {
+	if got := baseConfig().Semaphore; got != (SemaphoreConfig{}) {
+		t.Fatal("raw Semaphore defaults must remain empty")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace"} {
+			cfg := baseConfig()
+			cfg.Semaphore = SemaphoreConfig{Host: "example.semaphoreci.com", Token: "inert", Project: "project", Machine: "machine", OSImage: "image", IdleTimeout: "10m"}
+			cfg.credentialProvenance.semaphoreHost, cfg.credentialProvenance.semaphoreToken = credentialSourceFlag, credentialSourceFlag
+			want := cfg.Semaphore
+			source := credentialSourceFlag
+			fields := map[string]any{}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"host", &want.Host}, {"token", &want.Token}, {"project", &want.Project}, {"machine", &want.Machine}, {"osImage", &want.OSImage}, {"idleTimeout", &want.IdleTimeout}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+					*f.v = "  "
+				}
+				fields[f.key] = raw
+			}
+			if mode == "equal" || mode == "whitespace" {
+				source = credentialSourceForFile(trusted)
+			}
+			data, err := yaml.Marshal(map[string]any{"semaphore": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Semaphore != want || cfg.credentialProvenance.semaphoreHost != source || cfg.credentialProvenance.semaphoreToken != source {
+				t.Fatalf("file mode=%s trusted=%t", mode, trusted)
+			}
+		}
+	}
+}
+
+func TestSemaphoreRawEnvironmentAliasAndSource(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "equal", "whitespace", "HOST", "TOKEN"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Semaphore = SemaphoreConfig{Host: "prior.semaphoreci.com", Token: "inert", Project: "project", Machine: "machine", OSImage: "image", IdleTimeout: "10m"}
+		cfg.credentialProvenance.semaphoreHost, cfg.credentialProvenance.semaphoreToken = credentialSourceFlag, credentialSourceFlag
+		want := cfg.Semaphore
+		accepted := map[string]bool{}
+		for _, f := range []struct {
+			suffix, alias string
+			v             *string
+		}{{"HOST", "SEMAPHORE_HOST", &want.Host}, {"TOKEN", "SEMAPHORE_API_TOKEN", &want.Token}, {"PROJECT", "SEMAPHORE_PROJECT", &want.Project}, {"MACHINE", "", &want.Machine}, {"OS_IMAGE", "", &want.OSImage}, {"IDLE_TIMEOUT", "", &want.IdleTimeout}} {
+			primary, alias := *f.v+"-primary", *f.v+"-alias"
+			if mode == "equal" {
+				primary = *f.v
+			}
+			if mode == "whitespace" {
+				primary = "  "
+			}
+			allow := mode != "empty" && (!(mode == "HOST" || mode == "TOKEN") || mode == f.suffix)
+			if mode == "alias" {
+				primary = ""
+				allow = f.alias != ""
+			}
+			if !allow {
+				primary, alias = "", ""
+			} else if primary != "" {
+				*f.v = primary
+			} else {
+				*f.v = alias
+			}
+			accepted[f.suffix] = allow
+			t.Setenv("CRABBOX_SEMAPHORE_"+f.suffix, primary)
+			if f.alias != "" {
+				t.Setenv(f.alias, alias)
+			}
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		host, token := credentialSourceFlag, credentialSourceFlag
+		if accepted["HOST"] {
+			host = credentialSourceEnvironment
+		}
+		if accepted["TOKEN"] {
+			token = credentialSourceEnvironment
+		}
+		if cfg.Semaphore != want || cfg.credentialProvenance.semaphoreHost != host || cfg.credentialProvenance.semaphoreToken != token {
+			t.Fatalf("env mode=%s", mode)
+		}
+	}
+}
+
+func TestSmolvmFilePresenceAndPositiveIntegers(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileSmolvmConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("API key YAML source introduced")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace"} {
+			for _, integer := range []any{nil, 0, -1, 7} {
+				cfg := baseConfig()
+				cfg.Smolvm = SmolvmConfig{APIKey: "inert", BaseURL: "https://example.invalid/api", Image: "image", Workdir: "/workspace/app", CPUs: 3, MemoryMB: 100, Network: "open", Keep: true}
+				cfg.credentialProvenance.smolvmBaseURL = credentialSourceFlag
+				cfg.credentialProvenance.smolvmAPIKey = credentialSourceFlag
+				want := cfg.Smolvm
+				source := credentialSourceFlag
+				fields := map[string]any{"apiKey": "ignored-inert"}
+				for _, f := range []struct {
+					key string
+					v   *string
+				}{{"baseUrl", &want.BaseURL}, {"image", &want.Image}, {"workdir", &want.Workdir}, {"network", &want.Network}} {
+					if mode == "omitted" {
+						continue
+					}
+					var value any = *f.v
+					if mode == "null" {
+						value = nil
+					}
+					if mode == "empty" {
+						value = ""
+					}
+					if mode == "whitespace" {
+						value = "  "
+						*f.v = "  "
+					}
+					fields[f.key] = value
+				}
+				if mode == "equal" || mode == "whitespace" {
+					source = credentialSourceForFile(trusted)
+				}
+				fields["cpus"], fields["memoryMB"] = integer, integer
+				if v, ok := integer.(int); ok && v > 0 {
+					want.CPUs, want.MemoryMB = v, v
+				}
+				if mode == "null" {
+					fields["keep"] = nil
+				} else if mode != "omitted" {
+					fields["keep"] = false
+					want.Keep = false
+				}
+				data, err := yaml.Marshal(map[string]any{"smolvm": fields})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal(data, &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.Smolvm != want || cfg.credentialProvenance.smolvmBaseURL != source || cfg.credentialProvenance.smolvmAPIKey != credentialSourceFlag {
+					t.Fatalf("file mode=%s integer=%v trusted=%t", mode, integer, trusted)
+				}
+			}
+		}
+	}
+}
+
+func TestSmolvmThreeNameKeyAndAcceptance(t *testing.T) {
+	for _, tc := range []struct {
+		primary, alias, alias2, want string
+		accepted                     bool
+	}{{"primary", "alias", "third", "primary", true}, {"", "alias", "third", "alias", true}, {"", "", "third", "third", true}, {"", "", "", "prior", false}, {"  ", "alias", "third", "  ", true}, {"", "  ", "third", "  ", true}, {"prior", "alias", "third", "prior", true}, {"", "", "  ", "  ", true}} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Smolvm.APIKey = "prior"
+		cfg.credentialProvenance.smolvmAPIKey = credentialSourceTrustedFile
+		cfg.credentialProvenance.smolvmBaseURL = credentialSourceTrustedFile
+		t.Setenv("CRABBOX_SMOLVM_API_KEY", tc.primary)
+		t.Setenv("SMOLMACHINES_API_KEY", tc.alias)
+		t.Setenv("SMK_API_KEY", tc.alias2)
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		source := credentialSourceTrustedFile
+		if tc.accepted {
+			source = credentialSourceEnvironment
+		}
+		if cfg.Smolvm.APIKey != tc.want || cfg.credentialProvenance.smolvmAPIKey != source || cfg.credentialProvenance.smolvmBaseURL != credentialSourceTrustedFile {
+			t.Fatal("three-name raw key acceptance changed")
+		}
+	}
+}
+
+func TestSmolvmEnvironmentIntegerAndStringSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{{"", 12}, {"invalid", 12}, {" 17 ", 12}, {"9999999999999999999999999", 12}, {"0", 0}, {"-1", -1}, {"17", 17}} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Smolvm.CPUs, cfg.Smolvm.MemoryMB = 12, 12
+		cfg.Smolvm.Keep = true
+		t.Setenv("CRABBOX_SMOLVM_CPUS", tc.raw)
+		t.Setenv("CRABBOX_SMOLVM_MEMORY_MB", tc.raw)
+		t.Setenv("CRABBOX_SMOLVM_NETWORK", "blocked")
+		t.Setenv("CRABBOX_SMOLVM_KEEP", "false")
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Smolvm.CPUs != tc.want || cfg.Smolvm.MemoryMB != tc.want || cfg.Smolvm.Network != "blocked" || cfg.Smolvm.Keep {
+			t.Fatalf("tolerant integer/continuation=%q", tc.raw)
+		}
+	}
+	for _, mode := range []string{"empty", "equal", "whitespace", "changed"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Smolvm = SmolvmConfig{BaseURL: "https://example.invalid/api", Image: "image", Workdir: "/workspace/app", Network: "open", Keep: true}
+		cfg.credentialProvenance.smolvmBaseURL = credentialSourceFlag
+		cfg.credentialProvenance.smolvmAPIKey = credentialSourceTrustedFile
+		want := cfg.Smolvm
+		for _, f := range []struct {
+			suffix string
+			v      *string
+		}{{"BASE_URL", &want.BaseURL}, {"IMAGE", &want.Image}, {"WORKDIR", &want.Workdir}, {"NETWORK", &want.Network}} {
+			raw := *f.v
+			if mode == "empty" {
+				raw = ""
+			}
+			if mode == "whitespace" {
+				raw = "  "
+				*f.v = raw
+			}
+			if mode == "changed" {
+				raw += "-new"
+				*f.v = raw
+			}
+			t.Setenv("CRABBOX_SMOLVM_"+f.suffix, raw)
+		}
+		t.Setenv("CRABBOX_SMOLVM_KEEP", "invalid")
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		source := credentialSourceEnvironment
+		if mode == "empty" {
+			source = credentialSourceFlag
+		}
+		if cfg.Smolvm != want || cfg.credentialProvenance.smolvmBaseURL != source || cfg.credentialProvenance.smolvmAPIKey != credentialSourceTrustedFile {
+			t.Fatalf("string/boolean fallback mode=%s", mode)
+		}
+	}
+	for _, prior := range []bool{false, true} {
+		clearConfigEnv(t)
+		t.Setenv("CRABBOX_SMOLVM_KEEP", "invalid")
+		cfg := baseConfig()
+		cfg.Smolvm.Keep = prior
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Smolvm.Keep != prior {
+			t.Fatal("malformed boolean changed preceding value")
+		}
+	}
+}
+
 func TestSmolvmConfigYAMLOverrides(t *testing.T) {
 	cfg := baseConfig()
 	var file fileConfig
@@ -9834,5 +10104,217 @@ func TestCodeSandboxIntegerOverlayErrorOrder(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestTensorlakeConfigFileContract(t *testing.T) {
+	if got, want := baseConfig().Tensorlake, (TensorlakeConfig{APIURL: "https://api.tensorlake.ai", CLIPath: "tensorlake", Workdir: "/workspace/crabbox", CPUs: 1, MemoryMB: 1024, DiskMB: 10240}); got != want {
+		t.Fatalf("defaults=%#v want %#v", got, want)
+	}
+	if _, ok := reflect.TypeOf(fileTensorlakeConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("APIKey must remain env-only")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace"} {
+			cfg := baseConfig()
+			cfg.Tensorlake.APIKey = "inert"
+			cfg.Tensorlake.Image = "prior-image"
+			cfg.Tensorlake.Snapshot = "prior-snapshot"
+			cfg.Tensorlake.OrganizationID = "prior-org"
+			cfg.Tensorlake.ProjectID = "prior-project"
+			cfg.Tensorlake.Namespace = "prior-namespace"
+			cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceFlag
+			cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceFlag
+			want := cfg.Tensorlake
+			source := credentialSourceFlag
+			fields := map[string]any{"apiKey": "ignored"}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"apiUrl", &want.APIURL}, {"cliPath", &want.CLIPath}, {"image", &want.Image}, {"snapshot", &want.Snapshot}, {"organizationId", &want.OrganizationID}, {"projectId", &want.ProjectID}, {"namespace", &want.Namespace}, {"workdir", &want.Workdir}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+					*f.v = "  "
+				}
+				fields[f.key] = raw
+			}
+			if mode == "equal" || mode == "whitespace" {
+				source = credentialSourceForFile(trusted)
+			}
+			data, err := yaml.Marshal(map[string]any{"tensorlake": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Tensorlake != want || cfg.credentialProvenance.tensorlakeAPIURL != source || cfg.credentialProvenance.tensorlakeAPIKey != credentialSourceFlag {
+				t.Fatalf("mode=%s trusted=%t got=%#v", mode, trusted, cfg.Tensorlake)
+			}
+		}
+		for _, raw := range []string{"null", "0", "-2", "2"} {
+			cfg := baseConfig()
+			cfg.Tensorlake.TimeoutSecs = 45
+			cfg.Tensorlake.NoInternet = true
+			want := cfg.Tensorlake
+			want.NoInternet = false
+			if raw == "2" {
+				want.CPUs = 2
+				want.MemoryMB = 2
+				want.DiskMB = 2
+				want.TimeoutSecs = 2
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(fmt.Sprintf("tensorlake:\n  cpus: %s\n  memoryMB: %s\n  diskMB: %s\n  timeoutSecs: %s\n  noInternet: false\n", raw, raw, raw, raw)), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Tensorlake != want {
+				t.Fatalf("raw=%s got=%#v want=%#v", raw, cfg.Tensorlake, want)
+			}
+		}
+		for _, raw := range []string{"0.25", "-0.25"} {
+			cfg := baseConfig()
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("tensorlake:\n  cpus: "+raw+"\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			want := 1.0
+			if raw == "0.25" {
+				want = 0.25
+			}
+			if cfg.Tensorlake.CPUs != want {
+				t.Fatalf("fraction %s got %v", raw, cfg.Tensorlake.CPUs)
+			}
+		}
+	}
+}
+
+func TestTensorlakeConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "equal", "whitespace", "API_KEY", "API_URL"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Tensorlake.APIKey = "inert"
+		want := cfg.Tensorlake
+		cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceFlag
+		cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceFlag
+		accepted := map[string]bool{}
+		for _, f := range []struct {
+			suffix, alias string
+			v             *string
+		}{{"API_KEY", "TENSORLAKE_API_KEY", &want.APIKey}, {"API_URL", "TENSORLAKE_API_URL", &want.APIURL}, {"CLI", "", &want.CLIPath}, {"IMAGE", "", &want.Image}, {"SNAPSHOT", "", &want.Snapshot}, {"ORGANIZATION_ID", "TENSORLAKE_ORGANIZATION_ID", &want.OrganizationID}, {"PROJECT_ID", "TENSORLAKE_PROJECT_ID", &want.ProjectID}, {"NAMESPACE", "INDEXIFY_NAMESPACE", &want.Namespace}, {"WORKDIR", "", &want.Workdir}} {
+			primary, alias := "primary-value", "alias-value"
+			if mode == "equal" {
+				primary = *f.v
+			}
+			if mode == "whitespace" {
+				primary = "  "
+			}
+			allow := mode != "empty" && ((mode != "API_KEY" && mode != "API_URL") || mode == f.suffix)
+			if mode == "alias" {
+				primary = ""
+				allow = f.alias != ""
+			}
+			if !allow {
+				primary = ""
+				alias = ""
+			}
+			if primary != "" {
+				*f.v = primary
+			} else if f.alias != "" && alias != "" {
+				*f.v = alias
+			}
+			accepted[f.suffix] = primary != "" || (f.alias != "" && alias != "")
+			t.Setenv("CRABBOX_TENSORLAKE_"+f.suffix, primary)
+			if f.alias != "" {
+				t.Setenv(f.alias, alias)
+			}
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		key, url := credentialSourceFlag, credentialSourceFlag
+		if accepted["API_KEY"] {
+			key = credentialSourceEnvironment
+		}
+		if accepted["API_URL"] {
+			url = credentialSourceEnvironment
+		}
+		if cfg.Tensorlake != want || cfg.credentialProvenance.tensorlakeAPIKey != key || cfg.credentialProvenance.tensorlakeAPIURL != url {
+			t.Fatalf("mode=%s got=%#v want=%#v", mode, cfg.Tensorlake, want)
+		}
+	}
+	for _, raw := range []string{"", "invalid", "0", "-2", "3"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Tensorlake.TimeoutSecs = 45
+		cfg.Tensorlake.NoInternet = true
+		want := cfg.Tensorlake
+		for _, suffix := range []string{"CPUS", "MEMORY_MB", "DISK_MB", "TIMEOUT_SECS"} {
+			t.Setenv("CRABBOX_TENSORLAKE_"+suffix, raw)
+		}
+		if n, err := strconv.Atoi(raw); err == nil {
+			want.CPUs = float64(n)
+			want.MemoryMB = n
+			want.DiskMB = n
+			want.TimeoutSecs = n
+		}
+		t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", raw)
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if raw == "0" {
+			want.NoInternet = false
+		}
+		if cfg.Tensorlake != want {
+			t.Fatalf("raw=%s got=%#v want=%#v", raw, cfg.Tensorlake, want)
+		}
+	}
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_TENSORLAKE_CPUS", "0.25")
+	t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tensorlake.CPUs != 0.25 || cfg.Tensorlake.NoInternet {
+		t.Fatal("fractional CPU/false env lost")
+	}
+}
+
+func TestTensorlakeConfigCentralFlagSource(t *testing.T) {
+	cfg := baseConfig()
+	cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceEnvironment
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	fs.String("tensorlake-api-url", "", "")
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.tensorlakeAPIURL == credentialSourceFlag {
+		t.Fatal("unvisited URL marked")
+	}
+	if err := fs.Parse([]string{"--tensorlake-api-url="}); err != nil {
+		t.Fatal(err)
+	}
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.tensorlakeAPIURL != credentialSourceFlag || cfg.credentialProvenance.tensorlakeAPIKey != credentialSourceEnvironment {
+		t.Fatal("central source phase changed")
 	}
 }

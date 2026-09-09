@@ -448,6 +448,24 @@ func TestAzureDynamicSessionsGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestSmolvmGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_smolvm.go", "../../internal/cli/config_smolvm_generated.go", "SmolvmConfig", "smolvm", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSemaphoreGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_semaphore.go", "../../internal/cli/config_semaphore_generated.go", "SemaphoreConfig", "semaphore", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTensorlakeGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_tensorlake.go", "../../internal/cli/config_tensorlake_generated.go", "TensorlakeConfig", "tensorlake", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1148,4 +1166,246 @@ func TestFileAdmission(t *testing.T){
 `
 		runScalarFixture(t, input, output, behavior)
 	}
+}
+
+func TestSchemaSecondEnvAliasFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"missing first", `help:"Name"`, `help:"Name" envAlias2:"SECOND"`, "envAlias2 requires envAlias"},
+		{"empty first", `help:"Name"`, `help:"Name" envAlias:"" envAlias2:"SECOND"`, "invalid env binding"},
+		{"empty second", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:""`, "invalid env binding"},
+		{"invalid second", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:"ONE,TWO"`, "invalid env binding"},
+		{"whitespace second", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:" SECOND"`, "invalid env binding"},
+		{"primary collision", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:"PILOT_NAME"`, "duplicate env binding"},
+		{"first collision", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:"FIRST"`, "duplicate env binding"},
+		{"later primary", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:"PILOT_COUNT"`, "duplicate env binding"},
+		{"earlier primary", `help:"Count"`, `help:"Count" envAlias:"FIRST" envAlias2:"PILOT_NAME"`, "duplicate env binding"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, kind := range []string{"bool", "int", "float64", "[]string"} {
+		source := strings.Replace(sample, "Name string", "Name "+kind, 1)
+		source = strings.Replace(source, `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:"SECOND"`, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "envAlias2 requires an environment-admitted string") {
+			t.Fatalf("kind %s: %v", kind, err)
+		}
+	}
+	source := strings.Replace(flagOnlySample, `help:"Name"`, `help:"Name" envAlias2:"SECOND"`, 1)
+	if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "absent envAlias2 tag") {
+		t.Fatalf("flag-only alias accepted: %v", err)
+	}
+	first := " First string `env:\"PRIMARY\" envAlias:\"ALIAS\" envAlias2:\"SECOND\" sources:\"env\"`\n"
+	for _, binding := range []string{`env:"SECOND"`, `env:"OTHER" envAlias:"SECOND"`, `env:"OTHER" envAlias:"ANOTHER" envAlias2:"SECOND"`} {
+		second := " Other string `" + binding + " sources:\"env\"`\n"
+		for _, fields := range []string{first + second, second + first} {
+			if _, err := parseSchema([]byte("package cli\ntype PilotConfig struct{\n"+fields+"}"), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "duplicate env binding") {
+				t.Fatalf("cross-field collision accepted: %v", err)
+			}
+		}
+	}
+}
+
+func TestGenerateSecondEnvAlias(t *testing.T) {
+	source := strings.Replace(appliedSample, `envAlias:"PILOT_INPUT_ALIAS"`, `envAlias:"PILOT_INPUT_ALIAS" envAlias2:"PILOT_INPUT_SECOND"`, 1)
+	source = strings.TrimSuffix(source, "}") + " Plain string `sources:\"env\" env:\"PLAIN\" envAlias:\"PLAIN_ALIAS\" envAlias2:\"PLAIN_SECOND\"`\n}"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic aliases: %v", err)
+	}
+	for _, want := range []string{`firstNonEmptyEnv("PILOT_INPUT", "PILOT_INPUT_ALIAS", "PILOT_INPUT_SECOND")`, `cfg.Plain = getenv("PLAIN", getenv("PLAIN_ALIAS", getenv("PLAIN_SECOND", cfg.Plain)))`} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("missing ordered selection %q", want)
+		}
+	}
+	typecheckGenerated(t, source+"\nfunc firstNonEmptyEnv(...string)(string,bool){panic(\"stub\")}\n", output)
+	runAppliedFixture(t, source, output, `
+func getenv(name, prior string)string{if value:=input[name];value!=""{return value};return prior}
+func TestSecondFallback(t *testing.T){
+ for _,tc:=range []struct{primary,alias,second,want string;applied bool}{
+  {"","","","prior",false},{"","","second","second",true},{"","alias","second","alias",true},{"primary","alias","second","primary",true},
+  {" ","alias","second"," ",true},{""," ","second"," ",true},{"",""," "," ",true},{"prior","alias","second","prior",true},
+ }{
+  cfg:=PilotConfig{Input:"prior",Plain:"prior"}
+  input=map[string]string{"PILOT_INPUT":tc.primary,"PILOT_INPUT_ALIAS":tc.alias,"PILOT_INPUT_SECOND":tc.second,"PLAIN":tc.primary,"PLAIN_ALIAS":tc.alias,"PLAIN_SECOND":tc.second}
+  selections=map[string]int{};boolAccepted=false;intError=false
+  got,err:=cfg.applyEnv()
+  if err!=nil||cfg.Input!=tc.want||cfg.Plain!=tc.want||got.Input!=tc.applied||selections["PILOT_INPUT"]!=1{t.Fatalf("%+v: cfg=%+v applied=%+v err=%v",tc,cfg,got,err)}
+ }
+}
+`)
+}
+
+func TestSchemaFlagFallbackFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"empty", `default:"test"`, `flagFallback:""`, "flagFallback requires a nonempty value"},
+		{"default conflict", `help:"Name"`, `help:"Name" flagFallback:"fallback"`, "mutually exclusive"},
+		{"empty default conflict", `default:"test"`, `default:"" flagFallback:"fallback"`, "mutually exclusive"},
+		{"integer", `help:"Count"`, `help:"Count" flagFallback:"fallback"`, "flag-admitted string"},
+		{"float", `help:"CPUs"`, `help:"CPUs" flagFallback:"fallback"`, "flag-admitted string"},
+		{"bool", `help:"Enabled"`, `help:"Enabled" flagFallback:"fallback"`, "flag-admitted string"},
+		{"list", `help:"Ports"`, `help:"Ports" flagFallback:"fallback"`, "flag-admitted string"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, grant := range []string{"env", "user,repo,env", "user,env"} {
+		source := "package cli\ntype PilotConfig struct{ Name string `sources:\"" + grant + "\" env:\"NAME\" flagFallback:\"fallback\"` }"
+		if grant != "env" {
+			source = strings.Replace(source, `env:"NAME"`, `env:"NAME" config:"name"`, 1)
+		}
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "flag-admitted string") {
+			t.Fatalf("no-flag fallback %s: %v", grant, err)
+		}
+	}
+}
+
+func TestGenerateRawEmptyFlagFallback(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct { Name string `config:\"name\" env:\"NAME\" flag:\"name\" sources:\"user,repo,env,flag\" help:\"Name help\" flagFallback:\"fallback\"` }"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic flag fallback: %v", err)
+	}
+	for _, want := range []string{`const PilotConfigFlagFallbackName string = "fallback"`, `fs.String("name", blank(defaults.Name, PilotConfigFlagFallbackName), "Name help")`} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("missing registration fallback %q", want)
+		}
+	}
+	if strings.Contains(string(output), "PilotConfigDefaultName") {
+		t.Fatal("flag fallback became base default")
+	}
+	typecheckGenerated(t, source+"\nfunc blank(value, fallback string)string{if value!=\"\"{return value};return fallback}\n", output)
+	const behavior = `package cli
+import("bytes";"flag";"strings";"testing")
+func blank(value,fallback string)string{if value!=""{return value};return fallback}
+func getenv(_ string,prior string)string{return prior}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestRegistrationOnly(t *testing.T){
+ if got:=defaultPilotConfig();got.Name!=""{t.Fatalf("base config not raw zero: %+v",got)}
+ for _,tc:=range []struct{raw,want string}{{"","fallback"},{" "," "},{"custom","custom"}}{
+  cfg:=PilotConfig{Name:tc.raw};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+  if fs.Lookup("name").DefValue!=tc.want||*values.Name!=tc.want||cfg.Name!=tc.raw{t.Fatalf("registration: raw=%q cfg=%+v flag=%+v",tc.raw,cfg,fs.Lookup("name"))}
+  var help bytes.Buffer;fs.SetOutput(&help);fs.PrintDefaults();if !strings.Contains(help.String(),tc.want){t.Fatalf("help omitted fallback: %q",help.String())}
+  values.Apply(&cfg,fs);if cfg.Name!=tc.raw{t.Fatal("unvisited flag applied fallback")}
+  if err:=fs.Parse([]string{"--name="});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if cfg.Name!=""{t.Fatal("visited empty did not clear")}
+ }
+ value:="";cfg:=PilotConfig{Name:"prior"};if err:=cfg.applyFile(&filePilotConfig{Name:&value});err!=nil||cfg.Name!=""{t.Fatalf("fallback leaked into file: %+v %v",cfg,err)}
+ if err:=cfg.applyEnv();err!=nil||cfg.Name!=""{t.Fatalf("fallback leaked into env: %+v %v",cfg,err)}
+}
+`
+	runScalarFixture(t, source, output, behavior)
+}
+
+func TestSchemaFileFloatPositiveFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"empty", `help:"CPUs"`, `help:"CPUs" fileFloat:""`, "fileFloat is supported only as positive"},
+		{"unknown", `help:"CPUs"`, `help:"CPUs" fileFloat:"nonnegative"`, "fileFloat is supported only as positive"},
+		{"string", `help:"Name"`, `help:"Name" fileFloat:"positive"`, "fileFloat is supported only as positive"},
+		{"int", `help:"Count"`, `help:"Count" fileFloat:"positive"`, "fileFloat is supported only as positive"},
+		{"bool", `help:"Enabled"`, `help:"Enabled" fileFloat:"positive"`, "fileFloat is supported only as positive"},
+		{"list", `help:"Ports"`, `help:"Ports" fileFloat:"positive"`, "fileFloat is supported only as positive"},
+		{"fileInt remains int-only", `help:"CPUs"`, `help:"CPUs" fileInt:"positive" fileFloat:"positive"`, "fileInt is supported only as positive"},
+		{"empty-string policy conflict", `help:"CPUs"`, `help:"CPUs" fileIgnoreEmpty:"true" fileFloat:"positive"`, "fileIgnoreEmpty is supported only"},
+		{"nonnegative remains int-only", `help:"CPUs"`, `help:"CPUs" nonnegative:"true" fileFloat:"positive"`, "nonnegative is supported only"},
+		{"finite default retained", `default:"0.5"`, `default:"NaN" fileFloat:"positive"`, "default must be finite"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, source := range []string{
+		strings.Replace(flagOnlySample, `help:"CPUs"`, `help:"CPUs" fileFloat:"positive"`, 1),
+		"package cli\ntype PilotConfig struct{ CPUs float64 `sources:\"env,flag\" env:\"CPUS\" flag:\"cpus\" help:\"CPUs\" fileFloat:\"positive\"` }",
+	} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "fileFloat is supported only as positive") {
+			t.Fatalf("no-file float admitted: %v", err)
+		}
+	}
+}
+
+func TestGenerateFileFloatPositive(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct {\n" +
+		" First string `sources:\"user,repo,env,flag\" config:\"first\" env:\"FIRST\" flag:\"first\" help:\"First\" reportApplied:\"true\"`\n" +
+		" CPUs float64 `sources:\"user,repo,env,flag\" config:\"cpus\" env:\"CPUS\" flag:\"cpus\" help:\"CPUs\" default:\"1\"`\n" +
+		" Plain float64 `sources:\"user,repo,env,flag\" config:\"plain\" env:\"PLAIN\" flag:\"plain\" help:\"Plain\"`\n" +
+		" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\"`\n" +
+		" Tail string `sources:\"user,repo,env,flag\" config:\"tail\" env:\"TAIL\" flag:\"tail\" help:\"Tail\" reportApplied:\"true\"`\n}"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.Replace(source, `help:"CPUs"`, `help:"CPUs" fileFloat:"positive"`, 1)
+	s, err = parseSchema([]byte(input), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.fields[1].fileFloatPositive || s.fields[2].fileFloatPositive {
+		t.Fatal("wrong float opt-in")
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic float output: %v", err)
+	}
+	want := strings.Replace(string(before), "if file.CPUs != nil {", "if file.CPUs != nil && *file.CPUs > 0 {", 1)
+	if string(output) != want {
+		t.Fatal("float predicate changed other file/default/env/flag semantics")
+	}
+	typecheckGenerated(t, input+"\nfunc firstNonEmptyEnv(...string)(string,bool){panic(\"stub\")}\n", output)
+	const behavior = `package cli
+import("flag";"fmt";"testing")
+func firstNonEmptyEnv(...string)(string,bool){return "",false}
+func getenvFloat(_ string,prior float64)float64{return prior}
+func getenvNonNegativeInt(_ string,prior int)(int,error){return prior,nil}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func exit(_ int,message string)error{return fmt.Errorf("%s",message)}
+func TestFloatFileAdmission(t *testing.T){
+ first,tail,bad:="first","tail",-1
+ zero,negative,fraction,positive:=0.0,-0.5,0.25,2.0
+ for _,tc:=range []struct{name string;value *float64;want float64}{{"omitted/null",nil,1},{"zero",&zero,1},{"negative",&negative,1},{"fraction",&fraction,0.25},{"positive",&positive,2}}{
+  cfg:=defaultPilotConfig();got,err:=cfg.applyFile(&filePilotConfig{First:&first,CPUs:tc.value,Plain:&negative,Tail:&tail})
+  if err!=nil||cfg.CPUs!=tc.want||cfg.Plain!=-0.5||!got.First||!got.Tail{t.Fatalf("%s: %+v %+v %v",tc.name,cfg,got,err)}
+ }
+ cfg:=defaultPilotConfig();cfg.Count=7
+ got,err:=cfg.applyFile(&filePilotConfig{First:&first,CPUs:&fraction,Count:&bad,Tail:&tail})
+ if err==nil||cfg.CPUs!=0.25||cfg.Count!=7||!got.First||got.Tail||cfg.Tail!=""{t.Fatalf("partial order: %+v %+v %v",cfg,got,err)}
+ fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if err:=fs.Parse([]string{"--cpus=-0.5"});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs)
+ if cfg.CPUs!=-0.5{t.Fatal("file predicate affected negative flag")}
+}
+`
+	runScalarFixture(t, input, output, behavior)
 }

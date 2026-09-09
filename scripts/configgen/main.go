@@ -19,8 +19,8 @@ import (
 )
 
 type field struct {
-	name, kind, key, configAlias, env, envAlias, flag, help, defaultExpr                                                 string
-	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive bool
+	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr, flagFallbackExpr                                       string
+	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive, fileFloatPositive bool
 }
 
 type fileBinding struct {
@@ -149,7 +149,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 		case "flag":
 			f.noFile, f.noEnv = true, true
-			for _, tag := range []string{"config", "env", "envAlias"} {
+			for _, tag := range []string{"config", "env", "envAlias", "envAlias2"} {
 				if _, ok := tags.Lookup(tag); ok {
 					return s, fmt.Errorf("%s: flag sources require an absent %s tag", f.name, tag)
 				}
@@ -171,6 +171,14 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		if hasAlias {
 			f.envAlias = alias
 			bindings = append(bindings, struct{ label, value string }{"env", alias})
+		}
+		alias2, hasAlias2 := tags.Lookup("envAlias2")
+		if hasAlias2 {
+			if !hasAlias {
+				return s, fmt.Errorf("%s: envAlias2 requires envAlias", f.name)
+			}
+			f.envAlias2 = alias2
+			bindings = append(bindings, struct{ label, value string }{"env", alias2})
 		}
 		configAlias, hasConfigAlias := tags.Lookup("configAlias")
 		if hasConfigAlias {
@@ -224,6 +232,9 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 			f.fileIgnoreEmpty = true
 		}
+		if hasAlias2 && (f.kind != "string" || f.noEnv) {
+			return s, fmt.Errorf("%s: envAlias2 requires an environment-admitted string field", f.name)
+		}
 		if hasAlias && f.kind != "string" {
 			return s, fmt.Errorf("%s: envAlias is supported only for string fields", f.name)
 		}
@@ -242,11 +253,26 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 			f.fileIntPositive = true
 		}
+		if value, ok := tags.Lookup("fileFloat"); ok {
+			if value != "positive" || f.kind != "float64" || f.noFile {
+				return s, fmt.Errorf("%s: fileFloat is supported only as positive for file-admitted float64 fields", f.name)
+			}
+			f.fileFloatPositive = true
+		}
 		if value, ok := tags.Lookup("envInt"); ok {
 			if value != "fallback" || f.kind != "int" || f.noEnv || !f.nonnegative {
 				return s, fmt.Errorf("%s: envInt is supported only as fallback for environment-admitted nonnegative int fields", f.name)
 			}
 			f.envIntFallback = true
+		}
+		if value, ok := tags.Lookup("flagFallback"); ok {
+			if value == "" || f.kind != "string" || f.noFlag {
+				return s, fmt.Errorf("%s: flagFallback requires a nonempty value on a flag-admitted string field", f.name)
+			}
+			if _, hasDefault := tags.Lookup("default"); hasDefault {
+				return s, fmt.Errorf("%s: flagFallback and default are mutually exclusive", f.name)
+			}
+			f.flagFallbackExpr = strconv.Quote(value)
 		}
 		if value, ok := tags.Lookup("default"); ok {
 			f.defaultExpr, err = defaultExpression(f.kind, value)
@@ -315,6 +341,9 @@ func generate(s schema, source string) ([]byte, error) {
 		if f.defaultExpr != "" {
 			p("const %sDefault%s %s = %s\n", s.name, f.name, f.kind, f.defaultExpr)
 		}
+		if f.flagFallbackExpr != "" {
+			p("const %sFlagFallback%s string = %s\n", s.name, f.name, f.flagFallbackExpr)
+		}
 	}
 	p("\nfunc default%s() %s { return %s{\n", s.name, s.name, s.name)
 	for _, f := range s.fields {
@@ -359,7 +388,7 @@ func generate(s schema, source string) ([]byte, error) {
 			if f.fileIgnoreEmpty {
 				fileCondition += fmt.Sprintf(" && *file.%s != \"\"", binding.member)
 			}
-			if f.fileIntPositive {
+			if f.fileIntPositive || f.fileFloatPositive {
 				fileCondition += fmt.Sprintf(" && *file.%s > 0", binding.member)
 			}
 			p("if %s {\n", fileCondition)
@@ -390,10 +419,16 @@ func generate(s schema, source string) ([]byte, error) {
 				if f.envAlias != "" {
 					names += ", " + strconv.Quote(f.envAlias)
 				}
+				if f.envAlias2 != "" {
+					names += ", " + strconv.Quote(f.envAlias2)
+				}
 				p("if value, ok := firstNonEmptyEnv(%s); ok { cfg.%s = value; applied.%s = true }\n", names, f.name, f.name)
 				continue
 			}
 			fallback := "cfg." + f.name
+			if f.envAlias2 != "" {
+				fallback = fmt.Sprintf("getenv(%q, %s)", f.envAlias2, fallback)
+			}
 			if f.envAlias != "" {
 				fallback = fmt.Sprintf("getenv(%q, %s)", f.envAlias, fallback)
 			}
@@ -436,6 +471,9 @@ func generate(s schema, source string) ([]byte, error) {
 		}
 		method := map[string]string{"string": "String", "int": "Int", "float64": "Float64", "bool": "Bool", "[]string": "String"}[f.kind]
 		value := "defaults." + f.name
+		if f.flagFallbackExpr != "" {
+			value = fmt.Sprintf("blank(%s, %sFlagFallback%s)", value, s.name, f.name)
+		}
 		if f.kind == "[]string" {
 			value = "strings.Join(" + value + ", \",\")"
 		}

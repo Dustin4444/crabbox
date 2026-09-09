@@ -862,23 +862,6 @@ type TenkiConfig struct {
 	DiskGB    int
 }
 
-type TensorlakeConfig struct {
-	APIKey         string
-	APIURL         string
-	CLIPath        string
-	Image          string
-	Snapshot       string
-	OrganizationID string
-	ProjectID      string
-	Namespace      string
-	Workdir        string
-	CPUs           float64
-	MemoryMB       int
-	DiskMB         int
-	TimeoutSecs    int
-	NoInternet     bool
-}
-
 // OpenComputerConfig configures the delegated OpenComputer provider, which
 // talks to the OpenComputer REST API. The API key is intentionally absent: it
 // is read at runtime from CRABBOX_OPENCOMPUTER_API_KEY / OPENCOMPUTER_API_KEY
@@ -972,17 +955,6 @@ type ModalConfig struct {
 	Python      string
 	Environment string
 	Secrets     []string
-}
-
-type SmolvmConfig struct {
-	APIKey   string
-	BaseURL  string
-	Image    string
-	Workdir  string
-	CPUs     int
-	MemoryMB int
-	Network  string
-	Keep     bool
 }
 
 type AsciiBoxConfig struct {
@@ -1131,15 +1103,6 @@ type ParallelsHostConfig struct {
 	MaxVMs     int
 	hostSource credentialValueSource
 	keySource  credentialValueSource
-}
-
-type SemaphoreConfig struct {
-	Host        string
-	Token       string
-	Project     string
-	Machine     string
-	OSImage     string
-	IdleTimeout string
 }
 
 type SpritesConfig struct {
@@ -2859,15 +2822,8 @@ func baseConfig() Config {
 			CLIPath:  "tenki",
 			WorkRoot: "/home/tenki/crabbox",
 		},
-		Tensorlake: TensorlakeConfig{
-			APIURL:   "https://api.tensorlake.ai",
-			CLIPath:  "tensorlake",
-			Workdir:  "/workspace/crabbox",
-			CPUs:     1.0,
-			MemoryMB: 1024,
-			DiskMB:   10240,
-		},
-		Cua: defaultCuaConfig(),
+		Tensorlake: defaultTensorlakeConfig(),
+		Cua:        defaultCuaConfig(),
 		OpenComputer: OpenComputerConfig{
 			// APIURL is intentionally unset here so the `oc` config file's
 			// api_url is honored before the built-in default; the provider
@@ -2919,14 +2875,7 @@ func baseConfig() Config {
 			Python:  "python3",
 		},
 		UpstashBox: defaultUpstashBoxConfig(),
-		Smolvm: SmolvmConfig{
-			BaseURL:  "https://api.smolmachines.com",
-			Image:    "alpine",
-			Workdir:  "/workspace",
-			CPUs:     2,
-			MemoryMB: 2048,
-			Network:  "open",
-		},
+		Smolvm:     defaultSmolvmConfig(),
 		AsciiBox: AsciiBoxConfig{
 			BaseURL: "https://ascii.dev",
 			CLIPath: "box",
@@ -3849,22 +3798,6 @@ type fileTenkiConfig struct {
 	DiskGB    int    `yaml:"diskGB,omitempty"`
 }
 
-type fileTensorlakeConfig struct {
-	APIURL         string  `yaml:"apiUrl,omitempty"`
-	CLIPath        string  `yaml:"cliPath,omitempty"`
-	Image          string  `yaml:"image,omitempty"`
-	Snapshot       string  `yaml:"snapshot,omitempty"`
-	OrganizationID string  `yaml:"organizationId,omitempty"`
-	ProjectID      string  `yaml:"projectId,omitempty"`
-	Namespace      string  `yaml:"namespace,omitempty"`
-	Workdir        string  `yaml:"workdir,omitempty"`
-	CPUs           float64 `yaml:"cpus,omitempty"`
-	MemoryMB       int     `yaml:"memoryMB,omitempty"`
-	DiskMB         int     `yaml:"diskMB,omitempty"`
-	TimeoutSecs    int     `yaml:"timeoutSecs,omitempty"`
-	NoInternet     *bool   `yaml:"noInternet,omitempty"`
-}
-
 type fileOpenComputerConfig struct {
 	Workdir         string `yaml:"workdir,omitempty"`
 	CPU             *int   `yaml:"cpu,omitempty"`
@@ -3940,16 +3873,6 @@ type fileModalConfig struct {
 	Python      string   `yaml:"python,omitempty"`
 	Environment string   `yaml:"environment,omitempty"`
 	Secrets     []string `yaml:"secrets,omitempty"`
-}
-
-type fileSmolvmConfig struct {
-	BaseURL  string `yaml:"baseUrl,omitempty"`
-	Image    string `yaml:"image,omitempty"`
-	Workdir  string `yaml:"workdir,omitempty"`
-	CPUs     int    `yaml:"cpus,omitempty"`
-	MemoryMB int    `yaml:"memoryMB,omitempty"`
-	Network  string `yaml:"network,omitempty"`
-	Keep     *bool  `yaml:"keep,omitempty"`
 }
 
 type fileAsciiBoxConfig struct {
@@ -4086,15 +4009,6 @@ func positiveMinimum(current, candidate int) int {
 		return candidate
 	}
 	return min(current, candidate)
-}
-
-type fileSemaphoreConfig struct {
-	Host        string `yaml:"host,omitempty"`
-	Token       string `yaml:"token,omitempty"`
-	Project     string `yaml:"project,omitempty"`
-	Machine     string `yaml:"machine,omitempty"`
-	OSImage     string `yaml:"osImage,omitempty"`
-	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 }
 
 type fileSpritesConfig struct {
@@ -6368,45 +6282,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Tenki.DiskGB = file.Tenki.DiskGB
 		}
 	}
-	if file.Tensorlake != nil {
-		if file.Tensorlake.APIURL != "" {
-			cfg.Tensorlake.APIURL = file.Tensorlake.APIURL
+	{
+		applied, err := cfg.Tensorlake.applyFile(file.Tensorlake)
+		if applied.APIURL {
 			cfg.credentialProvenance.tensorlakeAPIURL = credentialSource
 		}
-		if file.Tensorlake.CLIPath != "" {
-			cfg.Tensorlake.CLIPath = file.Tensorlake.CLIPath
+		if err != nil {
+			return err
 		}
-		if file.Tensorlake.Image != "" {
-			cfg.Tensorlake.Image = file.Tensorlake.Image
-		}
-		if file.Tensorlake.Snapshot != "" {
-			cfg.Tensorlake.Snapshot = file.Tensorlake.Snapshot
-		}
-		if file.Tensorlake.OrganizationID != "" {
-			cfg.Tensorlake.OrganizationID = file.Tensorlake.OrganizationID
-		}
-		if file.Tensorlake.ProjectID != "" {
-			cfg.Tensorlake.ProjectID = file.Tensorlake.ProjectID
-		}
-		if file.Tensorlake.Namespace != "" {
-			cfg.Tensorlake.Namespace = file.Tensorlake.Namespace
-		}
-		if file.Tensorlake.Workdir != "" {
-			cfg.Tensorlake.Workdir = file.Tensorlake.Workdir
-		}
-		if file.Tensorlake.CPUs > 0 {
-			cfg.Tensorlake.CPUs = file.Tensorlake.CPUs
-		}
-		if file.Tensorlake.MemoryMB > 0 {
-			cfg.Tensorlake.MemoryMB = file.Tensorlake.MemoryMB
-		}
-		if file.Tensorlake.DiskMB > 0 {
-			cfg.Tensorlake.DiskMB = file.Tensorlake.DiskMB
-		}
-		if file.Tensorlake.TimeoutSecs > 0 {
-			cfg.Tensorlake.TimeoutSecs = file.Tensorlake.TimeoutSecs
-		}
-		applyOptional(&cfg.Tensorlake.NoInternet, file.Tensorlake.NoInternet)
 	}
 	if err := cfg.Cua.applyFile(file.Cua, trusted); err != nil {
 		return err
@@ -6615,27 +6498,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Smolvm != nil {
-		if file.Smolvm.BaseURL != "" {
-			cfg.Smolvm.BaseURL = file.Smolvm.BaseURL
+	{
+		applied, err := cfg.Smolvm.applyFile(file.Smolvm)
+		if applied.BaseURL {
 			cfg.credentialProvenance.smolvmBaseURL = credentialSource
 		}
-		if file.Smolvm.Image != "" {
-			cfg.Smolvm.Image = file.Smolvm.Image
+		if err != nil {
+			return err
 		}
-		if file.Smolvm.Workdir != "" {
-			cfg.Smolvm.Workdir = file.Smolvm.Workdir
-		}
-		if file.Smolvm.CPUs > 0 {
-			cfg.Smolvm.CPUs = file.Smolvm.CPUs
-		}
-		if file.Smolvm.MemoryMB > 0 {
-			cfg.Smolvm.MemoryMB = file.Smolvm.MemoryMB
-		}
-		if file.Smolvm.Network != "" {
-			cfg.Smolvm.Network = file.Smolvm.Network
-		}
-		applyOptional(&cfg.Smolvm.Keep, file.Smolvm.Keep)
 	}
 	if file.AsciiBox != nil {
 		if file.AsciiBox.BaseURL != "" {
@@ -6665,26 +6535,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		return err
 	}
 	applyCloudflareDynamicWorkersFileConfig(cfg, file.CloudflareDynamicWorkers, trusted)
-	if file.Semaphore != nil {
-		if file.Semaphore.Host != "" {
-			cfg.Semaphore.Host = file.Semaphore.Host
+	{
+		applied, err := cfg.Semaphore.applyFile(file.Semaphore)
+		if applied.Host {
 			cfg.credentialProvenance.semaphoreHost = credentialSource
 		}
-		if file.Semaphore.Token != "" {
-			cfg.Semaphore.Token = file.Semaphore.Token
+		if applied.Token {
 			cfg.credentialProvenance.semaphoreToken = credentialSource
 		}
-		if file.Semaphore.Project != "" {
-			cfg.Semaphore.Project = file.Semaphore.Project
-		}
-		if file.Semaphore.Machine != "" {
-			cfg.Semaphore.Machine = file.Semaphore.Machine
-		}
-		if file.Semaphore.OSImage != "" {
-			cfg.Semaphore.OSImage = file.Semaphore.OSImage
-		}
-		if file.Semaphore.IdleTimeout != "" {
-			cfg.Semaphore.IdleTimeout = file.Semaphore.IdleTimeout
+		if err != nil {
+			return err
 		}
 	}
 	if file.Sprites != nil {
@@ -8350,27 +8210,17 @@ func applyEnv(cfg *Config) error {
 	cfg.Tenki.CPUs = getenvInt("CRABBOX_TENKI_CPUS", cfg.Tenki.CPUs)
 	cfg.Tenki.MemoryMB = getenvInt("CRABBOX_TENKI_MEMORY_MB", cfg.Tenki.MemoryMB)
 	cfg.Tenki.DiskGB = getenvInt("CRABBOX_TENKI_DISK_GB", cfg.Tenki.DiskGB)
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_KEY", "TENSORLAKE_API_KEY"); ok {
-		cfg.Tensorlake.APIKey = value
-		cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_URL", "TENSORLAKE_API_URL"); ok {
-		cfg.Tensorlake.APIURL = value
-		cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceEnvironment
-	}
-	cfg.Tensorlake.CLIPath = getenv("CRABBOX_TENSORLAKE_CLI", cfg.Tensorlake.CLIPath)
-	cfg.Tensorlake.Image = getenv("CRABBOX_TENSORLAKE_IMAGE", cfg.Tensorlake.Image)
-	cfg.Tensorlake.Snapshot = getenv("CRABBOX_TENSORLAKE_SNAPSHOT", cfg.Tensorlake.Snapshot)
-	cfg.Tensorlake.OrganizationID = getenv("CRABBOX_TENSORLAKE_ORGANIZATION_ID", getenv("TENSORLAKE_ORGANIZATION_ID", cfg.Tensorlake.OrganizationID))
-	cfg.Tensorlake.ProjectID = getenv("CRABBOX_TENSORLAKE_PROJECT_ID", getenv("TENSORLAKE_PROJECT_ID", cfg.Tensorlake.ProjectID))
-	cfg.Tensorlake.Namespace = getenv("CRABBOX_TENSORLAKE_NAMESPACE", getenv("INDEXIFY_NAMESPACE", cfg.Tensorlake.Namespace))
-	cfg.Tensorlake.Workdir = getenv("CRABBOX_TENSORLAKE_WORKDIR", cfg.Tensorlake.Workdir)
-	cfg.Tensorlake.CPUs = getenvFloat("CRABBOX_TENSORLAKE_CPUS", cfg.Tensorlake.CPUs)
-	cfg.Tensorlake.MemoryMB = getenvInt("CRABBOX_TENSORLAKE_MEMORY_MB", cfg.Tensorlake.MemoryMB)
-	cfg.Tensorlake.DiskMB = getenvInt("CRABBOX_TENSORLAKE_DISK_MB", cfg.Tensorlake.DiskMB)
-	cfg.Tensorlake.TimeoutSecs = getenvInt("CRABBOX_TENSORLAKE_TIMEOUT_SECS", cfg.Tensorlake.TimeoutSecs)
-	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
-		cfg.Tensorlake.NoInternet = v
+	{
+		applied, err := cfg.Tensorlake.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	var err error
 	if err := cfg.Cua.applyEnv(); err != nil {
@@ -8516,21 +8366,17 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_API_KEY", "SMOLMACHINES_API_KEY", "SMK_API_KEY"); ok {
-		cfg.Smolvm.APIKey = value
-		cfg.credentialProvenance.smolvmAPIKey = credentialSourceEnvironment
-	}
-	if value := os.Getenv("CRABBOX_SMOLVM_BASE_URL"); value != "" {
-		cfg.Smolvm.BaseURL = value
-		cfg.credentialProvenance.smolvmBaseURL = credentialSourceEnvironment
-	}
-	cfg.Smolvm.Image = getenv("CRABBOX_SMOLVM_IMAGE", cfg.Smolvm.Image)
-	cfg.Smolvm.Workdir = getenv("CRABBOX_SMOLVM_WORKDIR", cfg.Smolvm.Workdir)
-	cfg.Smolvm.CPUs = getenvInt("CRABBOX_SMOLVM_CPUS", cfg.Smolvm.CPUs)
-	cfg.Smolvm.MemoryMB = getenvInt("CRABBOX_SMOLVM_MEMORY_MB", cfg.Smolvm.MemoryMB)
-	cfg.Smolvm.Network = getenv("CRABBOX_SMOLVM_NETWORK", cfg.Smolvm.Network)
-	if value, ok := getenvBool("CRABBOX_SMOLVM_KEEP"); ok {
-		cfg.Smolvm.Keep = value
+	{
+		applied, err := cfg.Smolvm.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.smolvmAPIKey = credentialSourceEnvironment
+		}
+		if applied.BaseURL {
+			cfg.credentialProvenance.smolvmBaseURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_ASCII_BOX_API_KEY", "ASCII_BOX_API_KEY"); ok {
 		cfg.AsciiBox.APIKey = value
@@ -8589,18 +8435,18 @@ func applyEnv(cfg *Config) error {
 	cfg.CloudflareDynamicWorkers.CPUMs = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS", cfg.CloudflareDynamicWorkers.CPUMs)
 	cfg.CloudflareDynamicWorkers.Subrequests = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS", cfg.CloudflareDynamicWorkers.Subrequests)
 	cfg.CloudflareDynamicWorkers.TimeoutSecs = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS", cfg.CloudflareDynamicWorkers.TimeoutSecs)
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_HOST", "SEMAPHORE_HOST"); ok {
-		cfg.Semaphore.Host = value
-		cfg.credentialProvenance.semaphoreHost = credentialSourceEnvironment
+	{
+		applied, err := cfg.Semaphore.applyEnv()
+		if applied.Host {
+			cfg.credentialProvenance.semaphoreHost = credentialSourceEnvironment
+		}
+		if applied.Token {
+			cfg.credentialProvenance.semaphoreToken = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_TOKEN", "SEMAPHORE_API_TOKEN"); ok {
-		cfg.Semaphore.Token = value
-		cfg.credentialProvenance.semaphoreToken = credentialSourceEnvironment
-	}
-	cfg.Semaphore.Project = getenv("CRABBOX_SEMAPHORE_PROJECT", getenv("SEMAPHORE_PROJECT", cfg.Semaphore.Project))
-	cfg.Semaphore.Machine = getenv("CRABBOX_SEMAPHORE_MACHINE", cfg.Semaphore.Machine)
-	cfg.Semaphore.OSImage = getenv("CRABBOX_SEMAPHORE_OS_IMAGE", cfg.Semaphore.OSImage)
-	cfg.Semaphore.IdleTimeout = getenv("CRABBOX_SEMAPHORE_IDLE_TIMEOUT", cfg.Semaphore.IdleTimeout)
 	if value, ok := firstNonEmptyEnv("CRABBOX_SPRITES_TOKEN", "SPRITES_TOKEN", "SPRITE_TOKEN", "SETUP_SPRITE_TOKEN"); ok {
 		cfg.Sprites.Token = value
 		cfg.credentialProvenance.spritesToken = credentialSourceEnvironment

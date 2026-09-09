@@ -40,6 +40,12 @@
 
 - Describe Azure Dynamic Sessions configuration bindings once, preserving positive-only YAML timeouts, legacy-pool rejection, endpoint provenance, and TTL fallback order. [PR 2017](https://github.com/openclaw/crabbox/pull/2017). Thanks @steipete.
 
+- Describe SmolVM configuration bindings once, preserving all three API-key environment names, CPU/memory source rules, endpoint checks, and existing network behavior. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
+
+- Describe Semaphore configuration bindings once, sharing effective machine, OS-image, and idle-timeout defaults without changing raw configuration values, explicit flags, or credential sources. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
+
+- Describe Tensorlake configuration bindings once, sharing API, CLI, and workdir defaults while preserving positive-only YAML sizing, environment parsing, credential sources, and native defaults. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights
