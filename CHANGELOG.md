@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Repair stale coordinator host associations against canonical lease state during pinned creation, preserving in-flight and retained instances; add admin host reservation inspection and guarded clearing. [PR 2057](https://github.com/openclaw/crabbox/pull/2057). Thanks @steipete.
+
 ### Changes
 
 - Consolidate KubeVirt settings and work-root selection without changing key-source rules, path expansion, saved-file semantics, or explicit release choices. [PR 2058](https://github.com/openclaw/crabbox/pull/2058). Thanks @steipete.

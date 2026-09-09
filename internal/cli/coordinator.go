@@ -1912,6 +1912,23 @@ func (c *CoordinatorClient) AdminDeleteLease(ctx context.Context, id string) (Co
 	return res.Lease, err
 }
 
+// AdminHostReservation reads or clears coordinator host associations without changing provider resources.
+func (c *CoordinatorClient) AdminHostReservation(ctx context.Context, region, hostID string, clear, force bool) (json.RawMessage, error) {
+	values := adminHostScopeValues(region, "")
+	if clear && force {
+		values.Set("force", "true")
+	}
+	method := http.MethodGet
+	if clear {
+		// Older coordinators dispatch any host DELETE suffix as a Dedicated Host release.
+		method = http.MethodPost
+	}
+	path := "/v1/admin/hosts/" + url.PathEscape(hostID) + "/reservation?" + values.Encode()
+	var result json.RawMessage
+	err := c.do(ctx, method, path, nil, &result)
+	return result, err
+}
+
 func (c *CoordinatorClient) AdminMacHosts(ctx context.Context, region, serverType, state string) ([]CoordinatorMacHost, error) {
 	var res struct {
 		Hosts []CoordinatorMacHost `json:"hosts"`
