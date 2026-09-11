@@ -39,6 +39,21 @@ Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
 
+Crownest's complete five-field owner is `internal/cli/config_crownest.go`.
+Its shallow file snapshot ignores a trimmed-blank URL only for application,
+without changing the persisted input. Pointer strings, zero timeout and false
+cleanup values retain their existing file semantics. Flag validation still
+runs after all visited assignments; URL validation remains provider-owned.
+
+A bool may have one `envAlias`: the primary wins when it parses, including
+false, otherwise the alias is tried with the same bool parser. The explicit
+`envInt:"checked-alias"` mode requires a nonnegative int and exactly one alias.
+It selects by raw nonempty text, parses once through the shared strict parser,
+names the selected variable on errors and preserves the old field on failure.
+Earlier accepted effects are returned; later fields are not applied. Existing
+strict and tolerant-fallback integer modes retain their distinct behavior.
+These fixed modes add no parser callbacks, trimming or general alias policy.
+
 Freestyle declares all five fields in `internal/cli/config_freestyle.go`.
 Its API key remains environment-only, and the API URL admits trusted user files
 but not repository files. Enforcing that rule in the file binding removes the
