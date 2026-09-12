@@ -7,6 +7,7 @@
 - AWS: add administrator-only legacy cleanup recovery backed by authenticated original CloudTrail allocation evidence, preserving remaining key and access cleanup and recording an atomic scope-recovery audit without force-success. [PR 1975](https://github.com/openclaw/crabbox/pull/1975).
 - AWS: complete cleanup after a verified empty instance response without skipping owned keys, bind new leases to the original account and Region, and retain unresolved historical cleanup when that authority is missing. [PR 1904](https://github.com/openclaw/crabbox/pull/1904). Thanks @vincentkoc.
 - Add a credential-free local-container quickstart skill and publish both Crabbox skills through installer discovery, with validated catalog metadata and a responsive installation guide. [PR 1911](https://github.com/openclaw/crabbox/pull/1911). Thanks @zozo123.
+- Distinguish identical fixed-ID coordinator replays of terminal leases from conflicting create intent, without repeating provider creation. [PR 1925](https://github.com/openclaw/crabbox/pull/1925). Thanks @Melbourneandrew.
 
 ## 0.57.0 - 2026-09-11
 
