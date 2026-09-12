@@ -127,6 +127,36 @@ func newTestBlacksmithBackend(cfg Config, runner CommandRunner) *blacksmithBacke
 	}
 }
 
+func TestManagedStateNativeBlacksmithBoundaries(t *testing.T) {
+	for _, route := range []string{"run", "artifact", "native handoff", "native current directory"} {
+		t.Run(route, func(t *testing.T) {
+			repo := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", filepath.Join(repo, "state-base"))
+			runner := &blacksmithFuncRunner{}
+			b := newTestBlacksmithBackend(baseConfig(), runner)
+			var err error
+			switch route {
+			case "run":
+				_, err = b.Run(t.Context(), RunRequest{Repo: Repo{Root: repo}, Command: []string{"true"}})
+			case "artifact":
+				_, _, _, err = b.runArtifactTestbox(t.Context(), RunRequest{Repo: Repo{Root: repo}}, "tbx_fixture", nil, nil, nil, time.Second)
+			case "native handoff":
+				_, _, err = b.runCommandWithSyncGuardFiltered(t.Context(), []string{"testbox", "run"}, io.Discard, io.Discard, true, repo, nil)
+			case "native current directory":
+				t.Chdir(repo)
+				_, err = b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, Command: []string{"true"}})
+			}
+			if err == nil || !strings.Contains(err.Error(), "blacksmith native sync") || len(runner.calls) != 0 {
+				t.Fatalf("err=%v native calls=%v", err, runner.calls)
+			}
+		})
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := validateBlacksmithNativeSyncScope(t.TempDir()); err != nil {
+		t.Fatalf("unset compatibility: %v", err)
+	}
+}
+
 func TestBlacksmithOrdinaryFlagMetadata(t *testing.T) {
 	for _, provider := range []string{"other", "blacksmith-testbox", " BLACKSMITH "} {
 		for _, value := range []string{"", "same", " padded "} {
@@ -784,6 +814,7 @@ func TestBlacksmithReusedRunWritesLeaseOutput(t *testing.T) {
 
 	cfg := baseConfig()
 	testOwnedBlacksmithClaim(t, "tbx_reuse123", "jade-krill", "/repo")
+	prepareBlacksmithGuestKey(t, "tbx_reuse123")
 	backend := newTestBlacksmithBackend(cfg, runner)
 	result, err := backend.Run(context.Background(), RunRequest{
 		Repo:    Repo{Root: "/repo"},
@@ -879,6 +910,7 @@ func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
 			repo := t.TempDir()
 			t.Chdir(repo)
 			const id = "tbx_stages"
+			prepareBlacksmithGuestKey(t, id)
 			testOwnedBlacksmithClaim(t, id, "stage-check", repo)
 			var script, wantStdout, wantStderr strings.Builder
 			var wantPhases = []string{"user-command"}

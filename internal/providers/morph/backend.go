@@ -85,8 +85,7 @@ func NewMorphBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) (
 func (b *morphLeaseBackend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *morphLeaseBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *morphLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
@@ -149,6 +148,9 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest
 		return core.LeaseTarget{}, err
 	}
 	leaseID := core.NewLeaseID()
+	if _, err := core.PrepareStoredTestboxKeyPath(leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	slug, err := core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, serversFromLeaseViews(instances, cfg))
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -246,6 +248,9 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest
 	server := morphServer(instance, cfg, leaseID, slug)
 	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
 		return core.LeaseTarget{LeaseID: leaseID, Server: server}, nil
+	}
+	if _, err := core.PrepareStoredTestboxKeyPath(leaseID); err != nil {
+		return core.LeaseTarget{}, err
 	}
 	var previousClaim, preflightClaim core.LeaseClaim
 	var previousClaimExists, rollbackClaim bool
@@ -929,14 +934,14 @@ func storeMorphSSHKey(leaseID string, sshKey morphSSHKey) (string, error) {
 			keyData = pem.EncodeToMemory(block)
 		}
 	}
-	path, err := core.TestboxKeyPath(leaseID)
+	path, err := core.PrepareStoredTestboxKeyPath(leaseID)
 	if err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, keyData, 0o600); err != nil {
+	if err := core.WritePreparedLeaseSSHKeyFile(path, keyData); err != nil {
 		return "", err
 	}
 	return path, nil

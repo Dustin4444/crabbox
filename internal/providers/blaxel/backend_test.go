@@ -408,7 +408,9 @@ func TestRunPreparesArchiveBeforeCreate(t *testing.T) {
 		t.Setenv("TMP", temp)
 		t.Setenv("TEMP", temp)
 		fake.updateErr = errors.New("synthetic create-label failure")
+		createCalled := false
 		fake.onCreate = func() {
+			createCalled = true
 			files, err := filepath.Glob(filepath.Join(temp, "crabbox-blaxel-sync-*.tgz"))
 			if err != nil || len(files) != 1 {
 				t.Fatalf("prepared archives at create=%v err=%v", files, err)
@@ -416,6 +418,9 @@ func TestRunPreparesArchiveBeforeCreate(t *testing.T) {
 		}
 		if _, err := b.Run(t.Context(), core.RunRequest{Repo: testRepo(t), SyncOnly: true}); err == nil {
 			t.Fatal("create failure was hidden")
+		}
+		if !createCalled {
+			t.Fatal("archive preparation failed before the expected create callback")
 		}
 		files, err := filepath.Glob(filepath.Join(temp, "crabbox-blaxel-sync-*.tgz"))
 		if err != nil || len(files) != 0 {

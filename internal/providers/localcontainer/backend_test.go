@@ -2311,7 +2311,7 @@ func resolveArchitectureFixture(t *testing.T, runtimeName, contextName, requeste
 	if err != nil {
 		t.Fatal(err)
 	}
-	inspectJSON := fmt.Sprintf(`[{"Id":%q,"Name":"/crabbox-resolve-arch","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":%q,"slug":%q,"state":"ready","runtime":%q,"ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}}]`, containerID, leaseID, slug, runtimeName)
+	inspectJSON := fmt.Sprintf(`[{"Id":%q,"Name":"/crabbox-resolve-arch","Mounts":[],"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":%q,"slug":%q,"state":"ready","runtime":%q,"ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}}]`, containerID, leaseID, slug, runtimeName)
 	prefix := []string{}
 	if contextName != "" && contextName != "default" {
 		if runtimeName == "podman" {
@@ -3898,6 +3898,7 @@ func pendingAcquireBackendWithImageFixedIntent(t *testing.T, imageFixedIntent st
 			data, err := json.Marshal([]inspectContainer{{
 				ID: "container-pending", Name: "/" + containerName, Config: inspectConfig{Image: containerRuntimeImage, Labels: labels},
 				State:           inspectState{Status: "running", Running: true},
+				Mounts:          testLocalContainerBindMounts(t, bootstrapDir),
 				NetworkSettings: inspectNetworking{Ports: map[string][]inspectPort{"2222/tcp": {{HostIP: "127.0.0.1", HostPort: "49170"}}}},
 			}})
 			return core.LocalCommandResult{Stdout: string(data)}, err
@@ -5574,6 +5575,7 @@ func TestApplyDefaultsDoesNotMaskUnsupportedTarget(t *testing.T) {
 func TestListAndResolveContainers(t *testing.T) {
 	inspectJSON := `[{
 		"Id":"abcdef1234567890",
+		"Mounts":[],
 		"Name":"/crabbox-blue",
 		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_123","slug":"blue-lobster","state":"ready","server_type":"ubuntu:24.04","ssh_user":"runner","work_root":"/workspace/crabbox"}},
 		"State":{"Status":"running","Running":true},
@@ -5927,11 +5929,9 @@ func TestFindContainerForClaimRejectsSlugOnlyMatch(t *testing.T) {
 
 func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	keyPath, err := core.TestboxKeyPath("cbx_release")
+	writeLocalContainerReleaseClaim(t, "cbx_release", "container123")
+	keyPath, err := core.PrepareStoredTestboxKeyPath("cbx_release")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
@@ -5943,7 +5943,6 @@ func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 		},
 	}
 	addDefaultLocalContainerScopeResponses(runner)
-	writeLocalContainerReleaseClaim(t, "cbx_release", "container123")
 	b := testBackend(runner)
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_release", Server: core.Server{CloudID: "container123"}}}); err != nil {
 		t.Fatal(err)
@@ -6198,6 +6197,7 @@ func TestResolveRawContainerRequiresExplicitReclaimAndPersistsBinding(t *testing
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	inspectJSON := `[{
 		"Id":"raw-container",
+		"Mounts":[],
 		"Name":"/crabbox-raw",
 		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_raw_local","slug":"raw-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},
 		"State":{"Status":"running","Running":true},
@@ -6256,7 +6256,7 @@ func TestLegacyLocalContainerClaimRequiresReclaimBeforeStop(t *testing.T) {
 	if err := core.ReplaceLeaseClaimIfUnchanged(leaseID, legacy, replacement); err != nil {
 		t.Fatal(err)
 	}
-	inspectJSON := `[{"Id":"legacy-container","Name":"/legacy-container","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_legacy_local","slug":"legacy-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox","runtime":"docker","docker_context":"stale-context","docker_endpoint":"unix:///stale.sock","docker_daemon_id":"stale-daemon"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49160"}]}}}]`
+	inspectJSON := `[{"Id":"legacy-container","Name":"/legacy-container","Mounts":[],"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_legacy_local","slug":"legacy-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox","runtime":"docker","docker_context":"stale-context","docker_endpoint":"unix:///stale.sock","docker_daemon_id":"stale-daemon"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49160"}]}}}]`
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "legacy-container\n"},
 		commandKey([]string{"inspect", "legacy-container"}):  {Stdout: inspectJSON},
@@ -6290,8 +6290,8 @@ func TestResolveReclaimDoesNotRetargetBoundLocalContainerClaim(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	addDefaultLocalContainerScopeResponses(runner)
 	writeLocalContainerReleaseClaim(t, "cbx_bound_local", "container-a")
-	inspectA := `[{"Id":"container-a","Name":"/container-a","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_stale_label","slug":"stale-label","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49156"}]}}}]`
-	inspectB := `[{"Id":"container-b","Name":"/container-b","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_bound_local","slug":"bound-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49157"}]}}}]`
+	inspectA := `[{"Id":"container-a","Name":"/container-a","Mounts":[],"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_stale_label","slug":"stale-label","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49156"}]}}}]`
+	inspectB := `[{"Id":"container-b","Name":"/container-b","Mounts":[],"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_bound_local","slug":"bound-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49157"}]}}}]`
 	runner.responses[commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"})] = core.LocalCommandResult{Stdout: "container-b\ncontainer-a\n"}
 	runner.responses[commandKey([]string{"inspect", "container-a"})] = core.LocalCommandResult{Stdout: inspectA}
 	runner.responses[commandKey([]string{"inspect", "container-b"})] = core.LocalCommandResult{Stdout: inspectB}
@@ -7611,14 +7611,22 @@ func writeLocalContainerClaimAndKey(t *testing.T, leaseID, slug string, scopes .
 func createLocalContainerTouchClaim(t *testing.T, idleTimeout time.Duration) (string, string, core.LeaseClaim, *recordingRunner) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	mountRoot := t.TempDir()
+	bootstrapRoot := filepath.Join(mountRoot, "bootstrap touch")
+	hostRoot := filepath.Join(mountRoot, "work root touch")
+	for _, root := range []string{bootstrapRoot, hostRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	leaseID := "cbx_local_touch"
 	containerID := strings.Repeat("a", 64)
 	labels := testCapturedScopeLabels(map[string]string{
-		"bootstrap_dir":   filepath.Join(os.TempDir(), "crabbox-bootstrap-touch test"),
+		"bootstrap_dir":   bootstrapRoot,
 		"container_id":    containerID[:12],
 		"crabbox":         "true",
 		"docker_socket":   "1",
-		"host_work_root":  filepath.Join(os.TempDir(), "crabbox local touch"),
+		"host_work_root":  hostRoot,
 		"image":           "ubuntu:24.04",
 		"lease":           leaseID,
 		"provider":        providerName,
@@ -7659,6 +7667,10 @@ func createLocalContainerTouchClaim(t *testing.T, idleTimeout time.Duration) (st
 
 func localContainerTouchRunner(t *testing.T, leaseID, containerID string) *recordingRunner {
 	t.Helper()
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	container := inspectContainer{
 		ID:   containerID,
 		Name: "/crabbox-local-touch",
@@ -7666,7 +7678,8 @@ func localContainerTouchRunner(t *testing.T, leaseID, containerID string) *recor
 			"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": "local-touch",
 			"state": "ready", "server_type": "ubuntu:24.04", "ssh_user": "runner", "work_root": "/workspace/crabbox touch",
 		}},
-		State: inspectState{Status: "running", Running: true},
+		State:  inspectState{Status: "running", Running: true},
+		Mounts: testLocalContainerBindMounts(t, claim.Labels["bootstrap_dir"], claim.Labels["host_work_root"]),
 		NetworkSettings: inspectNetworking{Ports: map[string][]inspectPort{
 			sshPort + "/tcp": {{HostIP: "127.0.0.1", HostPort: "49153"}},
 		}},
@@ -7754,14 +7767,11 @@ func writeLocalContainerClaimAndKeyAt(t *testing.T, leaseID, slug, scope string,
 	if err := writeLocalContainerClaim(t, leaseID, slug, scope, lastUsed, idle); err != nil {
 		t.Fatal(err)
 	}
-	keyPath, err := core.TestboxKeyPath(leaseID)
+	keyPath, err := core.PrepareStoredTestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
+	if err := core.WritePreparedLeaseSSHKeyFile(keyPath, []byte("private")); err != nil {
 		t.Fatal(err)
 	}
 	return keyPath
@@ -7789,6 +7799,154 @@ func markTestLocalContainerWorkRoot(t *testing.T, root string) {
 	t.Helper()
 	if err := markLocalContainerWorkRoot(root); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func testLocalContainerBindMounts(t *testing.T, sources ...string) json.RawMessage {
+	t.Helper()
+	mounts := make([]map[string]string, 0, len(sources))
+	for _, source := range sources {
+		mounts = append(mounts, map[string]string{"Type": "bind", "Source": source})
+	}
+	data, err := json.Marshal(mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestManagedStateNativeLocalContainerHostVolume(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.Volumes = []string{base + ":/mnt/fixture:ro"}
+	if _, _, err := b.createContainer(t.Context(), cfg, "fixture", "cbx_fixture", "fixture", "synthetic-public-marker", true); err == nil || !strings.Contains(err.Error(), "local-container host volume") || len(runner.calls) != 0 {
+		t.Fatalf("err=%v native calls=%v", err, runner.commandSummary())
+	}
+	for _, source := range []string{filepath.Join(base, "source-sibling"), "named-volume"} {
+		cfg.LocalContainer.Volumes = []string{source + ":/mnt/fixture:ro"}
+		if _, err := validateLocalContainerHostVolumes(cfg, cfg.LocalContainer.WorkRoot); err != nil {
+			t.Fatalf("unrelated source %q: %v", source, err)
+		}
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	cfg.LocalContainer.Volumes = []string{base + ":/mnt/fixture:ro"}
+	if _, err := validateLocalContainerHostVolumes(cfg, cfg.LocalContainer.WorkRoot); err != nil {
+		t.Fatalf("unset compatibility: %v", err)
+	}
+}
+
+func TestManagedStateNativeLocalContainerAutomaticWorkRootMount(t *testing.T) {
+	base := t.TempDir()
+	hostRoot := filepath.Join(base, "host-work")
+	t.Setenv("XDG_STATE_HOME", filepath.Join(hostRoot, "selected-state"))
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot, cfg.WorkRoot = hostRoot, hostRoot
+	if _, _, err := b.createContainer(t.Context(), cfg, "fixture", "cbx_fixture", "fixture", "synthetic-public-marker", true); err == nil || !strings.Contains(err.Error(), "host work-root mount") || len(runner.calls) != 0 {
+		t.Fatalf("err=%v native calls=%v", err, runner.commandSummary())
+	}
+	if _, err := os.Stat(hostRoot); !os.IsNotExist(err) {
+		t.Fatalf("host work root created before admission: %v", err)
+	}
+}
+
+func TestManagedStateNativeLocalContainerBootstrapAndSocketScopes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapRoot := localContainerBootstrapRoot()
+	if err := os.MkdirAll(bootstrapRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(bootstrapRoot, "ordinary-marker")
+	if err := os.WriteFile(marker, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", cache)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	if _, _, err := b.createContainer(t.Context(), cfg, "fixture", "cbx_fixture", "fixture", "synthetic-public-marker", true); err == nil || !strings.Contains(err.Error(), "bootstrap mount") || len(runner.calls) != 0 {
+		t.Fatalf("bootstrap admission err=%v calls=%v", err, runner.commandSummary())
+	}
+	entries, err := os.ReadDir(bootstrapRoot)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "ordinary-marker" {
+		t.Fatalf("owned empty temp cleanup changed parent: %v %v", entries, err)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "keep\n" {
+		t.Fatalf("parent marker changed: %q %v", data, err)
+	}
+	if err := validateLocalContainerHostMount("local-container Docker socket mount", filepath.Join(cache, "crabbox", "socket-marker")); err == nil {
+		t.Fatal("socket source path overlap accepted")
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(bootstrapRoot, "state-sibling"))
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "fixture-container\n"}
+	_, dir, err := b.createContainer(t.Context(), cfg, "fixture", "cbx_fixture", "fixture", "synthetic-public-marker", true)
+	if err != nil || dir == "" {
+		t.Fatalf("unrelated created bootstrap directory rejected: %v", err)
+	}
+}
+
+func TestManagedStateNativeLocalContainerRetainedMounts(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing=%t", missing), func(t *testing.T) {
+			b, runner, leaseID, _ := resolveArchitectureFixture(t, "docker", "default", core.ArchitectureAMD64, core.ArchitectureAMD64)
+			original := runner.run
+			mountedSource := os.Getenv("XDG_STATE_HOME")
+			b.cfg.LocalContainer.Volumes = []string{t.TempDir() + ":/mnt/current-config"}
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				result, err := original(req)
+				if err != nil || !slices.Contains(req.Args, "inspect") {
+					return result, err
+				}
+				var rows []map[string]any
+				if err := json.Unmarshal([]byte(result.Stdout), &rows); err != nil {
+					t.Fatal(err)
+				}
+				for _, row := range rows {
+					if missing {
+						delete(row, "Mounts")
+					} else {
+						row["Mounts"] = []map[string]string{{"Type": "bind", "Source": mountedSource, "Destination": "/mnt/original"}}
+					}
+				}
+				data, err := json.Marshal(rows)
+				if err != nil {
+					t.Fatal(err)
+				}
+				result.Stdout = string(data)
+				return result, nil
+			}
+			if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: leaseID, Prepare: true}); err == nil || !strings.Contains(err.Error(), "retained bind mount") {
+				t.Fatalf("guest access err=%v", err)
+			}
+			for _, req := range runner.calls {
+				if slices.Contains(req.Args, "exec") || slices.Contains(req.Args, "run") {
+					t.Fatalf("guest/source access preceded mount admission: %v", req.Args)
+				}
+			}
+			for _, req := range []core.ResolveRequest{{ID: leaseID, StatusOnly: true}, {ID: leaseID, ReleaseOnly: true}} {
+				if _, err := b.Resolve(t.Context(), req); err != nil {
+					t.Fatalf("control-only resolution blocked: %v", err)
+				}
+			}
+		})
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := validateLocalContainerInspectedMounts(inspectContainer{Mounts: json.RawMessage(`[]`)}); err != nil {
+		t.Fatalf("explicit empty mount inventory: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := validateLocalContainerInspectedMounts(inspectContainer{}); err != nil {
+		t.Fatalf("unset compatibility: %v", err)
 	}
 }
 

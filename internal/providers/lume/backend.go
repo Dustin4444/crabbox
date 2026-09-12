@@ -109,7 +109,9 @@ func applyDefaults(cfg *core.Config) {
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
+	if err := core.UseStoredTestboxKey(&target.SSH, leaseID); err != nil {
+		return err
+	}
 	if err := core.UseLeaseKnownHosts(&target.SSH, leaseID); err != nil {
 		return err
 	}
@@ -1633,10 +1635,12 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst lumeVM
 	}
 	server.PublicNet.IPv4.IP = inst.IPAddress
 	if claim.LeaseID != "" {
-		if keyPath, err := core.TestboxKeyPath(claim.LeaseID); err == nil {
+		if keyPath, err := core.OptionalStoredTestboxKeyPath(claim.LeaseID); err == nil {
 			if _, statErr := os.Stat(keyPath); statErr == nil {
 				cfg.SSHKey = keyPath
 			}
+		} else if !os.IsNotExist(err) {
+			return core.LeaseTarget{}, err
 		}
 	}
 	target := core.SSHTargetFromConfig(cfg, inst.IPAddress)

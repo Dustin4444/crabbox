@@ -8,7 +8,9 @@ import (
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -191,6 +193,80 @@ func (c *fakeAWSClient) CapacityDoctorChecks(context.Context, Config) []core.Doc
 
 func (c *fakeAWSClient) SpotPlacementScores(context.Context, Config) ([]ec2types.SpotPlacementScore, error) {
 	return nil, nil
+}
+
+func TestLeaseSSHAWSInvalidStateRootPreventsAcquireAndFallback(t *testing.T) {
+	for _, fixed := range []bool{false, true} {
+		mode := "ordinary"
+		if fixed {
+			mode = "fixed"
+		}
+		for _, rootKind := range []string{"relative", "regular-file"} {
+			t.Run(mode+"/"+rootKind, func(t *testing.T) {
+				dirs := testutil.IsolateUserDirs(t)
+				t.Chdir(dirs.Root)
+				selected := "relative-state"
+				wantError := "must be absolute"
+				if rootKind == "regular-file" {
+					selected = filepath.Join(dirs.Root, "state-file")
+					if err := os.WriteFile(selected, []byte("benign state-root marker\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					wantError = selected
+					if runtime.GOOS == "windows" && !fixed {
+						wantError = "private directory path contains a symlink or non-directory component"
+					}
+				}
+				t.Setenv("XDG_STATE_HOME", selected)
+				before := snapshotAWSStateFixture(t, dirs.Root)
+				fake := &fakeAWSClient{}
+				oldClient := newAWSClient
+				newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+				t.Cleanup(func() { newAWSClient = oldClient })
+				backend := NewAWSLeaseBackend(ProviderSpec{}, fixedAWSTestConfig(), Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+				req := AcquireRequest{Repo: core.Repo{Root: dirs.Root}}
+				if fixed {
+					req.RequestedLeaseID = "cbx_abcdef151607"
+				}
+				lease, err := backend.Acquire(t.Context(), req)
+				if err == nil || !strings.Contains(err.Error(), wantError) {
+					t.Fatalf("acquisition error=%v, want selected-root rejection containing %q", err, wantError)
+				}
+				if !reflect.DeepEqual(lease, LeaseTarget{}) {
+					t.Fatal("invalid state root returned an acquired lease")
+				}
+				// Both fake create entrypoints encompass instance/key provisioning;
+				// inventory/account reads are permitted but no mutation may begin.
+				if fake.createCalls != 0 || len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 || len(fake.tagged) != 0 || len(fake.validatedKeys) != 0 {
+					t.Fatal("invalid state root reached provider provisioning or cleanup")
+				}
+				if !reflect.DeepEqual(snapshotAWSStateFixture(t, dirs.Root), before) {
+					t.Fatal("invalid state root changed isolated state, default config/home, or relative fallback paths")
+				}
+			})
+		}
+	}
+}
+
+type awsStateFixtureMetadata struct {
+	Mode    os.FileMode
+	Size    int64
+	ModTime int64
+}
+
+func snapshotAWSStateFixture(t *testing.T, root string) map[string]awsStateFixtureMetadata {
+	t.Helper()
+	snapshot := make(map[string]awsStateFixtureMetadata)
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		snapshot[path] = awsStateFixtureMetadata{info.Mode(), info.Size(), info.ModTime().UnixNano()}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }
 
 func TestAWSAcquireCleansUpCreatedServerAndKeyOnIPFailure(t *testing.T) {
@@ -1440,6 +1516,36 @@ func TestAWSAcquireDoesNotDeleteProviderKeyByNameOnCreateFailure(t *testing.T) {
 	}
 }
 
+func TestLeaseSSHAWSReleaseOnlyResolveBypassesGuestKey(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	const leaseID = "cbx_0123456789ab"
+	namespace := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(namespace, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", namespace)
+	server := awsTestServer("i-release", leaseID, "release-only", "us-west-2")
+	fake := &fakeAWSClient{servers: []Server{server}}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-west-2"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	for _, id := range []string{server.CloudID, server.Labels["slug"]} {
+		t.Run(id, func(t *testing.T) {
+			lease, err := backend.Resolve(t.Context(), ResolveRequest{ID: id, ReleaseOnly: true})
+			if err != nil || lease.LeaseID != leaseID || lease.Server.CloudID != server.CloudID || lease.Server.Labels["aws_region"] != "us-west-2" {
+				t.Fatalf("release identity=%#v err=%v", lease, err)
+			}
+			if _, err := backend.Resolve(t.Context(), ResolveRequest{ID: id}); err == nil {
+				t.Fatal("guest resolution accepted the invalid generated namespace")
+			}
+		})
+	}
+	if len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatal("resolve performed provider cleanup")
+	}
+}
+
 func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	east := &fakeAWSClient{}
@@ -2373,9 +2479,7 @@ func TestAWSAcquireUsesTailscaleHostnameOnlyForStrictMode(t *testing.T) {
 func TestAWSAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 	for _, failure := range []string{"none", "instance", "key", "client"} {
 		t.Run(failure, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
-			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			testutil.IsolateUserDirs(t)
 			primary := core.Exit(5, "timed out waiting for SSH: fixture")
 			debt := errors.New("cleanup unavailable")
 			fake := &fakeAWSClient{}
