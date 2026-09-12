@@ -1174,6 +1174,10 @@ wait context, deadline, and cancellation precedence. Construct it at the
 adapter's existing resolution boundary; keep ownership validation, readiness,
 terminal states, retry policy, and status-view fields in the adapter.
 
+E2B-compatible adapters use `shared.EnvdSandboxViews` to project their common
+wire metadata. Provider identity and legacy ID prefixes stay explicit; resource
+ownership validation remains in each adapter.
+
 `Stop` should stop the provider resource, remove local claims, and remove local
 per-resource keys if the backend created them.
 
