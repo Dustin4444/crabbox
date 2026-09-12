@@ -269,7 +269,7 @@ func secureHTTPClient(source *http.Client) *http.Client {
 }
 
 func sameOrigin(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
+	return core.SameHTTPOrigin(a, b)
 }
 
 func (c *restClient) BaseURL() string { return c.base }
