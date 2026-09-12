@@ -1636,6 +1636,10 @@ func replaceLeaseClaimIfUnchangedDurableReturning(leaseID string, current, repla
 	return replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomicDurable)
 }
 
+func replaceLeaseClaimIfUnchangedDurableReturningContext(ctx context.Context, leaseID string, current, replacement leaseClaim) (leaseClaim, error) {
+	return replaceLeaseClaimTransactionContext(ctx, leaseID, current, replacement, nil, writeLeaseClaimAtomicDurable)
+}
+
 func replaceLeaseClaimIfUnchangedDurableAfter(leaseID string, current, replacement leaseClaim, action func() error) (leaseClaim, error) {
 	// This entrypoint binds replacement identity; restore/replace retain the
 	// supplied payload, including incomplete claims used by rollback.
@@ -1648,7 +1652,12 @@ func replaceLeaseClaimIfUnchangedWithWrite(leaseID string, current, replacement 
 }
 
 func replaceLeaseClaimTransaction(leaseID string, current, replacement leaseClaim, action func() error, write func(string, leaseClaim) error) (leaseClaim, error) {
+	return replaceLeaseClaimTransactionContext(context.Background(), leaseID, current, replacement, action, write)
+}
+
+func replaceLeaseClaimTransactionContext(ctx context.Context, leaseID string, current, replacement leaseClaim, action func() error, write func(string, leaseClaim) error) (leaseClaim, error) {
 	return transactLeaseClaim(leaseID, leaseClaimTransaction{
+		context:  ctx,
 		guard:    unchangedLeaseClaimGuard(leaseID, current, true),
 		action:   claimTransactionAction(action),
 		revision: claimRevisionAfterMutation,

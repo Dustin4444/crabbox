@@ -15,11 +15,22 @@ import (
 // the resource. Unlock, when set, is held through cleanup and final reporting.
 // On acquisition failure the adapter owns partial-resource rollback; Unlock is
 // still called, but no session or permission to delete is inferred from an ID.
+// Recovery explicitly reports a durable recovery claim after failed acquisition.
 type DelegatedSandbox struct {
 	LeaseID        string
 	Slug           string
 	CleanupCommand string
 	Unlock         func()
+	Recovery       *DelegatedSandboxRecovery
+}
+
+// DelegatedSandboxRecovery reports an authorized durable claim left after the
+// adapter's acquisition rollback. It is used only on Acquire error and grants
+// no permission for shared cleanup, retention, execution, or readiness.
+type DelegatedSandboxRecovery struct {
+	LeaseID        string
+	Slug           string
+	CleanupCommand string
 }
 
 // DelegatedSandboxCommand keeps command preparation (including credential
@@ -151,6 +162,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		syncPhases = []core.TimingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	}
 	acquired := req.ID == ""
+	acquireFailed := false
 	reuseAdmitted := acquired || lifecycle.AdmitReuse == nil
 	commandRan := false
 
@@ -171,7 +183,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 			cancel()
 			appendFailure(closeErr, core.ExitCodeForError(closeErr, 1))
 		}
-		if result.Session != nil {
+		if result.Session != nil && !acquireFailed {
 			shouldStop := acquired && !req.Keep
 			if retErr != nil && reuseAdmitted {
 				core.HandleDelegatedRunFailure(stderr, req, lifecycle.Provider, sandbox.LeaseID, sandbox.Slug, lifecycle.IdleTimeout, lifecycle.TTL, acquired, &shouldStop)
@@ -238,6 +250,14 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		sandbox, err = lifecycle.Resolve(ctx)
 	}
 	if err != nil {
+		acquireFailed = acquired
+		if recovery := sandbox.Recovery; acquired && recovery != nil && recovery.LeaseID != "" {
+			result.LeaseID, result.Slug = recovery.LeaseID, recovery.Slug
+			result.Session = &core.RunSessionHandle{
+				Provider: lifecycle.Provider, LeaseID: recovery.LeaseID, Slug: recovery.Slug,
+				Kept: true, CleanupCommand: recovery.CleanupCommand,
+			}
+		}
 		return result, err
 	}
 	result.LeaseID, result.Slug = sandbox.LeaseID, sandbox.Slug

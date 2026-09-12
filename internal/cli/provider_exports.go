@@ -290,6 +290,12 @@ func ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID string, current, repla
 	return replaceLeaseClaimIfUnchangedDurableReturning(leaseID, current, replacement)
 }
 
+// ReplaceLeaseClaimIfUnchangedDurableReturningContext also bounds waiting for
+// the claim fence. Existing context-free replacement APIs remain detached.
+func ReplaceLeaseClaimIfUnchangedDurableReturningContext(ctx context.Context, leaseID string, current, replacement LeaseClaim) (LeaseClaim, error) {
+	return replaceLeaseClaimIfUnchangedDurableReturningContext(ctx, leaseID, current, replacement)
+}
+
 func ReplaceLeaseClaimIfUnchangedDurableAfter(leaseID string, current, replacement LeaseClaim, action func() error) (LeaseClaim, error) {
 	return replaceLeaseClaimIfUnchangedDurableAfter(leaseID, current, replacement, action)
 }
