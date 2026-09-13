@@ -68,10 +68,10 @@ public static class CrabboxArchitecture {
  public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
 }
 '@
- [ushort]$processMachine = 0
- [ushort]$nativeMachine = 0
+ [System.UInt16]$processMachine = 0
+ [System.UInt16]$nativeMachine = 0
  if (-not [CrabboxArchitecture]::IsWow64Process2([IntPtr]::new(-1), [ref]$processMachine, [ref]$nativeMachine)) { throw 'query failed' }
- function MachineName([ushort]$machine) {
+ function MachineName([System.UInt16]$machine) {
   switch ($machine) { 34404 { 'amd64' } 43620 { 'arm64' } 332 { '386' } default { 'unknown' } }
  }
  $native = MachineName $nativeMachine
