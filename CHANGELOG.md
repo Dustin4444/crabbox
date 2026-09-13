@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Record local-container creation references, runtime image IDs, and reported repository digests in run evidence and retained inspection for Docker and Podman, preserving saved observations through bootstrap and cleanup. [PR 2202](https://github.com/openclaw/crabbox/pull/2202). Thanks @coygeek.
 - Resolve macOS managed-state paths for Unix sockets and FIFOs through bounded metadata queries without opening those entries or scanning sibling files. [PR 2207](https://github.com/openclaw/crabbox/pull/2207).
 
 - Keep portable workspace ownership exclusive when a runner's mkdir reports success after losing a directory-creation race. [PR 2201](https://github.com/openclaw/crabbox/pull/2201).
