@@ -11,6 +11,7 @@
 
 ### Fixes
 
+- Recognize AWS Tailscale endpoints in Pond peers and policy diagnostics while preserving SSH discovery for leases without Tailscale enrollment. [PR 2246](https://github.com/openclaw/crabbox/pull/2246).
 - Show help before pond release or disconnect can act, reject malformed lifecycle arguments, and preserve literal pond names and the `--` argument separator.
 - Stop replaying confirmed brokered Tailscale preparation failures while preserving exact-attempt cancellation and recovery for uncertain provider creation. [PR 2247](https://github.com/openclaw/crabbox/pull/2247).
 - Keep existing-lease operations available when creation-only sizing is invalid for Hyper-V, Multipass, Freestyle, and OpenComputer. [PR 2244](https://github.com/openclaw/crabbox/pull/2244).
