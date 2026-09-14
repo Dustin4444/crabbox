@@ -2826,14 +2826,14 @@ func TestIsloRunPreservesPlainAndLegacyReuseAdmission(t *testing.T) {
 		t.Run(strconv.FormatBool(enrolled), func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			claimIsloLegacyLease(t, isloTeardownLeaseID)
-			client := &fakeIsloSyncClient{execOut: "CRABBOX_TS_IP=100.64.7.7"}
+			client := &fakeIsloSyncClient{
+				execOut:    "CRABBOX_TS_IP=100.64.7.7",
+				getSandbox: &gosdk.SandboxResponse{Name: isloTeardownName, Status: "running"},
+			}
 			if enrolled {
 				if err := core.UpdateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", ""); err != nil {
 					t.Fatal(err)
 				}
-				client.getSandbox = &gosdk.SandboxResponse{Name: isloTeardownName, Status: "running"}
-			} else {
-				client.getSandboxErr = errors.New("plain reuse must not introduce a lookup")
 			}
 			b := newIsloTeardownBackend(t, client, io.Discard)
 			result, err := b.Run(context.Background(), core.RunRequest{ID: isloTeardownLeaseID, NoSync: true, Command: []string{"true"}})
@@ -2844,8 +2844,8 @@ func TestIsloRunPreservesPlainAndLegacyReuseAdmission(t *testing.T) {
 			if err != nil || !ok || isloClaimIdentity(claim).ID != "" {
 				t.Error("legacy claim identity was promoted or lost")
 			}
-			if !enrolled && len(client.getSandboxNames) != 0 {
-				t.Error("plain reuse added a live lookup")
+			if len(client.getSandboxNames) != 1 {
+				t.Errorf("readiness should reuse enrolled admission or perform one plain-lease lookup: %v", client.getSandboxNames)
 			}
 			if client.deleteCalls != 0 || client.createRequest != nil {
 				t.Error("reuse created or deleted a resource")

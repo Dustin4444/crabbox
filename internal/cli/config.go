@@ -525,6 +525,10 @@ type IsloConfig struct {
 	VCPUs          int
 	MemoryMB       int
 	DiskGB         int
+	// IdlePause opts a sandbox into a provider-enforced idle pause derived from
+	// IdleTimeout. Off by default: the provider adapter sends no lifecycle
+	// policy unless it is set.
+	IdlePause bool
 }
 
 type TenkiConfig struct {
@@ -2723,6 +2727,7 @@ type fileIsloConfig struct {
 	VCPUs          int    `yaml:"vcpus,omitempty"`
 	MemoryMB       int    `yaml:"memoryMB,omitempty"`
 	DiskGB         int    `yaml:"diskGB,omitempty"`
+	IdlePause      *bool  `yaml:"idlePause,omitempty"`
 }
 
 type fileTenkiConfig struct {
@@ -4652,6 +4657,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "islo", inputSource, true)
 			cfg.isloDiskGBExplicit = true
 		}
+		if file.Islo.IdlePause != nil {
+			cfg.Islo.IdlePause = *file.Islo.IdlePause
+			recordConfigInput(cfg, "islo", inputSource, true)
+		}
 	}
 	{
 		applied, err := cfg.Freestyle.applyFile(file.Freestyle, trusted)
@@ -6530,6 +6539,10 @@ func applyEnv(cfg *Config) error {
 		if _, err := strconv.Atoi(raw); err == nil {
 			cfg.isloDiskGBExplicit = true
 		}
+	}
+	if value, ok := getenvBool("CRABBOX_ISLO_IDLE_PAUSE"); ok {
+		cfg.Islo.IdlePause = value
+		recordConfigInput(cfg, "islo", configInputEnvironment, true)
 	}
 	{
 		applied, err := cfg.Freestyle.applyEnv()

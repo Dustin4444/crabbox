@@ -40,6 +40,7 @@ type isloFlagValues struct {
 	VCPUs          *int
 	MemoryMB       *int
 	DiskGB         *int
+	IdlePause      *bool
 }
 
 func RegisterIsloProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -52,6 +53,7 @@ func RegisterIsloProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 		VCPUs:          fs.Int("islo-vcpus", defaults.Islo.VCPUs, "Islo sandbox vCPUs"),
 		MemoryMB:       fs.Int("islo-memory-mb", defaults.Islo.MemoryMB, "Islo sandbox memory in MB"),
 		DiskGB:         fs.Int("islo-disk-gb", defaults.Islo.DiskGB, "Islo sandbox disk in GB"),
+		IdlePause:      fs.Bool("islo-idle-pause", defaults.Islo.IdlePause, "ask Islo to pause the sandbox after --idle-timeout of inactivity (off by default)"),
 	}
 }
 
@@ -95,6 +97,10 @@ func ApplyIsloProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) erro
 		cfg.Islo.DiskGB = *v.DiskGB
 		core.RecordProviderFlagInputs(cfg, true, isloProvider)
 		core.MarkIsloDiskGBExplicit(cfg)
+	}
+	if core.FlagWasSet(fs, "islo-idle-pause") {
+		cfg.Islo.IdlePause = *v.IdlePause
+		core.RecordProviderFlagInputs(cfg, true, isloProvider)
 	}
 	return nil
 }
@@ -243,6 +249,13 @@ func (b *isloBackend) Run(ctx context.Context, req core.RunRequest) (result core
 	}()
 
 	if !acquired {
+		// Enrolled leases already resume through their admitted readiness owner.
+		// Plain-lease resume is also post-admission so failures retain the session.
+		if tailnetAdmission == nil {
+			if _, err := b.resolveRunningSandbox(ctx, client, name, core.ResolveRequest{}); err != nil {
+				return result, err
+			}
+		}
 		meta, err := b.ensureAdmittedLeaseTailscale(ctx, client, name, slug, leaseID, tailnetAdmission, true)
 		if tailnetErrorBlocksRun(err) {
 			return result, err
@@ -618,6 +631,7 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo co
 	if b.cfg.Islo.DiskGB > 0 && (b.cfg.Islo.DiskGB != base.Islo.DiskGB || core.IsloDiskGBExplicit(b.cfg)) {
 		create.DiskGb = intValue(b.cfg.Islo.DiskGB)
 	}
+	create.Lifecycle = isloLifecycleForConfig(b.cfg)
 	sandbox, err := client.CreateSandbox(ctx, create)
 	if err != nil {
 		return "", "", "", core.LeaseClaim{}, b.unconfirmedCreateError(name, isloError("create sandbox", err))
@@ -770,6 +784,10 @@ func (b *isloBackend) resolveLeaseIDForRepo(ctx context.Context, client isloAPI,
 	}
 	if sandbox == nil || sandbox.GetName() != name {
 		return "", "", "", core.Exit(4, "islo sandbox %q was not found; refusing to create a local claim", name)
+	}
+	// Reclaim must not imply that the requested create-only policy was applied.
+	if err := isloLifecycleConflict(name, sandbox, b.cfg); err != nil {
+		return "", "", "", err
 	}
 	if _, err := b.publishIsloClaim(ctx, leaseID, slug, repoRoot, isloIdentityFromSandbox(sandbox)); err != nil {
 		return "", "", "", err
