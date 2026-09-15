@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -101,6 +102,53 @@ func TestVultrClientCreateInstanceRequestShape(t *testing.T) {
 		if req.Auth != "Bearer test-token-redact-me" {
 			t.Fatalf("%s %s auth=%q", req.Method, req.Path, req.Auth)
 		}
+	}
+}
+
+func TestVultrClientDefaultRetryDelay(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(canceled), func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if calls.Add(1) == 1 {
+					w.Header().Set("Retry-After", "1")
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			t.Setenv("VULTR_API_KEY", "fixture-key")
+			client, err := newVultrClient(core.Runtime{HTTP: server.Client()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.baseURL = server.URL
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			if canceled {
+				// Observe real response headers; keep the constructor's sleeper installed.
+				transport := client.client.Transport
+				client.client.Transport = envelopeRoundTripper(func(req *http.Request) (*http.Response, error) {
+					response, err := transport.RoundTrip(req)
+					if err == nil && response.StatusCode == http.StatusTooManyRequests {
+						cancel(errors.New("fixture cancellation cause"))
+					}
+					return response, err
+				})
+			}
+			started := time.Now()
+			err = client.do(ctx, http.MethodGet, "/fixture", nil, nil)
+			elapsed := time.Since(started)
+			if canceled {
+				if err != context.Canceled || calls.Load() != 1 {
+					t.Fatalf("canceled retry: err=%v requests=%d", err, calls.Load())
+				}
+			} else if err != nil || calls.Load() != 2 || elapsed < time.Second {
+				t.Fatalf("completed retry: err=%v requests=%d elapsed=%s", err, calls.Load(), elapsed)
+			}
+			t.Logf("real HTTP requests=%d elapsed=%s canceled=%v result=%v", calls.Load(), elapsed, canceled, err)
+		})
 	}
 }
 
