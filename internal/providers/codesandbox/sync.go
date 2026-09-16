@@ -11,7 +11,7 @@ import (
 
 func (b *codeSandboxBackend) workspace(api codeSandboxAPI, sandboxID string, req core.RunRequest, workdir string) core.ArchiveWorkspace {
 	workspace := core.NewArchiveWorkspace(b.cfg, b.rt, req, providerName, workdir)
-	workspace.RemoteArchiveDir = defaultWorkdir
+	workspace.RemoteArchiveDir = codeSandboxWorkspaceRoot
 	workspace.RemoteArchivePrefix = ".crabbox-codesandbox-sync-"
 	workspace.CleanupContext = b.cleanupContext
 	workspace.Upload = func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
@@ -20,7 +20,7 @@ func (b *codeSandboxBackend) workspace(api codeSandboxAPI, sandboxID string, req
 	workspace.Exec = func(execCtx context.Context, command string) error {
 		return b.execShell(execCtx, api, sandboxID, command)
 	}
-	if workdir == defaultWorkdir {
+	if workdir == codeSandboxWorkspaceRoot {
 		workspace.Replace = func(ctx context.Context, stagingDir, workdir string) error {
 			return b.execShell(ctx, api, sandboxID, codeSandboxMountReplaceCommand(stagingDir, workdir))
 		}
