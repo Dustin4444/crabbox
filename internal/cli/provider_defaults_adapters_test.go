@@ -4,6 +4,7 @@ package cli_test
 import (
 	_ "github.com/openclaw/crabbox/internal/providers/cloudflare"
 	_ "github.com/openclaw/crabbox/internal/providers/digitalocean"
+	_ "github.com/openclaw/crabbox/internal/providers/exedev"
 	_ "github.com/openclaw/crabbox/internal/providers/hostinger"
 	_ "github.com/openclaw/crabbox/internal/providers/lambda"
 	_ "github.com/openclaw/crabbox/internal/providers/linode"
@@ -12,7 +13,9 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/ovh"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"
 	_ "github.com/openclaw/crabbox/internal/providers/scaleway"
+	_ "github.com/openclaw/crabbox/internal/providers/smolvm"
 	_ "github.com/openclaw/crabbox/internal/providers/tencentcloud"
+	_ "github.com/openclaw/crabbox/internal/providers/upstashbox"
 	_ "github.com/openclaw/crabbox/internal/providers/vast"
 	_ "github.com/openclaw/crabbox/internal/providers/vultr"
 )
