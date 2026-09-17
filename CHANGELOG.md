@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve terminal heredocs and significant trailing whitespace in Blacksmith Testbox shell commands while retaining command output and exit status. [PR 2295](https://github.com/openclaw/crabbox/pull/2295). Thanks @shakkernerd.
+
 - Preserve local GCP lease claims during cleanup dry-runs when an instance disappears, and share the cleanup mutation boundary with Azure recovery. [PR 2297](https://github.com/openclaw/crabbox/pull/2297).
 
 - Run generated managed-runner readiness checks with POSIX sh while preserving tool, bootstrap marker, workroot, and desktop readiness checks. [PR 2296](https://github.com/openclaw/crabbox/pull/2296).
