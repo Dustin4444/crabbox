@@ -438,6 +438,23 @@ func TestStatusMapsSandboxTags(t *testing.T) {
 	}
 }
 
+type modalStatusClock struct{ now time.Time }
+
+func (c *modalStatusClock) Now() time.Time { c.now = c.now.Add(time.Second); return c.now }
+
+func TestModalStatusNonreadyTerminalWaitsForDeadline(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeModalAPI{sandbox: modalSandbox{ID: "sb-123", Status: "stopped", Tags: map[string]string{"provider": "modal", "crabbox": "true", "lease": "cbx_123", "slug": "blue-lobster"}}}
+	withFakeModalAPI(t, fake)
+	rt := testRuntime()
+	rt.Clock = &modalStatusClock{now: time.Unix(0, 0)}
+	b := NewModalBackend(Provider{}.Spec(), newTestConfig(), rt).(*modalBackend)
+	view, err := b.Status(t.Context(), core.StatusRequest{ID: "cbx_123", Wait: true, WaitTimeout: time.Nanosecond})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for modal sandbox sb-123 to become ready") || !reflect.DeepEqual(view, core.StatusView{}) {
+		t.Fatalf("view=%#v err=%v", view, err)
+	}
+}
+
 func newTestConfig() core.Config {
 	return core.Config{
 		Provider:    providerName,
