@@ -10,6 +10,7 @@
 - Bound GCP public-IP discovery to two minutes, including in-flight observations, and stop before querying when the caller has already canceled. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
 - Support the ASCII Box to Boat rename across CLI discovery, response envelopes, SSH keys, deletion operations, and secret redaction while preserving existing lease identities. [PR 2303](https://github.com/openclaw/crabbox/pull/2303). Thanks @zozo123.
 - Remove generated GCP lease SSH credentials and host-trust files after confirmed instance deletion or absence; retain the exact claim when SSH cleanup fails so cleanup can be retried. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
+- Build Apple VM cloud-init seed disks directly with the shared FAT16 writer, removing the host MS-DOS mount requirement while preserving the Firecracker and XCP-ng image formats. [PR 2343](https://github.com/openclaw/crabbox/pull/2343). Thanks @steipete.
 
 ## 0.62.0 - 2026-09-18
 
