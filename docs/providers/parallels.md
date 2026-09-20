@@ -84,6 +84,11 @@ For macOS templates, use a user with SSH login permission and a writable
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
 make sure `wsl.exe` works for the SSH user.
 
+macOS preparation checks for a local listener on the configured SSH port or an
+SSH fallback port, even when the template already has a readiness helper. This
+checks listener availability only; Crabbox still requires authenticated SSH
+readiness before accepting the lease. Linux preparation is unchanged.
+
 macOS readiness requires working `node` and `npm`, so a template does not have to
 ship them. Guest preparation settles the baseline before it checks
 `/usr/local/bin/crabbox-ready`, which means templates that already carry a
