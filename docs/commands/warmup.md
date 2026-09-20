@@ -79,6 +79,10 @@ attempt so an interrupted operation can be safely replayed.
 - `--idle-timeout <duration>` releases the lease after no touch for that long.
   Default `30m`.
 
+Tenki is an exception: kept leases are sticky and ignore TTL, and native idle
+expiry is unsupported. Use `--keep=false` to pass TTL as Tenki's maximum duration,
+which pauses the sandbox when reached. Explicitly stop the lease to destroy it.
+
 ## Naming and grouping
 
 `--slug <slug>` requests a human-chosen slug for a new lease. Crabbox normalizes

@@ -1003,3 +1003,30 @@ func sshKeyWithoutComment(value string) string {
 	fields := strings.Fields(value)
 	return strings.Join(fields[:2], " ")
 }
+
+func TestAuthoritativeKnownHostsOptionsPreserveCertificateNegotiation(t *testing.T) {
+	target := SSHTarget{User: "builder", Host: "gateway.example.test", Port: "22",
+		KnownHostsFile: "/tmp/provider_trust", AuthoritativeKnownHosts: true}
+	config, err := renderSSHTransportConfig(target, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, rendered := range map[string]string{
+		"argv":   strings.Join(sshBaseArgs(target), " "),
+		"vnc":    strings.Join(vncTunnelArgs(target, "5901", "127.0.0.1", "5900"), " "),
+		"config": config,
+	} {
+		t.Run(name, func(t *testing.T) {
+			normalized := strings.ReplaceAll(rendered, "=", " ")
+			for _, want := range []string{"StrictHostKeyChecking yes", "GlobalKnownHostsFile none", "KnownHostsCommand none",
+				"VerifyHostKeyDNS no", "UpdateHostKeys no", "CheckHostIP no", "ControlMaster no", "ControlPath none", "ControlPersist no"} {
+				if !strings.Contains(normalized, want) {
+					t.Fatalf("missing %q: %s", want, rendered)
+				}
+			}
+			if strings.Contains(rendered, "HostKeyAlias") || strings.Contains(rendered, "HostKeyAlgorithms") {
+				t.Fatalf("certificate negotiation was restricted: %s", rendered)
+			}
+		})
+	}
+}

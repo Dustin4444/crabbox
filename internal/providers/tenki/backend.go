@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	posixpath "path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -408,12 +407,8 @@ func (b *tenkiBackend) createSession(ctx context.Context, cfg core.Config, name,
 	}
 	if keep {
 		args = append(args, "--sticky")
-	}
-	if cfg.TTL > 0 {
+	} else if cfg.TTL > 0 {
 		args = append(args, "--max-duration", cfg.TTL.String())
-	}
-	if cfg.IdleTimeout > 0 {
-		args = append(args, "--idle-timeout", cfg.IdleTimeout.String())
 	}
 	if cfg.Tenki.CPUs > 0 {
 		args = append(args, "--cpu", strconv.Itoa(cfg.Tenki.CPUs))
@@ -470,7 +465,11 @@ func (b *tenkiBackend) resolveSSHTarget(ctx context.Context, cfg core.Config, se
 	if err != nil {
 		return core.SSHTarget{}, err
 	}
-	target := b.sshTarget(sshCommand)
+	knownHosts, alias, err := b.prepareSSHAuthority(ctx, cfg, sshCommand)
+	if err != nil {
+		return core.SSHTarget{}, err
+	}
+	target := b.sshTarget(sshCommand, knownHosts, alias)
 	target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
 	return target, nil
 }
@@ -846,6 +845,7 @@ type tenkiSSHCommandOutput struct {
 	IdentityFile    string `json:"identity_file"`
 	CertificateFile string `json:"certificate_file"`
 	ProxyCommand    string `json:"proxy_command"`
+	KnownHostsFile  string `json:"known_hosts_file"`
 }
 
 func (o tenkiSSHCommandOutput) validate(sessionID string) error {
@@ -870,32 +870,25 @@ func (o tenkiSSHCommandOutput) validate(sessionID string) error {
 	return nil
 }
 
-func (b *tenkiBackend) sshTarget(output tenkiSSHCommandOutput) core.SSHTarget {
+func (b *tenkiBackend) sshTarget(output tenkiSSHCommandOutput, knownHosts, alias string) core.SSHTarget {
 	port := "22"
 	if output.Port > 0 {
 		port = strconv.Itoa(output.Port)
 	}
 	return core.SSHTarget{
-		User:            core.Blank(strings.TrimSpace(output.User), "tenki"),
-		Host:            core.Blank(strings.TrimSpace(output.Host), "sandbox"),
-		Key:             output.IdentityFile,
-		CertificateFile: output.CertificateFile,
-		KnownHostsFile:  tenkiKnownHostsFile(output),
-		Port:            port,
-		TargetOS:        targetLinux,
-		NetworkKind:     networkPublic,
-		SSHConfigProxy:  true,
-		ProxyCommand:    tenkiOpenSSHProxyCommand(output.ProxyCommand),
+		User:                    core.Blank(strings.TrimSpace(output.User), "tenki"),
+		Host:                    core.Blank(strings.TrimSpace(output.Host), "sandbox"),
+		Key:                     output.IdentityFile,
+		CertificateFile:         output.CertificateFile,
+		KnownHostsFile:          knownHosts,
+		HostKeyAlias:            alias,
+		AuthoritativeKnownHosts: true,
+		Port:                    port,
+		TargetOS:                targetLinux,
+		NetworkKind:             networkPublic,
+		SSHConfigProxy:          true,
+		ProxyCommand:            tenkiOpenSSHProxyCommand(output.ProxyCommand),
 	}
-}
-
-func tenkiKnownHostsFile(output tenkiSSHCommandOutput) string {
-	dir := filepath.Dir(output.IdentityFile)
-	session := core.NormalizeLeaseSlug(output.SessionID)
-	if session == "" {
-		session = "sandbox"
-	}
-	return filepath.Join(dir, "known_hosts_"+session)
 }
 
 func tenkiOpenSSHProxyCommand(command string) string {

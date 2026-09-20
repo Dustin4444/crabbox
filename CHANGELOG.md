@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- Verify rotating Tenki gateway certificates using authoritative CLI trust or authenticated CA and gateway discovery; restore sandbox creation with current CLI lifetime flags. [PR 2341](https://github.com/openclaw/crabbox/pull/2341). Thanks @francoluxor.
 - Stop canceled terminal cleanup from waiting indefinitely for exact lease-claim locks across Tart, Coder, Modal, Namespace, and related adapters; preserve independent acquisition rollback and existing SSH-key retention policies. [PR 2363](https://github.com/openclaw/crabbox/pull/2363). Thanks @steipete.
 - Let canceled forget-missing cleanup release its operation lock in OpenSandbox, Vercel Sandbox, Crownest, and SuperServe without retiring the claim; preserve durable finalization after successful provider deletion. [PR 2365](https://github.com/openclaw/crabbox/pull/2365). Thanks @steipete.
 - Preserve generated Tart SSH credentials when failed-acquisition rollback cannot confirm ownership, delete the VM, or retire its claim; report local artifact-cleanup errors alongside the original failure. [PR 2360](https://github.com/openclaw/crabbox/pull/2360). Thanks @steipete.

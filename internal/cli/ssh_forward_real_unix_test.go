@@ -84,6 +84,11 @@ func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwar
 	if err != nil {
 		t.Fatal(err)
 	}
+	return newForwardSSHServerWithSigner(t, user, signer, allowedPorts...)
+}
+
+func newForwardSSHServerWithSigner(t *testing.T, user string, signer ssh.Signer, allowedPorts ...int) *forwardSSHServer {
+	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

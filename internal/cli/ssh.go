@@ -28,26 +28,27 @@ import (
 )
 
 type SSHTarget struct {
-	User                   string
-	Host                   string
-	SSHHostKey             string
-	Key                    string
-	CertificateFile        string
-	KnownHostsFile         string
-	HostKeyAlias           string
-	Port                   string
-	FallbackPorts          []string
-	preparedEndpoint       string
-	TargetOS               string
-	WindowsMode            string
-	ReadyCheck             string
-	AuthSecret             bool
-	NoControlMaster        bool
-	DisableHostKeyChecking bool
-	NetworkKind            NetworkMode
-	SSHConfigProxy         bool
-	ProxyCommand           string
-	ChildEnvDenylist       []string
+	User                    string
+	Host                    string
+	SSHHostKey              string
+	Key                     string
+	CertificateFile         string
+	KnownHostsFile          string
+	AuthoritativeKnownHosts bool // Provider-owned trust; recheck it for every connection.
+	HostKeyAlias            string
+	Port                    string
+	FallbackPorts           []string
+	preparedEndpoint        string
+	TargetOS                string
+	WindowsMode             string
+	ReadyCheck              string
+	AuthSecret              bool
+	NoControlMaster         bool
+	DisableHostKeyChecking  bool
+	NetworkKind             NetworkMode
+	SSHConfigProxy          bool
+	ProxyCommand            string
+	ChildEnvDenylist        []string
 	// Transport-only overrides can contain credentials; never serialize them.
 	ChildEnv map[string]string `json:"-"`
 }
@@ -881,7 +882,7 @@ func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, co
 	if err := resolveSSHPortNoInput(ctx, target, connectTimeout, connectionAttempts, stderr); err != nil {
 		return err
 	}
-	multiplexed := runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster
+	multiplexed := runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster && !target.AuthoritativeKnownHosts
 	for attempt := 0; ; attempt++ {
 		probe := *target
 		if attempt == 2 {
@@ -1316,7 +1317,7 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 		"-p", target.Port,
 	)
 	args = append(args, sshHostKeyVerificationArgs(target)...)
-	if target.AuthSecret || target.NoControlMaster {
+	if target.AuthSecret || target.NoControlMaster || target.AuthoritativeKnownHosts {
 		args = append(args,
 			"-o", "ControlMaster=no",
 			"-o", "ControlPath=none",
@@ -1359,14 +1360,14 @@ func sshHostKeyVerificationArgs(target SSHTarget) []string {
 		}
 	}
 	strictHostKeyChecking := "accept-new"
-	if target.HostKeyAlias != "" || strings.TrimSpace(target.SSHHostKey) != "" {
+	if target.HostKeyAlias != "" || strings.TrimSpace(target.SSHHostKey) != "" || target.AuthoritativeKnownHosts {
 		strictHostKeyChecking = "yes"
 	}
 	args := []string{
 		"-o", "StrictHostKeyChecking=" + strictHostKeyChecking,
 		"-o", "UserKnownHostsFile=" + sshConfigFileValue(knownHostsFile(target)),
 	}
-	if strings.TrimSpace(target.SSHHostKey) != "" {
+	if strings.TrimSpace(target.SSHHostKey) != "" || target.AuthoritativeKnownHosts {
 		args = append(args,
 			"-o", "GlobalKnownHostsFile=none",
 			"-o", "KnownHostsCommand=none",
@@ -1379,7 +1380,9 @@ func sshHostKeyVerificationArgs(target SSHTarget) []string {
 		args = append(args,
 			"-o", "HostKeyAlias="+target.HostKeyAlias,
 		)
-		args = append(args, "-o", "HostKeyAlgorithms="+sshHostKeyAlgorithms(target))
+		if !target.AuthoritativeKnownHosts {
+			args = append(args, "-o", "HostKeyAlgorithms="+sshHostKeyAlgorithms(target))
+		}
 	}
 	return args
 }
