@@ -368,45 +368,31 @@ func vastMatchingSSHKeyID(keys []vastInstanceSSHKey, publicKey string) string {
 }
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client vastAPI, id int) (vastInstance, error) {
-	budgetExpired := errors.New("Vast SSH readiness deadline exceeded")
-	waitCtx, cancel := context.WithTimeoutCause(ctx, b.pollTimeout, budgetExpired)
-	defer cancel()
-	var observationError error
-	result, err := shared.Poll(waitCtx, 0, vastPollInterval, b.sleep,
-		func(ctx context.Context) (vastInstance, error) { return client.GetInstance(ctx, id) },
-		func(_ context.Context, instance vastInstance, fetchErr error) (bool, error) {
+	return shared.PollReadiness(ctx, shared.ReadinessOptions[vastInstance]{
+		Timeout: b.pollTimeout, Interval: vastPollInterval, Sleep: b.sleep,
+		IsResponseError: func(err error) bool {
+			var apiErr *vastAPIError
+			return errors.As(err, &apiErr)
+		},
+		Check: func(instance vastInstance, fetchErr error) (bool, error) {
 			if fetchErr != nil {
-				var apiErr *vastAPIError
-				if cause := context.Cause(waitCtx); cause != nil && !errors.As(fetchErr, &apiErr) &&
-					(errors.Is(fetchErr, cause) || errors.Is(fetchErr, waitCtx.Err())) {
-					return false, errors.Join(cause, fetchErr)
-				}
-				observationError = fetchErr
 				return false, fetchErr
 			}
 			if isVastInstanceRunning(instance) && strings.TrimSpace(instance.SSHHost) != "" && instance.SSHPort > 0 {
 				return true, nil
 			}
 			if isTerminalVastStatus(instance.Status) {
-				observationError = core.Exit(5, "vast instance %d reached terminal status %s", id, instance.Status)
-				return false, observationError
+				return false, core.Exit(5, "vast instance %d reached terminal status %s", id, instance.Status)
 			}
 			return false, nil
-		}, nil)
-	if err != nil {
-		// A completed provider response retains precedence over later cancellation.
-		if observationError != nil {
-			return vastInstance{}, observationError
-		}
-		if errors.Is(err, budgetExpired) {
-			return vastInstance{}, shared.PollTerminationError(waitCtx, err, core.Exit(5, "timed out waiting for Vast instance %d to expose SSH", id))
-		}
-		if cause := context.Cause(waitCtx); cause != nil && errors.Is(err, cause) {
-			return vastInstance{}, shared.PollTerminationError(waitCtx, err, waitCtx.Err())
-		}
-		return vastInstance{}, err
-	}
-	return result.Value, nil
+		},
+		Diagnostic: func(stop shared.ReadinessStop) error {
+			if stop.BudgetExpired {
+				return core.Exit(5, "timed out waiting for Vast instance %d to expose SSH", id)
+			}
+			return stop.Err
+		},
+	}, func(ctx context.Context) (vastInstance, error) { return client.GetInstance(ctx, id) })
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
