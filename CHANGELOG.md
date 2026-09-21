@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Use Vast's native SSH endpoint and stored lease key for plain status readiness checks, avoiding false unready results while keeping observations read-only. [PR 2447](https://github.com/openclaw/crabbox/pull/2447).
+
 ## 0.64.0 - 2026-09-21
 
 ### Highlights
