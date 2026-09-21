@@ -34,6 +34,7 @@
 
 - Honor explicit idle-timeout changes in direct Parallels heartbeats while preserving the stored window when the flag is omitted. [PR 2406](https://github.com/openclaw/crabbox/pull/2406). Thanks @saariuslystoned.
 - Apple VM: persist heartbeat timestamps and explicit idle-timeout changes across fresh status reads, preserving recorded timeout and TTL policy when the flag is omitted. [PR 2413](https://github.com/openclaw/crabbox/pull/2413). Thanks @steipete.
+- Hyper-V: retain ready SSH endpoints for exactly owned leases, preserve metadata-only plain status for legacy claims, and persist heartbeat timestamps and idle-timeout overrides across fresh reads. [PR 2411](https://github.com/openclaw/crabbox/pull/2411). Thanks @steipete.
 
 ## 0.63.0 - 2026-09-20
 
