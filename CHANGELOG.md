@@ -12,6 +12,7 @@
 
 ### Fixes
 
+- Bound Vast SSH-endpoint readiness requests and retry waits by the startup deadline, preserving cancellation causes without exposing redacted transport secrets. [PR 2448](https://github.com/openclaw/crabbox/pull/2448).
 - Preserve RunPod SSH-readiness cancellation causes, distinguish startup deadlines from caller cancellation, and retain completed provider errors. [PR 2449](https://github.com/openclaw/crabbox/pull/2449).
 
 - Use EC2 instance metadata for AWS vCPU quota admission and readiness, including bare-metal types, and keep unknown instance costs out of capacity recommendations. [PR 2302](https://github.com/openclaw/crabbox/pull/2302). Thanks @vincentkoc.
