@@ -111,7 +111,7 @@ func uploadRunScript(ctx context.Context, target SSHTarget, workdir string, spec
 func remoteUploadRunScriptCommand(workdir, remotePath string) string {
 	dir := filepath.ToSlash(filepath.Dir(remotePath))
 	script := "set -eu\numask 077\n" +
-		"cd " + shellQuote(workdir) + "\n" +
+		"cd " + shellPathQuote(workdir) + "\n" +
 		"mkdir -p " + shellQuote(dir) + "\n" +
 		"cat > " + shellQuote(remotePath) + "\n" +
 		"chmod 700 " + shellQuote(remotePath) + "\n"
@@ -147,27 +147,23 @@ if ($hasBom) {
 	return PowershellCommand(script)
 }
 
-func remoteRunScriptCommandWithEnvFile(workdir string, env map[string]string, envFile string, script *RunScriptSpec, args []string) string {
-	return remoteRunScriptCommandWithEnvFiles(workdir, env, singleEnvFile(envFile), script, args)
-}
-
 func remoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, script *RunScriptSpec, args []string) string {
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
+	// Uploaded scripts retain their login startup directory semantics.
+	arguments := append([]string{script.RemotePath}, args...)
 	if script.Shebang {
-		arguments := append([]string{script.RemotePath}, args...)
 		b.WriteString(remotePortableShellInvocation(`exec "$@"`, arguments))
-		return b.String()
+	} else {
+		b.WriteString("bash -lc ")
+		b.WriteString(shellQuote(`exec bash "$@"`))
+		b.WriteString(" bash")
+		for _, argument := range arguments {
+			b.WriteByte(' ')
+			b.WriteString(shellQuote(argument))
+		}
 	}
-	b.WriteString("bash -lc ")
-	b.WriteString(shellQuote(`exec bash "$@"`))
-	b.WriteString(" bash ")
-	b.WriteString(shellQuote(script.RemotePath))
-	for _, arg := range args {
-		b.WriteByte(' ')
-		b.WriteString(shellQuote(arg))
-	}
-	return b.String()
+	return b.String() + ")"
 }
 
 func windowsRemoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, script *RunScriptSpec, args []string) string {
