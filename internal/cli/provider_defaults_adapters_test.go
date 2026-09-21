@@ -6,6 +6,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/digitalocean"
 	_ "github.com/openclaw/crabbox/internal/providers/exedev"
 	_ "github.com/openclaw/crabbox/internal/providers/hostinger"
+	_ "github.com/openclaw/crabbox/internal/providers/hyperv"
 	_ "github.com/openclaw/crabbox/internal/providers/lambda"
 	_ "github.com/openclaw/crabbox/internal/providers/linode"
 	_ "github.com/openclaw/crabbox/internal/providers/nebius"
@@ -18,4 +19,5 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/upstashbox"
 	_ "github.com/openclaw/crabbox/internal/providers/vast"
 	_ "github.com/openclaw/crabbox/internal/providers/vultr"
+	_ "github.com/openclaw/crabbox/internal/providers/windowssandbox"
 )

@@ -492,10 +492,11 @@ func TestNamespaceInstanceConfigShowRedactsEndpointCredentials(t *testing.T) {
 
 func TestConfigShowIncludesCubeSandboxWithoutSecret(t *testing.T) {
 	const secret = "cubesandbox-secret"
+	const password = "cube-fixture-passphrase"
 	cfg := baseConfig()
 	cfg.CubeSandbox = CubeSandboxConfig{
 		APIKey:        secret,
-		APIURL:        "https://user:password@cube-api.example.test/v1?token=hidden",
+		APIURL:        "https://user:" + password + "@cube-api.example.test/v1?token=hidden",
 		Domain:        "sandboxes.example.test",
 		Template:      "tpl-linux",
 		Workdir:       "/workspace/repo",
@@ -516,7 +517,7 @@ func TestConfigShowIncludesCubeSandboxWithoutSecret(t *testing.T) {
 	var text bytes.Buffer
 	writeConfigShowText(&text, cfg)
 	for name, output := range map[string]string{"json": string(jsonData), "text": text.String()} {
-		if strings.Contains(output, secret) || strings.Contains(output, "password") || strings.Contains(output, "hidden") {
+		if strings.Contains(output, secret) || strings.Contains(output, password) || strings.Contains(output, "hidden") {
 			t.Fatalf("%s config show leaked CubeSandbox secret: %s", name, output)
 		}
 		for _, want := range []string{"cube-api.example.test/v1", "sandboxes.example.test", "tpl-linux", "cubeproxy.example.test", "https"} {
