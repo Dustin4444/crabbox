@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Preserve DigitalOcean leases' stored idle timeout on ordinary heartbeats and honor explicit timeout changes without extending the creation-based TTL. [PR 2418](https://github.com/openclaw/crabbox/pull/2418).
 - Preserve canonical cancellation/deadline context and recognized release-denial states in workspace-owner error messages. [PR 2412](https://github.com/openclaw/crabbox/pull/2412). Thanks @steipete.
 - Explain Parallels IP discovery timeouts with clone mode, NIC details, and retry-time console guidance while preserving cleanup and clone defaults. [PR 2415](https://github.com/openclaw/crabbox/pull/2415), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
 - Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
