@@ -22,6 +22,7 @@
 - Report successful SSH authentication when a readiness check still times out, including real proxy routes, so diagnostics distinguish missing guest readiness from connection or authentication failures. [PR 2391](https://github.com/openclaw/crabbox/pull/2391). Thanks @saariuslystoned.
 
 - Honor explicit idle-timeout changes in direct Parallels heartbeats while preserving the stored window when the flag is omitted. [PR 2406](https://github.com/openclaw/crabbox/pull/2406). Thanks @saariuslystoned.
+- Apple VM: persist heartbeat timestamps and explicit idle-timeout changes across fresh status reads, preserving recorded timeout and TTL policy when the flag is omitted. [PR 2413](https://github.com/openclaw/crabbox/pull/2413). Thanks @steipete.
 
 ## 0.63.0 - 2026-09-20
 
