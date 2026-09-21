@@ -127,7 +127,7 @@ func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID st
 		return core.Exit(5, "Lume lease %s has no VM identity for SSH host-key binding", leaseID)
 	}
 	target.SSH.HostKeyAlias = lumeHostKeyAlias(name)
-	return requireAuthenticatedLumeHostKey(target.SSH, target.Server.Labels["state"], name)
+	return requireAuthenticatedLumeHostKey(target.SSH, target.Server.Labels, name)
 }
 
 func (b *backend) configForRun() core.Config {
@@ -420,6 +420,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, rollbackClaimedVM(updateErr)
 	}
 	persistedClaim = updatedClaim
+	core.SetServerLeaseClaimSnapshot(&lease.Server, updatedClaim, true)
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
@@ -436,6 +437,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	}
 	cfg = configForClaim(cfg, claim)
 	server := b.serverFromInstance(inst, claim, cfg)
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	lease := core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}
 	if req.ReleaseOnly {
 		if err := core.ValidateLeaseTargetProviderIdentity(lease, req.ExpectedProviderIdentity); err != nil {
@@ -443,10 +445,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 		return lease, nil
 	}
-	if req.StatusOnly {
-		if instanceRunning(inst.Status) && inst.IPAddress != "" && normalizedState(claim.Labels["state"]) == "ready" {
-			return b.prepareLease(ctx, cfg, inst, claim, false)
-		}
+	if req.StatusOnly && (!instanceRunning(inst.Status) || inst.IPAddress == "" || !completedAcquisition(claim.Labels)) {
 		return lease, nil
 	}
 	if !instanceRunning(inst.Status) {
@@ -456,10 +455,13 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" && !req.NoLocalStateMutations {
-		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
+	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	if !req.StatusOnly && req.Repo.Root != "" && !req.NoLocalStateMutations {
+		updated, err := core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(claim.LeaseID, claim.Slug, cfg, instanceScope(inst.Name), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, claim, true)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
 	}
 	return lease, nil
 }
@@ -733,18 +735,53 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
+func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	name := instanceNameFromClaim(claim)
+	if name == "" || claim.Provider != providerName || claim.ProviderScope != instanceScope(name) || claim.CloudID != name || lease.LeaseID == "" || lease.LeaseID != claim.LeaseID || lease.Server.Provider != providerName || lease.Server.CloudID != name || lease.Server.Name != name || lease.Server.ImmutableID != claim.CloudImmutableID || lease.Server.Labels["instance"] != name || lease.Server.Labels["storage"] != claim.Labels["storage"] {
+		return core.Exit(4, "lume lease %s touch identity does not match its claim", lease.LeaseID)
+	}
+	if !completedAcquisition(claim.Labels) {
+		return core.Exit(4, "lume lease %s acquisition is incomplete or requires recovery; refusing touch", lease.LeaseID)
+	}
+	storageID := strings.TrimSpace(claim.Labels["storage_id"])
+	if storageID == "" {
+		return core.Exit(4, "lume lease %s has no recorded storage identity; refusing touch", lease.LeaseID)
+	}
+	cfg := configForClaim(b.configForRun(), claim)
+	if err := verifyLumeStorageIdentity(cfg, storageID); err != nil {
+		return err
+	}
+	return b.verifyClaimedVMIdentity(cfg, lumeVM{Name: name, LocationName: cfg.Lume.Storage}, claim)
+}
+
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Server{}, err
+	}
+	req.State = normalizedState(req.State)
+	if req.State != "" && !acquiredState(req.State) {
+		return core.Server{}, core.Exit(2, "lume touch cannot publish acquisition state %q", req.State)
+	}
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider:  providerName,
+		Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(claim core.LeaseClaim) (map[string]string, time.Time) {
+			now := core.ClockNow(b.rt.Clock).UTC()
+			return core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(shared.ClaimLifecycleLabels(claim), b.configForRun(), req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
+	if err != nil {
+		return core.Server{}, err
+	}
 	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
+	server.Labels = shared.CloneLabels(updated.Labels)
+	if state := server.Labels["state"]; state != "" {
+		server.Status = state
 	}
-	original := server.Labels
-	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"base", "storage", "storage_id", "instance", "ssh_user", "ssh_port", "work_root", "run_owner_expected", "run_owner_pending", "run_launch_token", "run_owner_pid", "run_owner_started_at", "run_owner_start_identity", "run_owner_boot_identity", "run_log"} {
-		if value := strings.TrimSpace(original[key]); value != "" {
-			server.Labels[key] = value
-		}
-	}
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
@@ -1661,7 +1698,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst lumeVM
 			return core.LeaseTarget{}, err
 		}
 		target.KnownHostsFile = knownHosts
-		if err := requireAuthenticatedLumeHostKey(target, claim.Labels["state"], inst.Name); err != nil {
+		if err := requireAuthenticatedLumeHostKey(target, claim.Labels, inst.Name); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -1680,8 +1717,8 @@ func lumeHostKeyAlias(name string) string {
 	return "crabbox-lume-" + hex.EncodeToString(sum[:16])
 }
 
-func requireAuthenticatedLumeHostKey(target core.SSHTarget, state, name string) error {
-	if normalizedState(state) != "ready" {
+func requireAuthenticatedLumeHostKey(target core.SSHTarget, labels map[string]string, name string) error {
+	if !completedAcquisition(labels) {
 		return core.Exit(5, "refusing Lume SSH for VM %q before authenticated bootstrap completed", name)
 	}
 	info, err := os.Lstat(target.KnownHostsFile)
@@ -1702,8 +1739,19 @@ func requireAuthenticatedLumeHostKey(target core.SSHTarget, state, name string) 
 	return core.Exit(5, "refusing Lume SSH for VM %q without its authenticated host-key pin", name)
 }
 
+func acquiredState(state string) bool {
+	state = normalizedState(state)
+	return state == "ready" || state == "running"
+}
+
+// Acquisition publishes ready only with its final authenticated endpoint CAS;
+// running is subsequent workload activity, not the VM's provisional native state.
+func completedAcquisition(labels map[string]string) bool {
+	return acquiredState(labels["state"]) && strings.TrimSpace(labels["recovery"]) == ""
+}
+
 func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+	labels := shared.LabelsWithDefaults(shared.ClaimLifecycleLabels(claim), map[string]string{
 		"lease":       claim.LeaseID,
 		"slug":        claim.Slug,
 		"server_type": cfg.Lume.Base,
@@ -1716,7 +1764,7 @@ func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg cor
 	labels["provider"] = providerName
 	labels["instance"] = inst.Name
 	state := normalizedState(inst.Status)
-	if labels["state"] == "" || labels["state"] == "running" {
+	if labels["state"] == "" || labels["state"] == "running" || (labels["state"] == "ready" && !instanceRunning(inst.Status)) {
 		labels["state"] = state
 	}
 	if labels["storage"] == "" {

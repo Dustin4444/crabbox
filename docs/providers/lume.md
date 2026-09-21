@@ -73,3 +73,20 @@ Runtime defaults can derive `/Users/<user>/crabbox` after a guest-user change or
 inherit a custom generic work root. That user-dependent decision, native storage
 resolution, and validation remain provider-owned; the shared bindings do not read
 Lume settings or create a VM.
+
+## Heartbeat persistence
+
+Heartbeat and successful foreground touches persist last-use time and idle policy
+in the exact existing claim. `heartbeat --idle-timeout` replaces the stored
+window; omission preserves it, and the original TTL cap remains in force. Fresh
+status reads restore that policy without renewing or rewriting the lease.
+
+Renewal starts only after acquisition has committed its authenticated endpoint.
+Startup and recovery claims are retained without a heartbeat write, so concurrent
+readiness polling cannot invalidate the acquisition owner's claim revision.
+Both idle-ready and running-workload states remain renewable and usable over SSH.
+
+Renewal requires the recorded storage and immutable VM identities. Older claims
+without those bindings are retained, not adopted or silently renewed. Warm a new
+ownership-bound lease and preserve or migrate existing work before choosing to
+retire an older VM. Foreground touch failures retain the existing warning behavior.
