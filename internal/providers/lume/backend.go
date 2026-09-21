@@ -48,6 +48,13 @@ type bootstrapTrust struct {
 	Challenge string
 }
 
+func (t bootstrapTrust) sharedDir() string {
+	if t.Dir == "" {
+		return ""
+	}
+	return filepath.Join(t.Dir, "crabbox-bootstrap")
+}
+
 type lumeVM struct {
 	Name           string `json:"name"`
 	OS             string `json:"os"`
@@ -437,6 +444,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return lease, nil
 	}
 	if req.StatusOnly {
+		if instanceRunning(inst.Status) && inst.IPAddress != "" && normalizedState(claim.Labels["state"]) == "ready" {
+			return b.prepareLease(ctx, cfg, inst, claim, false)
+		}
 		return lease, nil
 	}
 	if !instanceRunning(inst.Status) {
@@ -753,7 +763,7 @@ func (b *backend) cloneVM(ctx context.Context, cfg core.Config, name string) err
 func (b *backend) startVM(ctx context.Context, cfg core.Config, name string, trust bootstrapTrust, launchToken string, onStarted ...func(lumeRunOwner) error) (lumeRunOwner, error) {
 	args := []string{"run", name, "--no-display"}
 	if trust.Dir != "" {
-		args = append(args, "--shared-dir", trust.Dir+":rw")
+		args = append(args, "--shared-dir", trust.sharedDir()+":rw")
 	}
 	if storage := strings.TrimSpace(cfg.Lume.Storage); storage != "" {
 		args = append(args, "--storage", storage)
@@ -982,9 +992,15 @@ func prepareBootstrapTrust(name, user, publicKey string) (bootstrapTrust, error)
 		_ = os.RemoveAll(dir)
 		return bootstrapTrust{}, core.Exit(2, "secure fresh Lume bootstrap trust directory %s: %v", dir, err)
 	}
+	// Lume exposes each share under its basename, even when only one is mounted.
+	trust := bootstrapTrust{Dir: dir}
+	if err := os.Mkdir(trust.sharedDir(), 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return bootstrapTrust{}, core.Exit(2, "create named Lume bootstrap share: %v", err)
+	}
 	challengeBytes := make([]byte, 32)
 	if _, err := rand.Read(challengeBytes); err != nil {
-		_ = os.Remove(dir)
+		_ = os.RemoveAll(dir)
 		return bootstrapTrust{}, core.Exit(2, "generate Lume bootstrap trust challenge: %v", err)
 	}
 	challenge := base64.RawURLEncoding.EncodeToString(challengeBytes)
@@ -994,12 +1010,13 @@ func prepareBootstrapTrust(name, user, publicKey string) (bootstrapTrust, error)
 		"authorized_key": strings.TrimSpace(publicKey) + "\n",
 	}
 	for name, value := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(trust.sharedDir(), name), []byte(value), 0o600); err != nil {
 			_ = os.RemoveAll(dir)
 			return bootstrapTrust{}, core.Exit(2, "write Lume bootstrap trust input %s: %v", name, err)
 		}
 	}
-	return bootstrapTrust{Dir: dir, Challenge: challenge}, nil
+	trust.Challenge = challenge
+	return trust, nil
 }
 
 func removeBootstrapTrust(trust bootstrapTrust) {
@@ -1012,7 +1029,7 @@ func pinBootstrapHostKey(host, hostKeyAlias string, trust bootstrapTrust, knownH
 	if net.ParseIP(host) == nil {
 		return "", fmt.Errorf("Lume returned invalid guest IP address %q", host)
 	}
-	identityPath := filepath.Join(trust.Dir, "identity")
+	identityPath := filepath.Join(trust.sharedDir(), "identity")
 	info, err := os.Lstat(identityPath)
 	if err != nil {
 		return "", err
@@ -1639,9 +1656,11 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst lumeVM
 	target.ReadyCheck = "uname -s | grep -qx Darwin && test -d \"$HOME\""
 	target.SSHConfigProxy = true
 	if claim.LeaseID != "" {
-		if err := core.UseLeaseKnownHosts(&target, claim.LeaseID); err != nil {
+		knownHosts, err := core.ExistingLeaseKnownHostsPath(claim.LeaseID)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		target.KnownHostsFile = knownHosts
 		if err := requireAuthenticatedLumeHostKey(target, claim.Labels["state"], inst.Name); err != nil {
 			return core.LeaseTarget{}, err
 		}
