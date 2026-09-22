@@ -1372,6 +1372,12 @@ release-only, and other observation requests never enter this transaction. Vast
 passes its legacy idle-policy override explicitly, while RunPod preserves the
 core's recorded policy without an override.
 
+AWS and Azure endpoint refreshes use `shared.PreserveClaimIdentityLabels` to
+retain cleanup-authority labels from the recorded claim. Observations may confirm
+or omit those values, but conflicting values are rejected and unrecorded values
+are not adopted into legacy claims. Each adapter chooses its protected keys and
+keeps resource identity validation and error diagnostics local.
+
 `Stop` should stop the provider resource, remove local claims, and remove local
 per-resource keys if the backend created them.
 
