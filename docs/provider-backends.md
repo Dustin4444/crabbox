@@ -1374,6 +1374,10 @@ E2B-compatible adapters use `shared.EnvdSandboxViews` to project their common
 wire metadata. Provider identity and legacy ID prefixes stay explicit; resource
 ownership validation remains in each adapter.
 
+Cloud Run Sandbox uses `shared.SandboxStatusView` for its public Linux sandbox
+status fields. Claim expiry, gateway ownership probes, and missing-resource
+classification remain in the adapter; ownership tokens never enter public labels.
+
 E2B and CubeSandbox use `shared.DeleteClaimedEnvdSandbox` after resolving and
 checking their exact endpoint-bound claim. The helper holds the unchanged-claim
 fence across the remote read, ownership validation, deletion, and claim removal.
