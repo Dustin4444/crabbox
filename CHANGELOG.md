@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Recover notarization upload deadlines with one bounded S3 acceleration retry or an explicit accelerated route, and require successful signer exit plus online verification before capturing a receipt. [PR 2518](https://github.com/openclaw/crabbox/pull/2518). Thanks @steipete.
 - Preserve OVH heartbeat policy, including pre-upgrade overrides, across reuse and status reads, recording activity and explicit idle-timeout changes atomically in the local lease claim. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
 - Retain OVH SSH targets for plain status readiness checks and keep both status modes out of repository admission, while preserving metadata-only observations without a public address. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
 - Bound OVH IP-readiness lookups and retry waits with an elapsed-time deadline, preserving caller cancellation causes and provider error precedence. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
