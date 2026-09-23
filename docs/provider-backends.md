@@ -300,7 +300,17 @@ an empty list or matching display name grants no authority.
 `core.DeleteFixedResource` keeps claim comparison, native proof, and terminal
 publication under one durable claim lock. Existing shared claim resolvers and
 native cleanup graphs remain reusable; a deletion callback must prove completion,
-not merely request admission. `FixedLeaseKind.AfterTerminal`, when needed, cleans
+not merely request admission. Formats with a `FixedLeaseKind.DeletionState`
+persist their cleanup marker and the `deleting` journal phase before native
+deletion. By default, formats without that state leave the exact durable claim
+and bound evidence unchanged at deletion admission. An adapter whose deletion
+depends on captured recovery identities opts into `FixedReleasePolicy.PersistBinding`:
+core journals supplied observation or release bindings before calling `DeleteExact`,
+retaining them if native cleanup fails. Adapters may still persist native
+cleanup acknowledgements through their existing witness contract. Existing
+deletion markers block acquisition replay and retain their admitted status on
+stale retries.
+`FixedLeaseKind.AfterTerminal`, when needed, cleans
 local lease artifacts after durable terminal publication while retaining that
 same claim fence. Native absence-only recovery is a separate proof path.
 Cleanup callers can request `FixedReleasePolicy.Started` to distinguish a stale

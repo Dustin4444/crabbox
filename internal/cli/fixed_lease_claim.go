@@ -14,6 +14,8 @@ type FixedLeaseKind struct {
 	IntentVersion           int
 	Label                   string
 	// DeletionState retains native validators' existing on-disk cleanup marker.
+	// Empty preserves the claim at admission unless the release policy requests
+	// binding persistence.
 	DeletionState  string
 	ResourcePlural string
 	// AfterTerminal cleans local lease-owned artifacts under the claim fence,

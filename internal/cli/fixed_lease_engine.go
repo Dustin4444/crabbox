@@ -151,6 +151,9 @@ const (
 )
 
 type FixedReleasePolicy struct {
+	// PersistBinding journals supplied cleanup bindings before native deletion,
+	// including for formats without a legacy deletion state.
+	PersistBinding bool
 	// Started distinguishes rejection by the ownership fence from failure after
 	// deletion admission. Cleanup must skip a freshly reclaimed candidate.
 	Started                 *bool
@@ -334,7 +337,13 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 	}
 	// An earlier durable admission stays started even if this invocation cannot
 	// regain the fence. Never downgrade its failure into a harmless cleanup skip.
-	markStarted(kind.DeletionState != "" && kind.IsFixedClaim(expected) && expected.FixedCreateIntent.State == kind.DeletionState)
+	previouslyStarted := false
+	if kind.IsFixedClaim(expected) {
+		intent := expected.FixedCreateIntent
+		previouslyStarted = (kind.DeletionState != "" && intent.State == kind.DeletionState) ||
+			(intent.Journal != nil && intent.Journal.Phase == "deleting")
+	}
+	markStarted(previouslyStarted)
 	if !kind.IsFixedClaim(expected) || expected.FixedCreateIntent.Version != kind.IntentVersion {
 		return Exit(4, "lease_id_conflict: fixed deletion has no matching ownership dialect")
 	}
@@ -408,9 +417,6 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 			if err := tx.applyBinding(*observed.Binding); err != nil {
 				return err
 			}
-			if err := tx.Record("deleting"); err != nil {
-				return err
-			}
 		}
 		if len(observed.Candidates) == 0 {
 			if !observed.AbsenceProven {
@@ -424,10 +430,15 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 		}
 		if kind.DeletionState != "" {
 			claim.FixedCreateIntent.State = kind.DeletionState
+		}
+		persistBinding := policy != nil && policy.PersistBinding && (observed.Binding != nil || policy.Binding != nil)
+		if kind.DeletionState != "" || persistBinding {
 			if err := tx.Record("deleting"); err != nil {
 				return err
 			}
 		}
+		// Otherwise admission leaves durable custody unchanged; adapters may
+		// still record native cleanup acknowledgements.
 		// All ownership checks and durable deletion-entry writes have passed;
 		// failures from this point must retain/report the admitted cleanup.
 		markStarted(true)
