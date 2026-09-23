@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add `egress run` to own proxy setup, remote execution, and session cleanup for one job, with optional HTTP(S) upstream chaining that keeps credentials on the host and never falls back to direct egress; `egress stop --session` supports scoped cleanup and prevents late startup. [PR 2506](https://github.com/openclaw/crabbox/pull/2506).
+
 ### Fixes
 
 - Finish Blaxel multipart producers before retrying or releasing borrowed archives, preserving HTTP error precedence and early-success uploads. [PR 2505](https://github.com/openclaw/crabbox/pull/2505). Thanks @steipete.
