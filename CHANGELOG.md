@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixes
+
+- Reject overflowing Nomad, Agent Sandbox, and Superserve execution timeouts before provider dispatch while preserving disabled deadlines, service defaults, and caller cancellation. [PR 2503](https://github.com/openclaw/crabbox/pull/2503). Thanks @steipete.
+
 ## 0.65.0 - 2026-09-22
 
 ### Highlights
