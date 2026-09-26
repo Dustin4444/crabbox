@@ -436,7 +436,42 @@ does not fall back to another sync method. An already-blocked filesystem
 operation must return before cancellation can be observed. Cleanup failures
 retain their diagnostic path and error cause.
 Both operations read regular files within their observed sizes and verify that
-the file identity and metadata still match. Stable fingerprint encoding is unchanged.
+the file identity and metadata still match.
+
+On Linux and macOS, snapshot preparation hashes each source file while copying
+it and reuses that digest for subsequent checks only when a fresh stat matches
+the device/inode identity, size, mode, nanosecond mtime and ctime. The temporary
+copy is hashed independently, and final acceptance always rereads the live file
+contents without using the cache. This matters for already-dirty memory mappings,
+which can change bytes without advancing either timestamp. A size-preserving edit with a
+restored mtime, inode replacement, or mode change invalidates the cached digest.
+Other controller platforms retain content reads at each verification step.
+The digest cache is private to one snapshot operation, lives only in memory,
+and disappears when preparation ends; there is no on-disk cache to clear.
+Cancellation and retries still validate the complete manifest, index, exclusions,
+and source state. Snapshot parent checks cover the current write's ancestry and
+recheck all retained directories before accepting the snapshot.
+
+Local seeding constructs the manifest once per snapshot attempt and passes it
+through copying and fingerprint verification. It captures the manifest's Git
+inputs before preparation and again after the final uncached content read;
+different inputs cause a clean retry, never reuse of a stale file list. Both
+captures check the repository root, global-ignore setting, sparse setting,
+cached/untracked file list, worktree deletions, staged deletion preimages, index
+entries/flags/stages and HEAD. The index and HEAD close each capture. Complete
+history transfer also requires one immutable HEAD-tree check for gitlinks.
+This is 17 Git invocations for an ordinary checkout instead of 50; sparse
+checkouts additionally query their rules at initial and final validation.
+File membership is re-enumerated, but manifest projection, exclusion processing
+and size accounting are not repeated. Selected paths are checked again for
+symlink ancestors before final content acceptance. Managed-state boundaries,
+ordered excludes and sparse hidden-path checks still apply.
+
+Local-seed and overlay fingerprint formats are versioned to incorporate file
+digests; the first sync after upgrading refreshes their remote fingerprint.
+Ordinary origin/file sync retains its existing fingerprint format and transfer
+behavior. A workload can modify remote files, so the complete ordinary manifest
+is still sent to rsync on the next run, even when the local dirty set is small.
 
 The bundle contains the complete selected HEAD and base histories, plus locally
 present tags that peel to those histories. An explicit `sync.baseRef` must resolve
