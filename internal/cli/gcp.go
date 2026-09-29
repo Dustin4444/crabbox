@@ -88,6 +88,31 @@ func newGCPClientWithOptions(ctx context.Context, cfg Config, opts ...option.Cli
 	}, nil
 }
 
+// Hyperdisk-only series: https://docs.cloud.google.com/compute/docs/general-purpose-machines
+// https://docs.cloud.google.com/compute/docs/compute-optimized-machines
+// https://docs.cloud.google.com/compute/docs/memory-optimized-machines
+// https://docs.cloud.google.com/compute/docs/network-optimized-machines
+// https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines
+// https://docs.cloud.google.com/compute/docs/storage-optimized-machines
+// Keep worker/src/config.ts in sync; its parity test reads this canonical set.
+var gcpHyperdiskOnlyFamilies = map[string]struct{}{
+	"a3-ultragpu": {}, "a4": {}, "a4x": {}, "c4": {}, "c4a": {}, "c4d": {}, "c4n": {},
+	"g4": {}, "h4d": {}, "m4": {}, "m4n": {}, "n4": {}, "n4a": {}, "n4d": {},
+	"x4": {}, "x5": {}, "z4d": {},
+}
+
+func gcpBootDiskType(machineType string) string {
+	name := machineType[strings.LastIndex(machineType, "/")+1:]
+	family, rest, _ := strings.Cut(strings.ToLower(name), "-")
+	variant, _, _ := strings.Cut(rest, "-")
+	_, familyOnly := gcpHyperdiskOnlyFamilies[family]
+	_, variantOnly := gcpHyperdiskOnlyFamilies[family+"-"+variant]
+	if familyOnly || variantOnly {
+		return "hyperdisk-balanced"
+	}
+	return "pd-balanced"
+}
+
 func gcpMachineTypeCandidatesForClass(class string) []string {
 	cfg := Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class, architectureExplicit: true}
 	return GCPMachineTypeCandidatesForConfig(cfg)
@@ -197,7 +222,7 @@ func (c *GCPClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 			InitializeParams: &computepb.AttachedDiskInitializeParams{
 				SourceImage: proto.String(c.Image),
 				DiskSizeGb:  proto.Int64(c.RootGB),
-				DiskType:    proto.String(fmt.Sprintf("zones/%s/diskTypes/pd-balanced", c.Zone)),
+				DiskType:    proto.String(fmt.Sprintf("zones/%s/diskTypes/%s", c.Zone, gcpBootDiskType(cfg.ServerType))),
 			},
 		}},
 		NetworkInterfaces: []*computepb.NetworkInterface{{
@@ -634,7 +659,15 @@ func isGCPFallbackProvisioningError(err error) bool {
 	s := strings.ToLower(err.Error())
 	return isGCPQuotaOrCapacityMessage(s) ||
 		isGCPUnavailableMachineTypeMessage(s) ||
+		isGCPDiskMachineIncompatibilityMessage(s) ||
 		strings.Contains(s, "try again")
+}
+
+func isGCPDiskMachineIncompatibilityMessage(message string) bool {
+	s := strings.ToLower(message)
+	disk := strings.Contains(s, "disk type") || strings.Contains(s, "disktype") || strings.Contains(s, "disktypes/")
+	machine := strings.Contains(s, "machine type") || strings.Contains(s, "machinetype")
+	return disk && machine && (strings.Contains(s, "cannot be used") || strings.Contains(s, "not supported") || strings.Contains(s, "unsupported") || strings.Contains(s, "does not support"))
 }
 
 func isGCPQuotaOrCapacityError(apiErr *googleapi.Error) bool {
