@@ -13,6 +13,10 @@
 ### Added
 - Expose bounded coordinator admission and provider preparation step durations in lease creation events and timing JSON, including repeated-call and failure counts without provider payloads.
 
+### Fixes
+
+- Default Parallels macOS guests on Apple silicon to full clones, warn before explicitly selected linked clones about observed IP/Tools failures, and clarify snapshot-clearing guidance while retaining linked defaults elsewhere. [PR 2606](https://github.com/openclaw/crabbox/pull/2606), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
+
 ## 0.68.0 - 2026-09-28
 
 ### Highlights
